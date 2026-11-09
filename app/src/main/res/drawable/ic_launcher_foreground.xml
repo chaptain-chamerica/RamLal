@@ -1,8 +1,61 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/ic_ramlal_icon"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="1.3"
+        android:scaleY="1.3"
+        android:translateX="22.8"
+        android:translateY="22.8">
+        <!-- Notebook cover -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:strokeColor="#FF000000"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M10.5,5 h28 a2.5,2.5 0 0,1 2.5,2.5 v33 a2.5,2.5 0 0,1 -2.5,2.5 h-28 a2.5,2.5 0 0,1 -2.5,-2.5 v-33 a2.5,2.5 0 0,1 2.5,-2.5 z" />
+        <!-- Index tabs divider and tab separators -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FF000000"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M32,5 v38 M32,14 h9 M32,24 h9 M32,34 h9" />
+        <!-- Label plate box on front cover -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FF000000"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M15.5,11 h10 a1.5,1.5 0 0,1 1.5,1.5 v7 a1.5,1.5 0 0,1 -1.5,1.5 h-10 a1.5,1.5 0 0,1 -1.5,-1.5 v-7 a1.5,1.5 0 0,1 1.5,-1.5 z" />
+        <!-- Writing lines inside label box -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FF000000"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M17,14.5 h7 M17,17.5 h5" />
+        <!-- Ruled lines on lower cover -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FF000000"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M14,28 h13 M14,33 h11" />
+        <!-- Spiral ring loops -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:strokeColor="#FF000000"
+            android:strokeWidth="1.6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M8,10 H5 a2,2 0 0,0 0,4 H8 z M8,16 H5 a2,2 0 0,0 0,4 H8 z M8,22 H5 a2,2 0 0,0 0,4 H8 z M8,28 H5 a2,2 0 0,0 0,4 H8 z M8,34 H5 a2,2 0 0,0 0,4 H8 z" />
+    </group>
+</vector>

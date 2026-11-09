@@ -157,12 +157,13 @@ private fun DiaryRow(vm: AppViewModel, log: DiaryLog) {
                 Text(preview, style = proseStyle(14.sp, w.text.copy(alpha = 0.65f)), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
             }
             Column(Modifier.padding(top = 5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("Created: ${log.dateStamp} · ${log.timeStamp}", style = monoStyle(11.sp, w.muted))
+                val timestampStyle = monoStyle(11.sp, w.muted.copy(alpha = 0.78f))
+                Text("Created: ${log.dateStamp} · ${log.timeStamp}", style = timestampStyle)
                 val rem = log.reminderAt
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Modified: ${log.updatedDateStamp} · ${log.updatedTimeStamp}", style = monoStyle(11.sp, w.muted))
+                    Text("Modified: ${log.updatedDateStamp} · ${log.updatedTimeStamp}", style = timestampStyle)
                     if (rem != null && rem > System.currentTimeMillis()) {
-                        Text(" · ", style = monoStyle(11.sp, w.muted))
+                        Text(" · ", style = timestampStyle)
                         Icon(Icons.Outlined.NotificationsActive, null, tint = w.accent, modifier = Modifier.size(12.dp))
                         Spacer(Modifier.width(3.dp))
                         Text(fmtTime(rem), style = monoStyle(11.sp, w.accent))
@@ -204,33 +205,43 @@ private fun MenuItem(icon: androidx.compose.ui.graphics.vector.ImageVector, labe
 @Composable
 fun PfpAvatar(pfp: Pfp?, size: Dp, modifier: Modifier = Modifier) {
     val w = wiki()
-    Box(
-        modifier = modifier
-            .size(size)
-            .background(if (pfp == null || (pfp.source == null && pfp.text.isNullOrBlank())) Color(0xFF1E293B) else Color(pfp.bgColor))
-            .wikiBorder(w.border, 0.5.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        when {
-            pfp == null || (pfp.source == null && pfp.text.isNullOrBlank()) -> {
-                Image(
-                    painter = painterResource(R.drawable.ic_ramlal_icon),
-                    contentDescription = "App Icon",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
+    if (pfp == null || (pfp.source == null && pfp.text.isNullOrBlank())) {
+        Box(
+            modifier = modifier
+                .size(size)
+                .background(Color.White)
+                .wikiBorder(w.border, 0.5.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = painterResource(R.drawable.ic_ramlal_icon),
+                contentDescription = "App Icon",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        }
+    } else {
+        Box(
+            modifier = modifier
+                .size(size)
+                .background(Color(pfp.bgColor))
+                .wikiBorder(w.border, 0.5.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (pfp.source != null) {
+                Icon(Icons.Outlined.Image, null, tint = Color.White, modifier = Modifier.size(size / 2))
+            } else {
+                Text(
+                    pfp.text.orEmpty(),
+                    style = androidx.compose.ui.text.TextStyle(
+                        fontFamily = WikiFonts.serif,
+                        fontWeight = FontWeight.Normal,
+                        color = Color(pfp.textColor),
+                        fontSize = (size.value * 0.45f * pfp.textScale).sp,
+                    ),
+                    maxLines = 1,
                 )
             }
-            pfp.source != null -> Icon(Icons.Outlined.Image, null, tint = Color.White, modifier = Modifier.size(size / 2))
-            else -> Text(
-                pfp.text.orEmpty(),
-                style = androidx.compose.ui.text.TextStyle(
-                    fontFamily = WikiFonts.serif,
-                    fontWeight = FontWeight.Normal,
-                    color = Color(pfp.textColor),
-                    fontSize = (size.value * 0.45f * pfp.textScale).sp,
-                ),
-                maxLines = 1,
-            )
         }
     }
 }

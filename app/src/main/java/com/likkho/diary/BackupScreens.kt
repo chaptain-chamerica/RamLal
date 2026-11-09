@@ -326,7 +326,7 @@ fun BackedUpDiariesScreen(vm: AppViewModel, onClose: () -> Unit) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(Icons.Outlined.CalendarToday, null, tint = w.muted, modifier = Modifier.size(11.dp))
                                     Spacer(Modifier.width(4.dp))
-                                    Text("${log.dateStamp} · ${log.timeStamp}", style = monoStyle(11.sp, w.muted))
+                                    Text("${log.dateStamp} · ${log.timeStamp}", style = monoStyle(11.sp, w.muted.copy(alpha = 0.78f)))
                                 }
                             }
                             WikiButton("Read", { reading = log; readingUnlocked = false; diaryPin = ""; diaryPinError = null }, icon = Icons.Outlined.Visibility, height = 34.dp, fontSize = 11)
@@ -363,7 +363,7 @@ fun BackedUpDiariesScreen(vm: AppViewModel, onClose: () -> Unit) {
                     Text(log.heading.ifBlank { "Untitled Diary" }, style = serifStyle(22.sp, w.text))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Schedule, null, tint = w.muted, modifier = Modifier.size(12.dp)); Spacer(Modifier.width(4.dp))
-                        Text("${log.dateStamp} · ${log.timeStamp}" + if (log.pinned) "   • Pinned" else "", style = monoStyle(10.sp, w.muted))
+                        Text("${log.dateStamp} · ${log.timeStamp}" + if (log.pinned) "   • Pinned" else "", style = monoStyle(10.sp, w.muted.copy(alpha = 0.78f)))
                     }
                     // TODO(StudioAI): render real rich content (contentHtml) here
                     Text(log.contentHtml.ifBlank { "Empty content." }, style = proseStyle(16.sp, if (log.contentHtml.isBlank()) w.muted else w.text), lineHeight = 27.sp)
