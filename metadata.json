@@ -1,0 +1,6 @@
+{
+  "name": "RamLal",
+  "description": "A private, encrypted diary and rich-text note taking application with passcode protection and backup features.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
