@@ -1,0 +1,188 @@
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+
+> Task :app:compileDebugKotlin
+
+> Task :app:compileDebugKotlin FAILED
+
+[Incubating] Problems report is available at: file:///app/applet/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.3.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+15 actionable tasks: 2 executed, 13 up-to-date
+
+--- STDERR ---
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:45:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:65:38 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:67:71 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:78:33 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:82:62 Unresolved reference: monoStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:85:30 Unresolved reference: TEXT_COLORS
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:85:47 Unresolved reference: HIGHLIGHT_COLORS
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:85:77 Overload resolution ambiguity: 
+public inline fun <T> Iterable<TypeVariable(T)>.forEach(action: (TypeVariable(T)) -> Unit): Unit defined in kotlin.collections
+public inline fun <K, V> Map<out TypeVariable(K), TypeVariable(V)>.forEach(action: (Map.Entry<TypeVariable(K), TypeVariable(V)>) -> Unit): Unit defined in kotlin.collections
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:85:87 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:86:21 @Composable invocations can only happen from the context of a @Composable function
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:87:27 Overload resolution ambiguity: 
+public inline fun <T> Iterable<TypeVariable(T)>.forEach(action: (TypeVariable(T)) -> Unit): Unit defined in kotlin.collections
+public inline fun <K, V> Map<out TypeVariable(K), TypeVariable(V)>.forEach(action: (Map.Entry<TypeVariable(K), TypeVariable(V)>) -> Unit): Unit defined in kotlin.collections
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:87:37 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:90:29 @Composable invocations can only happen from the context of a @Composable function
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:94:77 Unresolved reference: parseHex
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:95:38 Unresolved reference: wikiBorder
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:124:50 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:125:126 Unresolved reference: WikiSwitch
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:136:68 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:137:21 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:139:17 Unresolved reference: WikiSlider
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:139:47 Unresolved reference: it
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:139:88 Unresolved reference: it
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:143:21 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:144:21 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:151:38 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:154:105 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:156:21 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:157:42 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:157:142 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:159:71 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:160:17 Unresolved reference: WikiSlider
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:164:21 Unresolved reference: WikiTextField
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:164:52 Unresolved reference: it
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:165:21 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:168:141 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:168:217 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:168:266 Unresolved reference: HairlineDivider
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:177:21 Unresolved reference: WikiTextField
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:177:52 Unresolved reference: it
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:178:45 Unresolved reference: IconBtn
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:180:182 Unresolved reference: proseStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:181:17 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:182:150 Unresolved reference: MATH_CATEGORIES
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:182:183 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:182:186 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:182:191 @Composable invocations can only happen from the context of a @Composable function
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:183:17 Unresolved reference: MATH_CATEGORIES
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:183:57 Overload resolution ambiguity: 
+public inline fun <T> Iterable<TypeVariable(T)>.forEach(action: (TypeVariable(T)) -> Unit): Unit defined in kotlin.collections
+public inline fun <K, V> Map<out TypeVariable(K), TypeVariable(V)>.forEach(action: (Map.Entry<TypeVariable(K), TypeVariable(V)>) -> Unit): Unit defined in kotlin.collections
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:183:67 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:183:72 @Composable invocations can only happen from the context of a @Composable function
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:183:180 Overload resolution ambiguity: 
+public inline fun <T> Iterable<TypeVariable(T)>.forEach(action: (TypeVariable(T)) -> Unit): Unit defined in kotlin.collections
+public inline fun <K, V> Map<out TypeVariable(K), TypeVariable(V)>.forEach(action: (Map.Entry<TypeVariable(K), TypeVariable(V)>) -> Unit): Unit defined in kotlin.collections
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:183:190 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:183:195 @Composable invocations can only happen from the context of a @Composable function
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:183:374 Unresolved reference: proseStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:187:21 Unresolved reference: WikiTextField
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:187:50 Unresolved reference: it
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:188:21 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:286:95 Unresolved reference: fmtDateTimeShort
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:290:23 Unresolved reference: WordAnalysisDialog
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:295:47 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:308:25 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:324:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:356:26 None of the following functions can be called with the arguments supplied: 
+public fun Modifier.background(brush: Brush, shape: Shape = ..., alpha: Float = ...): Modifier defined in androidx.compose.foundation
+public fun Modifier.background(color: Color, shape: Shape = ...): Modifier defined in androidx.compose.foundation
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:371:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:391:13 Overload resolution ambiguity: 
+public fun Icon(painter: Painter, tint: ColorProducer?, contentDescription: String?, modifier: Modifier = ...): Unit defined in androidx.compose.material3
+public fun Icon(painter: Painter, contentDescription: String?, modifier: Modifier = ..., tint: Color = ...): Unit defined in androidx.compose.material3
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:403:26 None of the following functions can be called with the arguments supplied: 
+public fun Modifier.background(brush: Brush, shape: Shape = ..., alpha: Float = ...): Modifier defined in androidx.compose.foundation
+public fun Modifier.background(color: Color, shape: Shape = ...): Modifier defined in androidx.compose.foundation
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:420:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:439:25 Unresolved reference: serifStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:456:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:460:14 None of the following functions can be called with the arguments supplied: 
+public fun Modifier.background(brush: Brush, shape: Shape = ..., alpha: Float = ...): Modifier defined in androidx.compose.foundation
+public fun Modifier.background(color: Color, shape: Shape = ...): Modifier defined in androidx.compose.foundation
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:466:28 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:481:9 Unresolved reference: WikiTextField
+e: file:///app/applet/app/src/main/java/com/likkho/app/RichToolbar.kt:482:9 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:46:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:99:17 Unresolved reference: IconBtn
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:101:82 Unresolved reference: PfpAvatar
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:105:114 Unresolved reference: serifStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:106:114 Unresolved reference: serifStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:108:38 Unresolved reference: IconBtn
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:111:44 None of the following functions can be called with the arguments supplied: 
+public fun Modifier.background(brush: Brush, shape: Shape = ..., alpha: Float = ...): Modifier defined in androidx.compose.foundation
+public fun Modifier.background(color: Color, shape: Shape = ...): Modifier defined in androidx.compose.foundation
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:112:21 None of the following functions can be called with the arguments supplied: 
+public fun Icon(bitmap: ImageBitmap, contentDescription: String?, modifier: Modifier = ..., tint: Color = ...): Unit defined in androidx.compose.material3
+public fun Icon(painter: Painter, contentDescription: String?, modifier: Modifier = ..., tint: Color = ...): Unit defined in androidx.compose.material3
+public fun Icon(imageVector: ImageVector, contentDescription: String?, modifier: Modifier = ..., tint: Color = ...): Unit defined in androidx.compose.material3
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:115:30 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:116:22 Unresolved reference: WikiButton
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:123:28 Unresolved reference: fmtDateTimeShort
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:123:60 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:124:38 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:135:31 Unresolved reference: formatBytes
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:135:68 Unresolved reference: monoStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:155:106 Unresolved reference: AUDIO_SPEEDS
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:155:120 Unresolved reference: AUDIO_SPEEDS
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:155:165 Unresolved reference: AUDIO_SPEEDS
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:162:68 Unresolved reference: monoStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:163:21 Unresolved reference: WikiSlider
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:163:46 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:165:17 Unresolved reference: HairlineDivider
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:187:94 Unresolved reference: proseStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:224:23 Unresolved reference: ReminderDialog
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:224:91 Unresolved reference: it
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:225:18 Unresolved reference: PfpStudioDialog
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:225:75 Unresolved reference: it
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:226:28 Unresolved reference: ImageStudioDialog
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:227:19 Unresolved reference: ImageStudioDialog
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:228:22 Unresolved reference: AudioStudioDialog
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:233:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:236:9 Unresolved reference: HairlineDivider
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:242:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:244:32 None of the following functions can be called with the arguments supplied: 
+public fun Modifier.background(brush: Brush, shape: Shape = ..., alpha: Float = ...): Modifier defined in androidx.compose.foundation
+public fun Modifier.background(color: Color, shape: Shape = ...): Modifier defined in androidx.compose.foundation
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:246:103 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:252:13 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:257:39 Unresolved reference: detectTapGestures
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:258:53 Unresolved reference: detectDragGestures
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:258:134 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:258:137 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:270:44 Unresolved reference: wikiBorder
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:270:69 Unresolved reference: wiki
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:271:39 Unresolved reference: detectTapGestures
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:274:64 Unresolved reference: wikiBorder
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:279:34 Unresolved reference: sansStyle
+e: file:///app/applet/app/src/main/java/com/likkho/app/Workspace.kt:282:43 Unresolved reference: monoStyle
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileDebugKotlin'.
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction
+   > Compilation error. See log for more details
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 6s

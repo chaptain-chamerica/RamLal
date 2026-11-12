@@ -1,14 +1,15 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 android {
-    namespace = "com.likkho.diary"
+    namespace = "com.likkho.app"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.aistudio.likkho.npvwrx"
+        applicationId = "com.likkho.app"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
@@ -62,4 +63,11 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation("com.google.crypto.tink:tink-android:1.13.0")
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }

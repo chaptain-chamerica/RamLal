@@ -1,4 +1,4 @@
-# RamLal — Android Jetpack Compose Application
+# Likkho — Android Jetpack Compose Application
 
 A private, secure, and encrypted diary and rich note-taking app crafted with Cormorant typography and refined editorial aesthetics.
 
@@ -16,8 +16,8 @@ A private, secure, and encrypted diary and rich note-taking app crafted with Cor
 - **Language:** Kotlin
 - **UI Framework:** Jetpack Compose (Material 3)
 - **Architecture Pattern:** MVVM (`AppViewModel`, `FeatureHooks`)
-- **Package:** `com.likkho.diary`
-- **Build System:** Gradle (Kotlin DSL), Android SDK 36, AGP, Java 17/21
+- **Application ID & Package:** `com.likkho.app`
+- **Build System:** Gradle (Kotlin DSL), Android SDK 34, AGP, Java 17/21
 
 ## Directory Structure
 

@@ -1,0 +1,196 @@
+package com.likkho.app.storage
+
+import com.likkho.app.storage.model.CanvasImageRecord
+import com.likkho.app.storage.model.DiaryRecord
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.IOException
+
+class EncryptedMediaRepositoryTest {
+
+    @get:Rule
+    val tempFolder = TemporaryFolder()
+
+    private lateinit var vaultDir: File
+    private lateinit var mediaRepository: EncryptedMediaRepository
+    private lateinit var diaryRepository: DiaryRepository
+    private val testDek = CryptoUtils.secureRandomBytes(32)
+
+    private var fakeCurrentTime = 1_700_000_000_000L
+    private val testClock = object : ClockProvider {
+        override fun elapsedRealtimeMs(): Long = fakeCurrentTime
+        override fun wallClockMs(): Long = fakeCurrentTime
+    }
+
+    @Before
+    fun setUp() {
+        vaultDir = tempFolder.newFolder("v1_media_test")
+        mediaRepository = EncryptedMediaRepository(VaultId.PRIMARY, vaultDir, testClock)
+        diaryRepository = DiaryRepository(VaultId.PRIMARY, vaultDir)
+        mediaRepository.ensureDirs()
+        diaryRepository.ensureDirs()
+    }
+
+    @Test
+    fun importAndReadMediaBytes_roundTrip() {
+        val mediaId = "photo_123"
+        val payload = "Hello, high-resolution diary attachment!".toByteArray(Charsets.UTF_8)
+
+        val importedId = mediaRepository.importMediaBytes(mediaId, payload, testDek)
+        assertEquals(mediaId, importedId)
+        assertTrue(mediaRepository.exists(mediaId))
+
+        // Read decrypted bytes
+        val decrypted = mediaRepository.readDecryptedBytes(mediaId, testDek)
+        assertArrayEquals(payload, decrypted)
+    }
+
+    @Test
+    fun streamingDecryption_handlesLargePayload() {
+        val mediaId = "audio_record_456"
+        // 256 KB test payload exceeding 64KB chunk size
+        val largePayload = ByteArray(256 * 1024) { (it % 251).toByte() }
+
+        mediaRepository.importMedia(mediaId, ByteArrayInputStream(largePayload), testDek, largePayload.size.toLong())
+
+        val decryptedStream = mediaRepository.openDecryptedStream(mediaId, testDek)
+        val readBack = decryptedStream.readBytes()
+        decryptedStream.close()
+
+        assertArrayEquals(largePayload, readBack)
+    }
+
+    @Test
+    fun wrongKey_failsDecryption() {
+        val mediaId = "secret_pic"
+        val payload = "Secret photo bytes".toByteArray(Charsets.UTF_8)
+        mediaRepository.importMediaBytes(mediaId, payload, testDek)
+
+        val wrongDek = CryptoUtils.secureRandomBytes(32)
+        try {
+            mediaRepository.readDecryptedBytes(mediaId, wrongDek)
+            fail("Decryption with wrong DEK must fail")
+        } catch (e: Exception) {
+            // Expected Tink AEAD decryption failure
+        }
+    }
+
+    @Test
+    fun tamperedCiphertext_failsDecryption() {
+        val mediaId = "tampered_audio"
+        val payload = "Audio waveform data".toByteArray(Charsets.UTF_8)
+        mediaRepository.importMediaBytes(mediaId, payload, testDek)
+
+        val mediaFile = mediaRepository.getMediaFile(mediaId)
+        val fileBytes = mediaFile.readBytes()
+        // Tamper byte in ciphertext
+        fileBytes[fileBytes.size - 2] = (fileBytes[fileBytes.size - 2].toInt() xor 0xAA).toByte()
+        mediaFile.writeBytes(fileBytes)
+
+        try {
+            mediaRepository.readDecryptedBytes(mediaId, testDek)
+            fail("Decryption of tampered media must fail")
+        } catch (e: Exception) {
+            // Expected tag check failure
+        }
+    }
+
+    @Test
+    fun aadBinding_swappedMediaIdFailsDecryption() {
+        val mediaId1 = "media_item_1"
+        val mediaId2 = "media_item_2"
+        mediaRepository.importMediaBytes(mediaId1, "Original Media 1".toByteArray(), testDek)
+
+        // Rename file 1 to file 2 (tamper swap attempt)
+        val file1 = mediaRepository.getMediaFile(mediaId1)
+        val file2 = mediaRepository.getMediaFile(mediaId2)
+        file1.copyTo(file2)
+
+        try {
+            mediaRepository.readDecryptedBytes(mediaId2, testDek)
+            fail("Swapped media file must fail AAD verification")
+        } catch (e: Exception) {
+            // Expected AAD mismatch failure
+        }
+    }
+
+    @Test
+    fun orphanCleanup_removesOldUnreferencedMedia_andKeepsNewerMedia() {
+        val oldUnreferenced = "orphan_old"
+        val newUnreferenced = "orphan_new"
+        val referencedMedia = "referenced_pic"
+
+        mediaRepository.importMediaBytes(oldUnreferenced, "old bytes".toByteArray(), testDek)
+        mediaRepository.importMediaBytes(newUnreferenced, "new bytes".toByteArray(), testDek)
+        mediaRepository.importMediaBytes(referencedMedia, "referenced bytes".toByteArray(), testDek)
+
+        val oldFile = mediaRepository.getMediaFile(oldUnreferenced)
+        val newFile = mediaRepository.getMediaFile(newUnreferenced)
+
+        // Set old file modified time to 25 hours ago
+        val twentyFiveHoursMs = 25 * 60 * 60 * 1000L
+        oldFile.setLastModified(fakeCurrentTime - twentyFiveHoursMs)
+
+        // Set new file modified time to 1 hour ago
+        val oneHourMs = 1 * 60 * 60 * 1000L
+        newFile.setLastModified(fakeCurrentTime - oneHourMs)
+
+        val referencedSet = setOf(referencedMedia)
+
+        // Run orphan cleanup
+        val cleaned = mediaRepository.cleanupOrphans(referencedSet)
+        assertEquals(1, cleaned)
+
+        assertFalse("Old unreferenced file (>24h) must be removed", oldFile.exists())
+        assertTrue("New unreferenced file (<24h) must be kept to prevent race conditions", newFile.exists())
+        assertTrue("Referenced media must always be kept", mediaRepository.exists(referencedMedia))
+    }
+
+    @Test
+    fun deleteDiary_transactionallyDeletesUnreferencedMedia() {
+        val mediaId1 = "diary_pic_1"
+        val mediaId2 = "diary_shared_pic"
+
+        mediaRepository.importMediaBytes(mediaId1, "Pic 1".toByteArray(), testDek)
+        mediaRepository.importMediaBytes(mediaId2, "Shared Pic".toByteArray(), testDek)
+
+        // Diary A references pic 1 and shared pic
+        val diaryA = DiaryRecord(
+            id = "diary_A",
+            heading = "Diary A",
+            images = listOf(
+                CanvasImageRecord(mediaId = mediaId1),
+                CanvasImageRecord(mediaId = mediaId2)
+            )
+        )
+        diaryRepository.saveDiary(diaryA, testDek)
+
+        // Diary B also references shared pic
+        val diaryB = DiaryRecord(
+            id = "diary_B",
+            heading = "Diary B",
+            images = listOf(
+                CanvasImageRecord(mediaId = mediaId2)
+            )
+        )
+        diaryRepository.saveDiary(diaryB, testDek)
+
+        assertTrue(mediaRepository.exists(mediaId1))
+        assertTrue(mediaRepository.exists(mediaId2))
+
+        // Delete Diary A
+        diaryRepository.deleteDiary(diaryA.id, testDek, mediaRepository)
+
+        assertFalse("mediaId1 was only referenced by diary A and must be deleted", mediaRepository.exists(mediaId1))
+        assertTrue("mediaId2 is still referenced by diary B and must NOT be deleted", mediaRepository.exists(mediaId2))
+    }
+}

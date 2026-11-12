@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.RamLal" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.Likkho" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@android:color/white</item>
     </style>
+    <style name="Theme.RamLal" parent="Theme.Likkho" />
 </resources>

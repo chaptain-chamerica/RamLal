@@ -1,6 +1,6 @@
 {
-  "name": "RamLal",
-  "description": "A private, encrypted diary and rich-text note taking application with passcode protection and backup features.",
+  "name": "Likkho",
+  "description": "An offline, encrypted private diary and writing studio with Cormorant typography and dual-vault plausible deniability.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
