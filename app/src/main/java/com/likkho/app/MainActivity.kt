@@ -1,9 +1,11 @@
 package com.likkho.app
 
+import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -37,6 +39,8 @@ class MainActivity : ComponentActivity() {
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
 
+        applySystemBars(darkMode = vm.darkMode, fullScreen = vm.fullScreen)
+
         splashScreen.setKeepOnScreenCondition { !vm.isStartupReady }
         splashScreen.setOnExitAnimationListener { splashViewProvider ->
             runCatching {
@@ -52,12 +56,48 @@ class MainActivity : ComponentActivity() {
                 .alpha(0f)
                 .setDuration(220L)
                 .setInterpolator(DecelerateInterpolator())
-                .withEndAction { splashViewProvider.remove() }
+                .withEndAction {
+                    splashViewProvider.remove()
+                    applySystemBars(darkMode = vm.darkMode, fullScreen = vm.fullScreen)
+                }
                 .start()
         }
 
-        enableEdgeToEdge()
         setContent { LikkhoTheme(vm.darkMode) { Root(vm) } }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            applySystemBars(darkMode = vm.darkMode, fullScreen = vm.fullScreen)
+        }
+    }
+
+    fun applySystemBars(darkMode: Boolean, fullScreen: Boolean) {
+        val statusBarStyle = if (darkMode) {
+            SystemBarStyle.dark(AndroidColor.TRANSPARENT)
+        } else {
+            SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT)
+        }
+        val navBarStyle = if (darkMode) {
+            SystemBarStyle.dark(AndroidColor.TRANSPARENT)
+        } else {
+            SystemBarStyle.light(
+                AndroidColor.TRANSPARENT,
+                AndroidColor.argb(0x66, 0x00, 0x00, 0x00)
+            )
+        }
+        enableEdgeToEdge(statusBarStyle = statusBarStyle, navigationBarStyle = navBarStyle)
+
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.isAppearanceLightStatusBars = !darkMode
+        controller.isAppearanceLightNavigationBars = !darkMode
+        if (fullScreen) {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
     }
 }
 
@@ -65,7 +105,7 @@ class MainActivity : ComponentActivity() {
 fun Root(vm: AppViewModel) {
     val w = wiki()
     val view = LocalView.current
-    val activity = view.context as ComponentActivity
+    val activity = view.context as? MainActivity
 
     // lock whenever app goes to background (if passcode set)
     DisposableEffect(Unit) {
@@ -79,23 +119,16 @@ fun Root(vm: AppViewModel) {
     }
     // FLAG_SECURE while passcode set
     LaunchedEffect(vm.savedPasscode, vm.secondaryPasscode) {
+        val win = activity?.window ?: return@LaunchedEffect
         if (vm.effectivePrimaryPin.isNotEmpty()) {
-            activity.window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+            win.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         } else {
-            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            win.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
     }
-    // system bar icons + full screen
+    // Keep status bar & navigation bar icons readable in both light and dark modes
     LaunchedEffect(vm.darkMode, vm.fullScreen) {
-        val c = WindowCompat.getInsetsController(activity.window, view)
-        c.isAppearanceLightStatusBars = !vm.darkMode
-        c.isAppearanceLightNavigationBars = !vm.darkMode
-        if (vm.fullScreen) {
-            c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            c.hide(WindowInsetsCompat.Type.systemBars())
-        } else {
-            c.show(WindowInsetsCompat.Type.systemBars())
-        }
+        activity?.applySystemBars(darkMode = vm.darkMode, fullScreen = vm.fullScreen)
     }
 
     Box(Modifier.fillMaxSize().background(w.bg).statusBarsPadding()) {
