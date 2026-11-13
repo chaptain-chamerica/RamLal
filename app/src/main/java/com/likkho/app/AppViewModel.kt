@@ -46,6 +46,7 @@ class AppViewModel @JvmOverloads constructor(
     var biometricsEnabled by mutableStateOf(false)
     var savedKeyHash by mutableStateOf<String?>(null)
     var isLocked by mutableStateOf(false)
+    var isStartupReady by mutableStateOf(false)
 
     var route by mutableStateOf(Route.HOME)
     var editingLog by mutableStateOf<DiaryLog?>(null)
@@ -76,36 +77,52 @@ class AppViewModel @JvmOverloads constructor(
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Initialize primary vault envelope on first launch
+                if (!vaultManager.envelopeV1.exists()) {
+                    vaultManager.ensurePrimaryVaultInitialized()
+                }
+
+                val hasPrimary = vaultManager.hasPasscode(VaultId.PRIMARY)
+                val hasDecoy = vaultManager.decoyExists() && vaultManager.hasPasscode(VaultId.DECOY)
+                val bio = vaultManager.hasBiometric(VaultId.PRIMARY)
+
+                val initialLogs = if (!hasPrimary) {
+                    vaultManager.unlockNoPasscode()
+                    if (vaultManager.isUnlocked) {
+                        vaultManager.withActiveDek { dek ->
+                            vaultManager.activeDiaryRepository().loadAllDiaries(dek).map { it.toDiaryLog() }
+                        }
+                    } else emptyList()
+                } else emptyList()
+
+                withContext(Dispatchers.Main) {
+                    biometricsEnabled = bio
+                    if (hasPrimary) {
+                        isLocked = true
+                        savedPasscode = "••••"
+                        if (hasDecoy) secondaryPasscode = "••••"
+                    } else {
+                        savedPasscode = null
+                        secondaryPasscode = null
+                        isLocked = false
+                        logs.clear()
+                        logs.addAll(initialLogs)
+                    }
+                    isStartupReady = true
+                }
+            } catch (_: Throwable) {
+                withContext(Dispatchers.Main) {
+                    isStartupReady = true
+                }
+            }
+        }
+
+        // Check updates asynchronously without blocking cold launch splash
+        viewModelScope.launch(Dispatchers.IO) {
             val r = hooks.checkForUpdate(false)
             if (r is UpdateCheck.Available) {
                 withContext(Dispatchers.Main) { availableUpdate = r.info }
-            }
-
-            // Initialize primary vault envelope on first launch
-            if (!vaultManager.envelopeV1.exists()) {
-                vaultManager.ensurePrimaryVaultInitialized()
-            }
-
-            val hasPrimary = vaultManager.hasPasscode(VaultId.PRIMARY)
-            val hasDecoy = vaultManager.decoyExists() && vaultManager.hasPasscode(VaultId.DECOY)
-            val bio = vaultManager.hasBiometric(VaultId.PRIMARY)
-
-            withContext(Dispatchers.Main) {
-                biometricsEnabled = bio
-                if (hasPrimary) {
-                    isLocked = true
-                    savedPasscode = "••••"
-                    if (hasDecoy) secondaryPasscode = "••••"
-                } else {
-                    savedPasscode = null
-                    secondaryPasscode = null
-                    isLocked = false
-                }
-            }
-
-            if (!hasPrimary) {
-                vaultManager.unlockNoPasscode()
-                loadLogsFromActiveVault()
             }
         }
     }

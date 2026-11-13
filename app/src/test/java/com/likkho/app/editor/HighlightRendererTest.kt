@@ -141,4 +141,41 @@ class HighlightRendererTest {
         assertEquals(0f, rects[1].left, 0.01f)
         assertEquals(50f, rects[1].right, 0.01f)
     }
+
+    @Test
+    fun headingLineHighlight_usesPerLineHeadingAscenderToDescender() {
+        val text = "Title\nBody"
+        val spans = listOf(
+            Span(0, 5, SpanStyle.Heading(1)),
+            Span(0, 5, SpanStyle.Highlight("#fef08a")),
+            Span(6, 10, SpanStyle.Highlight("#bbf7d0"))
+        )
+
+        val rects = HighlightLayoutCalculator.computeHighlightRects(
+            text = text,
+            spans = spans,
+            lineCount = 2,
+            ascentPx = -28f,
+            descentPx = 8f,
+            getLineForOffset = { off -> if (off < 6) 0 else 1 },
+            getLineStart = { line -> if (line == 0) 0 else 6 },
+            getLineEnd = { line -> if (line == 0) 6 else 10 },
+            getLineBaseline = { line -> if (line == 0) 64f else 120f },
+            getLineTop = { line -> if (line == 0) 0f else 80f },
+            getLineBottom = { line -> if (line == 0) 80f else 134f },
+            getCharLeft = { idx -> if (idx < 6) idx * 14f else (idx - 6) * 10f },
+            getCharRight = { idx -> if (idx < 6) (idx + 1) * 14f else (idx - 5) * 10f },
+            lineMetrics = { segStart, segEnd ->
+                if (segStart < 5 && segEnd > 0) -48f to 12f else -28f to 8f
+            }
+        )
+
+        assertEquals(2, rects.size)
+        // Line 0 (H1): baseline=64, ascent=-48, descent=+12 -> top=16, bottom=76
+        assertEquals(16f, rects[0].top, 0.01f)
+        assertEquals(76f, rects[0].bottom, 0.01f)
+        // Line 1 (Body): baseline=120, ascent=-28, descent=+8 -> top=92, bottom=128
+        assertEquals(92f, rects[1].top, 0.01f)
+        assertEquals(128f, rects[1].bottom, 0.01f)
+    }
 }

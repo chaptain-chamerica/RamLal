@@ -34,7 +34,8 @@ object HighlightLayoutCalculator {
         getLineTop: (Int) -> Float,
         getLineBottom: (Int) -> Float,
         getCharLeft: (Int) -> Float,
-        getCharRight: (Int) -> Float
+        getCharRight: (Int) -> Float,
+        lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
     ): List<HighlightRect> {
         if (text.isEmpty() || lineCount <= 0 || spans.isEmpty()) return emptyList()
 
@@ -81,9 +82,10 @@ object HighlightLayoutCalculator {
                 val baseline = getLineBaseline(line)
                 val lineTop = getLineTop(line)
                 val lineBottom = getLineBottom(line)
+                val (lineAscent, lineDescent) = lineMetrics?.invoke(segStart, segEnd) ?: (ascentPx to descentPx)
 
-                val top = (baseline + ascentPx).coerceIn(lineTop, lineBottom)
-                val bottom = (baseline + descentPx).coerceIn(top, lineBottom)
+                val top = (baseline + lineAscent).coerceIn(lineTop, lineBottom)
+                val bottom = (baseline + lineDescent).coerceIn(top, lineBottom)
                 if (bottom <= top) continue
 
                 rects.add(
@@ -105,7 +107,8 @@ object HighlightLayoutCalculator {
         layoutResult: TextLayoutResult,
         spans: List<Span>,
         ascentPx: Float,
-        descentPx: Float
+        descentPx: Float,
+        lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
     ): List<HighlightRect> {
         val text = layoutResult.layoutInput.text.text
         return computeHighlightRects(
@@ -121,7 +124,8 @@ object HighlightLayoutCalculator {
             getLineTop = { layoutResult.getLineTop(it) },
             getLineBottom = { layoutResult.getLineBottom(it) },
             getCharLeft = { layoutResult.getBoundingBox(it).left },
-            getCharRight = { layoutResult.getBoundingBox(it).right }
+            getCharRight = { layoutResult.getBoundingBox(it).right },
+            lineMetrics = lineMetrics
         )
     }
 }
@@ -137,13 +141,15 @@ fun DrawScope.drawTextHighlights(
     layoutResult: TextLayoutResult,
     spans: List<Span>,
     ascentPx: Float,
-    descentPx: Float
+    descentPx: Float,
+    lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
 ) {
     val rects = HighlightLayoutCalculator.computeFromTextLayout(
         layoutResult = layoutResult,
         spans = spans,
         ascentPx = ascentPx,
-        descentPx = descentPx
+        descentPx = descentPx,
+        lineMetrics = lineMetrics
     )
     for (r in rects) {
         val color = parseHighlightHex(r.colorHex) ?: continue

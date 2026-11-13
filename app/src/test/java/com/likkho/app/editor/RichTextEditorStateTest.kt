@@ -219,4 +219,77 @@ class RichTextEditorStateTest {
         assertEquals(editor.text, reimported.text)
         assertEquals(editor.spans.size, reimported.spans.size)
     }
+
+    @Test
+    fun headings_h1_h2_h3_enable_enterResets_disableNeverUndos() {
+        val editor = RichTextEditorState()
+        assertNull(editor.activeHeadingLevel)
+        assertFalse(editor.isH1Active)
+        assertFalse(editor.isH2Active)
+        assertFalse(editor.isH3Active)
+
+        // Enable H1 and type heading
+        editor.toggleHeading(1)
+        assertTrue(editor.isH1Active)
+        assertFalse(editor.isH2Active)
+        editor.onTextFieldValueChange(TextFieldValue("Main Title", TextRange(10)))
+        assertEquals(listOf(Span(0, 10, SpanStyle.Heading(1))), editor.spans)
+
+        // Pressing Enter keeps "Main Title" as H1 and resets new line to normal paragraph
+        editor.onTextFieldValueChange(TextFieldValue("Main Title\n", TextRange(11)))
+        assertNull(editor.activeHeadingLevel)
+        editor.onTextFieldValueChange(TextFieldValue("Main Title\nNormal paragraph", TextRange(27)))
+        assertEquals(listOf(Span(0, 10, SpanStyle.Heading(1))), editor.spans)
+
+        // Type on current line then convert it to H2, then switch mutually exclusively to H3
+        editor.onTextFieldValueChange(TextFieldValue("Main Title\nNormal paragraph\nSection", TextRange(35)))
+        editor.toggleHeading(2)
+        assertTrue(editor.isH2Active)
+        assertFalse(editor.isH1Active)
+        assertTrue(editor.spans.contains(Span(28, 35, SpanStyle.Heading(2))))
+
+        editor.toggleHeading(3)
+        assertTrue(editor.isH3Active)
+        assertFalse(editor.isH2Active)
+        assertFalse(editor.spans.any { it.start == 28 && it.style == SpanStyle.Heading(2) })
+        assertTrue(editor.spans.contains(Span(28, 35, SpanStyle.Heading(3))))
+
+        // Disabling H3 does NOT undo "Section" heading, and future typing is normal
+        editor.toggleHeading(3)
+        assertNull(editor.activeHeadingLevel)
+        editor.onTextFieldValueChange(TextFieldValue("Main Title\nNormal paragraph\nSection note", TextRange(40)))
+        assertTrue(editor.spans.contains(Span(28, 35, SpanStyle.Heading(3))))
+        assertFalse(editor.spans.any { it.start >= 35 })
+
+        // Placing cursor inside "Main Title" when disabled must NOT auto-enable H1
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(4)))
+        assertNull(editor.activeHeadingLevel)
+        assertFalse(editor.isH1Active)
+    }
+
+    @Test
+    fun headings_html_roundTrip_and_selectionToggle() {
+        val html = "<h1><b>Chapter 1</b></h1><br><h2>Subheading</h2><br><h3>Details</h3><br>Body"
+        val editor = RichTextEditorState.fromHtml(html)
+
+        assertEquals("Chapter 1\nSubheading\nDetails\nBody", editor.text)
+        assertTrue(editor.spans.contains(Span(0, 9, SpanStyle.Heading(1))))
+        assertTrue(editor.spans.contains(Span(0, 9, SpanStyle.Bold)))
+        assertTrue(editor.spans.contains(Span(10, 20, SpanStyle.Heading(2))))
+        assertTrue(editor.spans.contains(Span(21, 28, SpanStyle.Heading(3))))
+
+        val exported = editor.toHtml()
+        assertTrue(exported.contains("<h1><b>Chapter 1</b></h1>"))
+        assertTrue(exported.contains("<h2>Subheading</h2>"))
+        assertTrue(exported.contains("<h3>Details</h3>"))
+
+        val reimported = RichTextEditorState.fromHtml(exported)
+        assertEquals(editor.text, reimported.text)
+        assertEquals(editor.spans, reimported.spans)
+
+        // Toggle off H2 via selection
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(10, 20)))
+        editor.toggleHeading(2)
+        assertFalse(editor.spans.any { it.style == SpanStyle.Heading(2) })
+    }
 }

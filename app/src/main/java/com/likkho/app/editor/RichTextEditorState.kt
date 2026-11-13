@@ -47,6 +47,13 @@ class RichTextEditorState(
     var activeHighlightColor by mutableStateOf<String?>(null)
         private set
 
+    var activeHeadingLevel by mutableStateOf<Int?>(null)
+        private set
+
+    val isH1Active: Boolean get() = activeHeadingLevel == 1
+    val isH2Active: Boolean get() = activeHeadingLevel == 2
+    val isH3Active: Boolean get() = activeHeadingLevel == 3
+
     val text: String get() = textFieldValue.text
     val selection: TextRange get() = textFieldValue.selection
 
@@ -144,6 +151,45 @@ class RichTextEditorState(
         }
     }
 
+    fun toggleHeading(level: Int) {
+        require(level in 1..3) { "Heading level must be 1, 2, or 3" }
+        val sel = selection
+        if (sel.min < sel.max) {
+            val targetStyle = SpanStyle.Heading(level)
+            val hasHeading = spans.any { it.style == targetStyle && it.start <= sel.min && it.end >= sel.max }
+            if (hasHeading) {
+                removeStyleFromRange(sel.min, sel.max) { it == targetStyle }
+                if (activeHeadingLevel == level) activeHeadingLevel = null
+            } else {
+                removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.Heading }
+                applyStyleToRange(sel.min, sel.max, targetStyle)
+                activeHeadingLevel = level
+            }
+        } else {
+            if (activeHeadingLevel == level) {
+                // Disable heading for future typing without undoing already-typed heading text
+                activeHeadingLevel = null
+            } else {
+                activeHeadingLevel = level
+                val pos = sel.start.coerceIn(0, text.length)
+                val (lineStart, lineEnd) = currentLineBounds(text, pos)
+                if (lineStart < lineEnd) {
+                    removeStyleFromRange(lineStart, lineEnd) { it is SpanStyle.Heading }
+                    applyStyleToRange(lineStart, lineEnd, SpanStyle.Heading(level))
+                }
+            }
+        }
+    }
+
+    private fun currentLineBounds(str: String, cursor: Int): Pair<Int, Int> {
+        val pos = cursor.coerceIn(0, str.length)
+        var start = pos
+        while (start > 0 && str[start - 1] != '\n') start--
+        var end = pos
+        while (end < str.length && str[end] != '\n') end++
+        return start to end
+    }
+
     // =========================================================================
     //  Input Handling & Non-Destructive Span Updates
     // =========================================================================
@@ -181,6 +227,9 @@ class RichTextEditorState(
         val insertedEnd = newText.length - suffixLen
         val deletedCount = deletedEnd - deletedStart
         val insertedCount = insertedEnd - insertedStart
+        val insertedText = if (insertedCount > 0) newText.substring(insertedStart, insertedEnd) else ""
+        val firstNewlineRel = insertedText.indexOf('\n')
+        val hasNewlineInInsert = firstNewlineRel != -1
 
         val updatedSpans = mutableListOf<Span>()
 
@@ -237,6 +286,7 @@ class RichTextEditorState(
                             is SpanStyle.Strike -> isStrikeActive
                             is SpanStyle.Color -> activeTextColor == style.hex
                             is SpanStyle.Highlight -> activeHighlightColor == style.hex
+                            is SpanStyle.Heading -> !hasNewlineInInsert && activeHeadingLevel == style.level
                             else -> false
                         }
 
@@ -244,7 +294,7 @@ class RichTextEditorState(
                             // Style is active: span expands across inserted text
                             updatedSpans.add(Span(s, e + insertedCount, sp.style))
                         } else {
-                            // Style is disabled: split span so inserted text remains default (unstyled)
+                            // Style is disabled (or Enter split a heading): split span so inserted text remains unstyled
                             if (insertedStart > s) {
                                 updatedSpans.add(Span(s, insertedStart, sp.style))
                             }
@@ -280,6 +330,16 @@ class RichTextEditorState(
             }
             activeHighlightColor?.let { hex ->
                 updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Highlight(hex)))
+            }
+            activeHeadingLevel?.let { lvl ->
+                val headingEnd = if (hasNewlineInInsert) insertedStart + firstNewlineRel else insertedEnd
+                if (insertedStart < headingEnd) {
+                    updatedSpans.add(Span(insertedStart, headingEnd, SpanStyle.Heading(lvl)))
+                }
+            }
+            // Pressing Enter starts the new line back in default normal paragraph mode
+            if (hasNewlineInInsert) {
+                activeHeadingLevel = null
             }
         }
 

@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/ic_likkho_logo"
+        android:drawable="@drawable/ic_likkho_foreground_img"
         android:gravity="center" />
 </layer-list>

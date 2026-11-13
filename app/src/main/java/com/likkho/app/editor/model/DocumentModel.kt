@@ -117,6 +117,16 @@ sealed interface SpanStyle {
         override val valueString: String get() = url
     }
 
+    @Serializable
+    @SerialName("heading")
+    data class Heading(val level: Int) : SpanStyle {
+        init {
+            require(level in 1..3) { "Heading level must be 1, 2, or 3" }
+        }
+        override val styleKey: String = "heading"
+        override val valueString: String get() = level.toString()
+    }
+
     companion object {
         fun fromRecord(record: SpanStyleRecord): SpanStyle = when (record.style.lowercase()) {
             "bold" -> Bold
@@ -130,6 +140,7 @@ sealed interface SpanStyle {
             "sizepx" -> SizePx(record.value?.toFloatOrNull() ?: 16f)
             "fontid" -> FontId(record.value ?: "default")
             "link" -> Link(record.value ?: "")
+            "heading" -> Heading(record.value?.toIntOrNull()?.coerceIn(1, 3) ?: 1)
             else -> Bold
         }
     }

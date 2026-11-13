@@ -34,9 +34,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.likkho.app.editor.HeadingTypographySpec
 import com.likkho.app.editor.RichTextEditorState
 import com.likkho.app.editor.RichTextVisualTransformation
 import com.likkho.app.editor.drawTextHighlights
+import com.likkho.app.editor.model.SpanStyle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -195,6 +197,30 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         textSize = with(density) { editorTextStyle.fontSize.toPx() }
                     }.fontMetrics
                 }
+                val resolvedHeadingTypeface = remember(fontFamilyResolver) {
+                    fontFamilyResolver.resolve(
+                        fontFamily = HeadingTypographySpec.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontStyle = FontStyle.Normal,
+                        fontSynthesis = FontSynthesis.All,
+                    )
+                }
+                val headingFontMetrics = remember(resolvedHeadingTypeface.value, density) {
+                    mapOf(
+                        1 to android.graphics.Paint().apply {
+                            typeface = resolvedHeadingTypeface.value as? android.graphics.Typeface
+                            textSize = with(density) { HeadingTypographySpec.fontSize(1).toPx() }
+                        }.fontMetrics,
+                        2 to android.graphics.Paint().apply {
+                            typeface = resolvedHeadingTypeface.value as? android.graphics.Typeface
+                            textSize = with(density) { HeadingTypographySpec.fontSize(2).toPx() }
+                        }.fontMetrics,
+                        3 to android.graphics.Paint().apply {
+                            typeface = resolvedHeadingTypeface.value as? android.graphics.Typeface
+                            textSize = with(density) { HeadingTypographySpec.fontSize(3).toPx() }
+                        }.fontMetrics,
+                    )
+                }
                 var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
 
                 BasicTextField(
@@ -216,7 +242,18 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     layoutResult = layout,
                                     spans = editorState.spans,
                                     ascentPx = fontMetrics.ascent,
-                                    descentPx = fontMetrics.descent
+                                    descentPx = fontMetrics.descent,
+                                    lineMetrics = { segStart, segEnd ->
+                                        var bestLevel: Int? = null
+                                        for (sp in editorState.spans) {
+                                            val hs = sp.style as? SpanStyle.Heading ?: continue
+                                            if (sp.start < segEnd && sp.end > segStart) {
+                                                if (bestLevel == null || hs.level < bestLevel) bestLevel = hs.level
+                                            }
+                                        }
+                                        val fm = bestLevel?.let { headingFontMetrics[it] } ?: fontMetrics
+                                        fm.ascent to fm.descent
+                                    }
                                 )
                             }
                         ) {

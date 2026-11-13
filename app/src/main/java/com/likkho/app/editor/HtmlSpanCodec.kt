@@ -34,8 +34,10 @@ object HtmlSpanCodec {
             val rawSegment = text.substring(start, end)
             var escaped = escapeHtml(rawSegment).replace("\n", "<br>")
 
-            // Find all spans active across [start, end)
-            val active = normalized.filter { it.start <= start && it.end >= end }
+            // Find all spans active across [start, end), placing non-heading styles inner and heading outermost
+            val active = normalized
+                .filter { it.start <= start && it.end >= end }
+                .sortedBy { if (it.style is SpanStyle.Heading) 1 else 0 }
 
             // Wrap with tags in consistent order
             for (sp in active) {
@@ -46,6 +48,7 @@ object HtmlSpanCodec {
                     is SpanStyle.Strike -> "<s>$escaped</s>"
                     is SpanStyle.Color -> "<span style=\"color:${s.hex}\">$escaped</span>"
                     is SpanStyle.Highlight -> "<mark style=\"background-color:${s.hex}\">$escaped</mark>"
+                    is SpanStyle.Heading -> "<h${s.level}>$escaped</h${s.level}>"
                     else -> escaped
                 }
             }
@@ -106,6 +109,7 @@ object HtmlSpanCodec {
                             is SpanStyle.Strike -> tagName == "s" || tagName == "strike" || tagName == "del"
                             is SpanStyle.Color -> tagName == "span" || tagName == "font"
                             is SpanStyle.Highlight -> tagName == "mark" || tagName == "span"
+                            is SpanStyle.Heading -> tagName == "h${it.style.level}"
                             else -> false
                         }
                     }
@@ -180,6 +184,9 @@ object HtmlSpanCodec {
                 val colorMatch = Regex("color\\s*=\\s*[\"']?([^\"'\\s>]+)", RegexOption.IGNORE_CASE).find(rawTag)
                 colorMatch?.groupValues?.get(1)?.let { SpanStyle.Color(it) }
             }
+            "h1" -> SpanStyle.Heading(1)
+            "h2" -> SpanStyle.Heading(2)
+            "h3" -> SpanStyle.Heading(3)
             else -> null
         }
     }

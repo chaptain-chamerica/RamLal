@@ -220,9 +220,18 @@ fun RichToolbar(
             // Group 3: Typography & Sizing
             ToolGlyph(painterResource(R.drawable.ic_font_aa), "Fonts", on = pop == Pop.FONTS) { toggle(Pop.FONTS) }
             ToolGlyph(Icons.Outlined.FormatSize, "Text Size", on = pop == Pop.SIZE) { toggle(Pop.SIZE) }
-            TextGlyph("H1", FormatAction.H1, active) { fmt(it) }
-            TextGlyph("H2", FormatAction.H2, active) { fmt(it) }
-            TextGlyph("H3", FormatAction.H3, active) { fmt(it) }
+            val h1On = editorState?.isH1Active ?: (active[FormatAction.H1] == true)
+            val h2On = editorState?.isH2Active ?: (active[FormatAction.H2] == true)
+            val h3On = editorState?.isH3Active ?: (active[FormatAction.H3] == true)
+            TextGlyph("H1", h1On) {
+                if (editorState != null) editorState.toggleHeading(1) else fmt(FormatAction.H1)
+            }
+            TextGlyph("H2", h2On) {
+                if (editorState != null) editorState.toggleHeading(2) else fmt(FormatAction.H2)
+            }
+            TextGlyph("H3", h3On) {
+                if (editorState != null) editorState.toggleHeading(3) else fmt(FormatAction.H3)
+            }
 
             CategorySep()
 
@@ -414,12 +423,10 @@ private fun ToolGlyph(
 @Composable
 private fun TextGlyph(
     label: String,
-    a: FormatAction,
-    active: Map<FormatAction, Boolean>,
-    onClick: (FormatAction) -> Unit,
+    on: Boolean,
+    onClick: () -> Unit,
 ) {
     val w = wiki()
-    val on = active[a] == true
     val textColor = if (on) w.accent else w.text.copy(alpha = 0.82f)
     Box(
         modifier = Modifier
@@ -427,7 +434,7 @@ private fun TextGlyph(
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-                onClick = { onClick(a) },
+                onClick = onClick,
             ),
         contentAlignment = Alignment.Center,
     ) {
