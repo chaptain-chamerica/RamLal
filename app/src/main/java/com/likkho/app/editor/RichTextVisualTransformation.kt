@@ -61,10 +61,7 @@ class RichTextVisualTransformation(
                     }
                 }
                 is SpanStyle.Highlight -> {
-                    val bg = parseHexColor(style.hex)
-                    if (bg != null) {
-                        builder.addStyle(androidx.compose.ui.text.SpanStyle(background = bg), s, e)
-                    }
+                    // Handled by HighlightRenderer to bound highlight strictly from ascender to descender
                 }
                 else -> {}
             }

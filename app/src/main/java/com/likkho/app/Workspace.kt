@@ -17,13 +17,18 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.IntOffset
@@ -31,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.likkho.app.editor.RichTextEditorState
 import com.likkho.app.editor.RichTextVisualTransformation
+import com.likkho.app.editor.drawTextHighlights
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -172,18 +178,48 @@ fun WorkspaceScreen(vm: AppViewModel) {
             images.filter { it.behindText }.forEach { DraggableImage(it, selImg == it.id, !reading, { selImg = it.id; selAud = null }) { x, y -> images = images.map { m -> if (m.id == it.id) m.copy(x = x, y = y) else m } } }
             audios.filter { it.behindText }.forEach { AudioCard(it, selAud == it.id, !reading) { selAud = it.id; selImg = null } }
             Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+                val editorTextStyle = TextStyle(fontFamily = WikiFonts.prose, fontSize = 16.sp, lineHeight = 27.sp, color = w.text)
+                val fontFamilyResolver = LocalFontFamilyResolver.current
+                val density = LocalDensity.current
+                val resolvedTypefaceState = remember(editorTextStyle, fontFamilyResolver) {
+                    fontFamilyResolver.resolve(
+                        fontFamily = editorTextStyle.fontFamily,
+                        fontWeight = editorTextStyle.fontWeight ?: FontWeight.Normal,
+                        fontStyle = editorTextStyle.fontStyle ?: FontStyle.Normal,
+                        fontSynthesis = editorTextStyle.fontSynthesis ?: FontSynthesis.All,
+                    )
+                }
+                val fontMetrics = remember(resolvedTypefaceState.value, editorTextStyle.fontSize, density) {
+                    android.graphics.Paint().apply {
+                        typeface = resolvedTypefaceState.value as? android.graphics.Typeface
+                        textSize = with(density) { editorTextStyle.fontSize.toPx() }
+                    }.fontMetrics
+                }
+                var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+
                 BasicTextField(
                     value = editorState.textFieldValue,
                     onValueChange = { editorState.onTextFieldValueChange(it) },
                     readOnly = reading,
-                    textStyle = TextStyle(fontFamily = WikiFonts.prose, fontSize = 16.sp, lineHeight = 27.sp, color = w.text),
+                    textStyle = editorTextStyle,
                     cursorBrush = SolidColor(w.accent),
                     visualTransformation = remember(editorState.spans) {
                         RichTextVisualTransformation(editorState.spans, w.text)
                     },
+                    onTextLayout = { textLayoutResult = it },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 400.dp),
                     decorationBox = { inner ->
-                        Box {
+                        Box(
+                            modifier = Modifier.drawBehind {
+                                val layout = textLayoutResult ?: return@drawBehind
+                                drawTextHighlights(
+                                    layoutResult = layout,
+                                    spans = editorState.spans,
+                                    ascentPx = fontMetrics.ascent,
+                                    descentPx = fontMetrics.descent
+                                )
+                            }
+                        ) {
                             if (editorState.text.isEmpty()) Text("Start writing...", style = proseStyle(16.sp, w.muted.copy(alpha = 0.65f), italic = true))
                             inner()
                         }
