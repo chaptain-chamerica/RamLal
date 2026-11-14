@@ -2,7 +2,6 @@ package com.likkho.app.editor
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.ParagraphStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -53,6 +52,8 @@ private fun parseHexColor(hex: String): Color? = try {
 class RichTextVisualTransformation(
     private val spans: List<Span>,
     private val defaultTextColor: Color = Color.Unspecified,
+    private val quoteTextColor: Color = Color.Unspecified,
+    private val codeTextColor: Color = Color.Unspecified,
     private val fontResolver: (String) -> FontFamily? = { FontRegistry.resolveFontFamily(it) }
 ) : VisualTransformation {
 
@@ -65,8 +66,16 @@ class RichTextVisualTransformation(
         val textLen = raw.length
         val builder = AnnotatedString.Builder(raw)
 
-        // Apply Heading first so explicit FontId can override heading fontFamily if both are set
-        val orderedSpans = spans.sortedBy { if (it.style is SpanStyle.Heading) 0 else 1 }
+        // Apply base block styles first so explicit FontId / Color override defaults
+        val orderedSpans = spans.sortedBy {
+            when (it.style) {
+                is SpanStyle.Heading -> 0
+                is SpanStyle.Quote -> 1
+                is SpanStyle.Code -> 2
+                is SpanStyle.FontId -> 3
+                else -> 4
+            }
+        }
 
         for (span in orderedSpans) {
             val s = span.start.coerceIn(0, textLen)
@@ -80,6 +89,28 @@ class RichTextVisualTransformation(
                             fontFamily = HeadingTypographySpec.fontFamily,
                             fontSize = HeadingTypographySpec.fontSize(style.level),
                             fontWeight = HeadingTypographySpec.fontWeight(style.level)
+                        ),
+                        s,
+                        e
+                    )
+                }
+                is SpanStyle.Quote -> {
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontFamily = WikiFonts.serif,
+                            fontStyle = FontStyle.Italic,
+                            color = quoteTextColor
+                        ),
+                        s,
+                        e
+                    )
+                }
+                is SpanStyle.Code -> {
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontFamily = WikiFonts.mono,
+                            fontSize = 14.5.sp,
+                            color = codeTextColor
                         ),
                         s,
                         e
@@ -113,38 +144,6 @@ class RichTextVisualTransformation(
                     // Handled by HighlightRenderer to bound highlight strictly from ascender to descender
                 }
                 else -> {}
-            }
-        }
-
-        // Apply non-overlapping ParagraphStyle line heights for paragraphs containing headings
-        val headingSpans = spans.filter { it.style is SpanStyle.Heading }
-        if (headingSpans.isNotEmpty()) {
-            var lineStart = 0
-            while (lineStart < textLen) {
-                val nlIdx = raw.indexOf('\n', lineStart)
-                val lineEnd = if (nlIdx == -1) textLen else nlIdx
-                val paraEnd = if (nlIdx == -1) textLen else (nlIdx + 1).coerceAtMost(textLen)
-
-                if (lineStart < lineEnd && lineStart < paraEnd) {
-                    var bestLevel: Int? = null
-                    for (sp in headingSpans) {
-                        val s = sp.start.coerceIn(0, textLen)
-                        val e = sp.end.coerceIn(0, textLen)
-                        if (s < lineEnd && e > lineStart) {
-                            val lvl = (sp.style as SpanStyle.Heading).level
-                            if (bestLevel == null || lvl < bestLevel) bestLevel = lvl
-                        }
-                    }
-                    if (bestLevel != null) {
-                        builder.addStyle(
-                            ParagraphStyle(lineHeight = HeadingTypographySpec.lineHeight(bestLevel)),
-                            lineStart,
-                            paraEnd
-                        )
-                    }
-                }
-                if (nlIdx == -1) break
-                lineStart = nlIdx + 1
             }
         }
 

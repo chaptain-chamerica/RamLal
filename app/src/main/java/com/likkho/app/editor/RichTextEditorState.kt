@@ -53,6 +53,12 @@ class RichTextEditorState(
     var activeFontId by mutableStateOf<String?>(null)
         private set
 
+    var isQuoteActive by mutableStateOf(false)
+        private set
+
+    var isCodeActive by mutableStateOf(false)
+        private set
+
     val isH1Active: Boolean get() = activeHeadingLevel == 1
     val isH2Active: Boolean get() = activeHeadingLevel == 2
     val isH3Active: Boolean get() = activeHeadingLevel == 3
@@ -197,6 +203,54 @@ class RichTextEditorState(
         }
     }
 
+    fun toggleQuote() {
+        val sel = selection
+        if (sel.min < sel.max) {
+            val hasQuote = spans.any { it.style == SpanStyle.Quote && it.start <= sel.min && it.end >= sel.max }
+            if (hasQuote) {
+                removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Quote }
+                isQuoteActive = false
+            } else {
+                removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Code }
+                applyStyleToRange(sel.min, sel.max, SpanStyle.Quote)
+                isQuoteActive = true
+                isCodeActive = false
+            }
+        } else {
+            // Toggle quote strictly for future typing without altering prior default text
+            if (isQuoteActive) {
+                isQuoteActive = false
+            } else {
+                isQuoteActive = true
+                isCodeActive = false
+            }
+        }
+    }
+
+    fun toggleCode() {
+        val sel = selection
+        if (sel.min < sel.max) {
+            val hasCode = spans.any { it.style == SpanStyle.Code && it.start <= sel.min && it.end >= sel.max }
+            if (hasCode) {
+                removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Code }
+                isCodeActive = false
+            } else {
+                removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Quote }
+                applyStyleToRange(sel.min, sel.max, SpanStyle.Code)
+                isCodeActive = true
+                isQuoteActive = false
+            }
+        } else {
+            if (isCodeActive) {
+                // Disable for future typing without undoing already-typed code text
+                isCodeActive = false
+            } else {
+                isCodeActive = true
+                isQuoteActive = false
+            }
+        }
+    }
+
     private fun currentLineBounds(str: String, cursor: Int): Pair<Int, Int> {
         val pos = cursor.coerceIn(0, str.length)
         var start = pos
@@ -303,6 +357,8 @@ class RichTextEditorState(
                             is SpanStyle.Color -> activeTextColor == style.hex
                             is SpanStyle.Highlight -> activeHighlightColor == style.hex
                             is SpanStyle.FontId -> activeFontId == style.fontId
+                            is SpanStyle.Quote -> isQuoteActive
+                            is SpanStyle.Code -> isCodeActive
                             is SpanStyle.Heading -> !hasNewlineInInsert && activeHeadingLevel == style.level
                             else -> false
                         }
@@ -350,6 +406,12 @@ class RichTextEditorState(
             }
             activeFontId?.let { fontId ->
                 updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.FontId(fontId)))
+            }
+            if (isQuoteActive) {
+                updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Quote))
+            }
+            if (isCodeActive) {
+                updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Code))
             }
             activeHeadingLevel?.let { lvl ->
                 val headingEnd = if (hasNewlineInInsert) insertedStart + firstNewlineRel else insertedEnd

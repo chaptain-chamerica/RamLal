@@ -9,6 +9,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -30,6 +31,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -37,6 +39,7 @@ import androidx.compose.ui.unit.sp
 import com.likkho.app.editor.HeadingTypographySpec
 import com.likkho.app.editor.RichTextEditorState
 import com.likkho.app.editor.RichTextVisualTransformation
+import com.likkho.app.editor.drawBlockDecorations
 import com.likkho.app.editor.drawTextHighlights
 import com.likkho.app.editor.model.SpanStyle
 import kotlinx.coroutines.delay
@@ -111,6 +114,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                     if (lockPin != null) { Icon(Icons.Outlined.Lock, "Diary Locked", tint = w.danger, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)) }
                     BasicTextField(heading, { heading = it }, readOnly = reading, singleLine = true, textStyle = serifStyle(18.sp, w.text), cursorBrush = SolidColor(w.accent),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                         decorationBox = { inner -> Box { if (heading.isEmpty()) Text("Diary Heading...", style = serifStyle(18.sp, w.muted.copy(alpha = 0.6f))); inner() } })
                 }
                 if (initial != null) IconBtn(Icons.Outlined.Delete, "Delete entry", { vm.requestDelete(initial.id) }, size = 40.dp, tint = w.danger, iconSize = 18.dp)
@@ -180,7 +184,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
             images.filter { it.behindText }.forEach { DraggableImage(it, selImg == it.id, !reading, { selImg = it.id; selAud = null }) { x, y -> images = images.map { m -> if (m.id == it.id) m.copy(x = x, y = y) else m } } }
             audios.filter { it.behindText }.forEach { AudioCard(it, selAud == it.id, !reading) { selAud = it.id; selImg = null } }
             Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                val editorTextStyle = TextStyle(fontFamily = WikiFonts.prose, fontSize = 16.sp, lineHeight = 27.sp, color = w.text)
+                val editorTextStyle = TextStyle(fontFamily = WikiFonts.prose, fontSize = 16.sp, color = w.text)
                 val fontFamilyResolver = LocalFontFamilyResolver.current
                 val density = LocalDensity.current
                 val resolvedTypefaceState = remember(editorTextStyle, fontFamilyResolver) {
@@ -229,9 +233,15 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     onValueChange = { editorState.onTextFieldValueChange(it) },
                     readOnly = reading,
                     textStyle = editorTextStyle,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     cursorBrush = SolidColor(w.accent),
-                    visualTransformation = remember(editorState.spans, vm.customFonts.size) {
-                        RichTextVisualTransformation(editorState.spans, w.text)
+                    visualTransformation = remember(editorState.spans, vm.customFonts.size, w.isDark) {
+                        RichTextVisualTransformation(
+                            spans = editorState.spans,
+                            defaultTextColor = w.text,
+                            quoteTextColor = w.text.copy(alpha = 0.85f),
+                            codeTextColor = w.text
+                        )
                     },
                     onTextLayout = { textLayoutResult = it },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 400.dp),
@@ -239,6 +249,14 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         Box(
                             modifier = Modifier.drawBehind {
                                 val layout = textLayoutResult ?: return@drawBehind
+                                drawBlockDecorations(
+                                    layoutResult = layout,
+                                    spans = editorState.spans,
+                                    quoteBgColor = w.accent.copy(alpha = if (w.isDark) 0.11f else 0.055f),
+                                    quoteBarColor = w.accent,
+                                    codeBgColor = w.surface,
+                                    codeBorderColor = w.border.copy(alpha = 0.55f)
+                                )
                                 drawTextHighlights(
                                     layoutResult = layout,
                                     spans = editorState.spans,
@@ -247,27 +265,34 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     lineMetrics = { segStart, segEnd ->
                                         var bestLevel: Int? = null
                                         var activeFont: String? = null
+                                        var hasQuote = false
+                                        var hasCode = false
                                         for (sp in editorState.spans) {
                                             if (sp.start < segEnd && sp.end > segStart) {
                                                 when (val st = sp.style) {
-                                                    is com.likkho.app.editor.model.SpanStyle.Heading -> {
+                                                    is SpanStyle.Heading -> {
                                                         if (bestLevel == null || st.level < bestLevel) bestLevel = st.level
                                                     }
-                                                    is com.likkho.app.editor.model.SpanStyle.FontId -> {
-                                                        activeFont = st.fontId
-                                                    }
+                                                    is SpanStyle.FontId -> activeFont = st.fontId
+                                                    is SpanStyle.Quote -> hasQuote = true
+                                                    is SpanStyle.Code -> hasCode = true
                                                     else -> {}
                                                 }
                                             }
                                         }
-                                        val resolvedTf = activeFont?.let {
+                                        val effectiveFontId = activeFont ?: when {
+                                            hasCode -> com.likkho.app.editor.FontRegistry.BUILTIN_MONO
+                                            hasQuote -> com.likkho.app.editor.FontRegistry.BUILTIN_SERIF
+                                            else -> null
+                                        }
+                                        val effectiveSp = bestLevel?.let { HeadingTypographySpec.fontSize(it) }
+                                            ?: if (hasCode && activeFont == null) 14.5.sp else editorTextStyle.fontSize
+                                        val pxSize = with(density) { effectiveSp.toPx() }
+                                        val resolvedTf = effectiveFontId?.let {
                                             com.likkho.app.editor.FontRegistry.resolveTypeface(context, it)
                                         }
                                         val fm = when {
                                             resolvedTf != null -> {
-                                                val pxSize = with(density) {
-                                                    (bestLevel?.let { HeadingTypographySpec.fontSize(it) } ?: editorTextStyle.fontSize).toPx()
-                                                }
                                                 android.graphics.Paint().apply {
                                                     typeface = resolvedTf
                                                     textSize = pxSize
@@ -280,9 +305,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                             editorState.text[idx] in '\u0900'..'\u097F'
                                         }
                                         if (hasDevanagari) {
-                                            val pxSize = with(density) {
-                                                (bestLevel?.let { HeadingTypographySpec.fontSize(it) } ?: editorTextStyle.fontSize).toPx()
-                                            }
                                             val devFm = android.graphics.Paint().apply {
                                                 typeface = android.graphics.Typeface.DEFAULT
                                                 textSize = pxSize

@@ -34,10 +34,17 @@ object HtmlSpanCodec {
             val rawSegment = text.substring(start, end)
             var escaped = escapeHtml(rawSegment).replace("\n", "<br>")
 
-            // Find all spans active across [start, end), placing non-heading styles inner and heading outermost
+            // Find all spans active across [start, end), placing inline styles inner and Quote/Heading outer
             val active = normalized
                 .filter { it.start <= start && it.end >= end }
-                .sortedBy { if (it.style is SpanStyle.Heading) 1 else 0 }
+                .sortedBy {
+                    when (it.style) {
+                        is SpanStyle.Heading -> 3
+                        is SpanStyle.Quote -> 2
+                        is SpanStyle.Code -> 1
+                        else -> 0
+                    }
+                }
 
             // Wrap with tags in consistent order
             for (sp in active) {
@@ -49,6 +56,8 @@ object HtmlSpanCodec {
                     is SpanStyle.Color -> "<span style=\"color:${s.hex}\">$escaped</span>"
                     is SpanStyle.Highlight -> "<mark style=\"background-color:${s.hex}\">$escaped</mark>"
                     is SpanStyle.FontId -> "<span data-font=\"${escapeHtml(s.fontId)}\">$escaped</span>"
+                    is SpanStyle.Code -> "<code>$escaped</code>"
+                    is SpanStyle.Quote -> "<blockquote>$escaped</blockquote>"
                     is SpanStyle.Heading -> "<h${s.level}>$escaped</h${s.level}>"
                     else -> escaped
                 }
@@ -111,6 +120,8 @@ object HtmlSpanCodec {
                             is SpanStyle.Color -> tagName == "span" || tagName == "font"
                             is SpanStyle.Highlight -> tagName == "mark" || tagName == "span"
                             is SpanStyle.FontId -> tagName == "span" || tagName == "font"
+                            is SpanStyle.Quote -> tagName == "blockquote"
+                            is SpanStyle.Code -> tagName == "code"
                             is SpanStyle.Heading -> tagName == "h${it.style.level}"
                             else -> false
                         }
@@ -193,6 +204,8 @@ object HtmlSpanCodec {
             "h1" -> SpanStyle.Heading(1)
             "h2" -> SpanStyle.Heading(2)
             "h3" -> SpanStyle.Heading(3)
+            "blockquote" -> SpanStyle.Quote
+            "code" -> SpanStyle.Code
             else -> null
         }
     }

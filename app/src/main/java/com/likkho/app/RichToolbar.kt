@@ -311,8 +311,14 @@ fun RichToolbar(
             ToolGlyph(Icons.Outlined.FormatListBulleted, "Bullet List", on = active[FormatAction.BULLET] == true) { fmt(FormatAction.BULLET) }
             ToolGlyph(Icons.Outlined.FormatListNumbered, "Numbered List", on = active[FormatAction.NUMBERED] == true) { fmt(FormatAction.NUMBERED) }
             ToolGlyph(Icons.Outlined.CheckBox, "Checklist", on = active[FormatAction.TODO] == true) { fmt(FormatAction.TODO) }
-            ToolGlyph(Icons.Outlined.FormatQuote, "Quote Block", on = active[FormatAction.QUOTE] == true) { fmt(FormatAction.QUOTE) }
-            ToolGlyph(Icons.Outlined.Code, "Code Block", on = active[FormatAction.CODE] == true) { fmt(FormatAction.CODE) }
+            val quoteOn = editorState?.isQuoteActive ?: (active[FormatAction.QUOTE] == true)
+            val codeOn = editorState?.isCodeActive ?: (active[FormatAction.CODE] == true)
+            ToolGlyph(Icons.Outlined.FormatQuote, "Quote Block", on = quoteOn) {
+                if (editorState != null) editorState.toggleQuote() else fmt(FormatAction.QUOTE)
+            }
+            ToolGlyph(Icons.Outlined.Code, "Code Block", on = codeOn) {
+                if (editorState != null) editorState.toggleCode() else fmt(FormatAction.CODE)
+            }
             ToolGlyph(Icons.Outlined.HorizontalRule, "Section Divider") { fmt(FormatAction.DIVIDER, false) }
 
             CategorySep()

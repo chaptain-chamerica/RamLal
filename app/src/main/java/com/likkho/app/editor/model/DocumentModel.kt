@@ -127,6 +127,20 @@ sealed interface SpanStyle {
         override val valueString: String get() = level.toString()
     }
 
+    @Serializable
+    @SerialName("quote")
+    data object Quote : SpanStyle {
+        override val styleKey: String = "quote"
+        override val valueString: String? = null
+    }
+
+    @Serializable
+    @SerialName("code")
+    data object Code : SpanStyle {
+        override val styleKey: String = "code"
+        override val valueString: String? = null
+    }
+
     companion object {
         fun fromRecord(record: SpanStyleRecord): SpanStyle = when (record.style.lowercase()) {
             "bold" -> Bold
@@ -141,6 +155,8 @@ sealed interface SpanStyle {
             "fontid" -> FontId(record.value ?: "default")
             "link" -> Link(record.value ?: "")
             "heading" -> Heading(record.value?.toIntOrNull()?.coerceIn(1, 3) ?: 1)
+            "quote" -> Quote
+            "code" -> Code
             else -> Bold
         }
     }

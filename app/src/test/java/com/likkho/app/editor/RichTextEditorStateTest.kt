@@ -363,5 +363,113 @@ class RichTextEditorStateTest {
         reimported.setFont(null)
         assertFalse(reimported.spans.any { it.style is SpanStyle.FontId })
     }
+
+    @Test
+    fun quote_and_code_oneClickEnableDisable_multiLine_neverUndo_neverAutoEnableOnCursorMove() {
+        val editor = RichTextEditorState()
+        assertFalse(editor.isQuoteActive)
+        assertFalse(editor.isCodeActive)
+
+        // 1. One click enables Quote and typing across lines preserves Quote without turning off on newline
+        editor.toggleQuote()
+        assertTrue(editor.isQuoteActive)
+        assertFalse(editor.isCodeActive)
+        editor.onTextFieldValueChange(TextFieldValue("Quote line 1\nQuote line 2", TextRange(25)))
+        assertEquals(listOf(Span(0, 25, SpanStyle.Quote)), editor.spans)
+
+        // 2. One click disables Quote: previously typed quote MUST NOT be undone, future typing is default
+        editor.toggleQuote()
+        assertFalse(editor.isQuoteActive)
+        editor.onTextFieldValueChange(TextFieldValue("Quote line 1\nQuote line 2\nNormal", TextRange(32)))
+        assertTrue(editor.spans.contains(Span(0, 25, SpanStyle.Quote)))
+        assertFalse(editor.spans.any { it.end > 25 })
+
+        // 3. Moving cursor inside Quote when disabled MUST NOT auto-enable Quote
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(5)))
+        assertFalse(editor.isQuoteActive)
+
+        // 4. One click enables Code at end and typing applies Code without converting prior line
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(32)))
+        editor.onTextFieldValueChange(TextFieldValue("Quote line 1\nQuote line 2\nNormal\n", TextRange(33)))
+        editor.toggleCode()
+        assertTrue(editor.isCodeActive)
+        assertFalse(editor.isQuoteActive)
+        editor.onTextFieldValueChange(TextFieldValue("Quote line 1\nQuote line 2\nNormal\nval x = 1", TextRange(42)))
+        assertTrue(editor.spans.contains(Span(33, 42, SpanStyle.Code)))
+
+        // 5. One click disables Code: previous code stays intact, future typing is normal
+        editor.toggleCode()
+        assertFalse(editor.isCodeActive)
+        editor.onTextFieldValueChange(TextFieldValue("Quote line 1\nQuote line 2\nNormal\nval x = 1 end", TextRange(46)))
+        assertEquals(listOf(Span(0, 25, SpanStyle.Quote), Span(33, 42, SpanStyle.Code)), editor.spans)
+
+        // 6. Placing cursor inside Code when disabled MUST NOT auto-enable Code
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(36)))
+        assertFalse(editor.isCodeActive)
+    }
+
+    @Test
+    fun quote_and_code_selectionToggle_and_htmlRoundTrip() {
+        val text = "Say: सत्यमेव जयते and val a = 1"
+        val quoteSub = "सत्यमेव जयते"
+        val codeSub = "val a = 1"
+        val qStart = text.indexOf(quoteSub)
+        val qEnd = qStart + quoteSub.length
+        val cStart = text.indexOf(codeSub)
+        val cEnd = cStart + codeSub.length
+
+        val editor = RichTextEditorState(text)
+        // Select Hindi quote substring
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(qStart, qEnd)))
+        editor.toggleQuote()
+        assertTrue(editor.isQuoteActive)
+        assertTrue(editor.spans.contains(Span(qStart, qEnd, SpanStyle.Quote)))
+
+        // Select code substring "val a = 1"
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(cStart, cEnd)))
+        editor.toggleCode()
+        assertTrue(editor.isCodeActive)
+        assertFalse(editor.isQuoteActive)
+        assertTrue(editor.spans.contains(Span(cStart, cEnd, SpanStyle.Code)))
+
+        val html = editor.toHtml()
+        assertTrue(html.contains("<blockquote>सत्यमेव जयते</blockquote>"))
+        assertTrue(html.contains("<code>val a = 1</code>"))
+
+        val reimported = RichTextEditorState.fromHtml(html)
+        assertEquals(editor.text, reimported.text)
+        assertEquals(editor.spans, reimported.spans)
+
+        // Toggle off Code on selection with one click
+        reimported.onTextFieldValueChange(reimported.textFieldValue.copy(selection = TextRange(cStart, cEnd)))
+        reimported.toggleCode()
+        assertFalse(reimported.spans.any { it.style == SpanStyle.Code })
+        assertTrue(reimported.spans.contains(Span(qStart, qEnd, SpanStyle.Quote)))
+    }
+
+    @Test
+    fun quote_enablingMidLineDoesNotConvertPrecedingDefaultText_and_noParagraphStyleSplitOnNewline() {
+        val editor = RichTextEditorState()
+        // 1. Write default text first
+        editor.onTextFieldValueChange(TextFieldValue("Default text ", TextRange(13)))
+        assertTrue(editor.spans.isEmpty())
+
+        // 2. Enable Quote at collapsed cursor -> MUST NOT quote "Default text "
+        editor.toggleQuote()
+        assertTrue(editor.isQuoteActive)
+        assertTrue(editor.spans.isEmpty())
+
+        // 3. Write quoted text after default text
+        val full = "Default text quoted\nnext line"
+        editor.onTextFieldValueChange(TextFieldValue(full, TextRange(full.length)))
+        assertEquals(listOf(Span(13, full.length, SpanStyle.Quote)), editor.spans)
+
+        // 4. VisualTransformation must not inject ParagraphStyle splits (which caused 2-line Enter jump)
+        val transformed = RichTextVisualTransformation(editor.spans)
+            .filter(androidx.compose.ui.text.AnnotatedString(full))
+            .text
+        assertTrue(transformed.paragraphStyles.isEmpty())
+    }
 }
+
 
