@@ -50,6 +50,9 @@ class RichTextEditorState(
     var activeHeadingLevel by mutableStateOf<Int?>(null)
         private set
 
+    var activeFontId by mutableStateOf<String?>(null)
+        private set
+
     val isH1Active: Boolean get() = activeHeadingLevel == 1
     val isH2Active: Boolean get() = activeHeadingLevel == 2
     val isH3Active: Boolean get() = activeHeadingLevel == 3
@@ -147,6 +150,19 @@ class RichTextEditorState(
             removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.Highlight }
             if (cleanHex != null) {
                 applyStyleToRange(sel.min, sel.max, SpanStyle.Highlight(cleanHex))
+            }
+        }
+    }
+
+    fun setFont(fontId: String?) {
+        val cleanId = if (fontId == null || fontId == "default" || fontId.isBlank()) null else fontId
+        activeFontId = cleanId
+
+        val sel = selection
+        if (sel.min < sel.max) {
+            removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.FontId }
+            if (cleanId != null) {
+                applyStyleToRange(sel.min, sel.max, SpanStyle.FontId(cleanId))
             }
         }
     }
@@ -286,6 +302,7 @@ class RichTextEditorState(
                             is SpanStyle.Strike -> isStrikeActive
                             is SpanStyle.Color -> activeTextColor == style.hex
                             is SpanStyle.Highlight -> activeHighlightColor == style.hex
+                            is SpanStyle.FontId -> activeFontId == style.fontId
                             is SpanStyle.Heading -> !hasNewlineInInsert && activeHeadingLevel == style.level
                             else -> false
                         }
@@ -330,6 +347,9 @@ class RichTextEditorState(
             }
             activeHighlightColor?.let { hex ->
                 updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Highlight(hex)))
+            }
+            activeFontId?.let { fontId ->
+                updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.FontId(fontId)))
             }
             activeHeadingLevel?.let { lvl ->
                 val headingEnd = if (hasNewlineInInsert) insertedStart + firstNewlineRel else insertedEnd

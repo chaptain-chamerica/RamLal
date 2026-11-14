@@ -74,7 +74,7 @@ data class MicSettings(val format: String = "wav", val sampleRate: Int = 44100, 
 
 data class SavedPassword(val id: String, val name: String, val password: String, val createdAt: Long)
 
-data class CustomFont(val id: String, val name: String, val lang: String)
+data class CustomFont(val id: String, val name: String, val lang: String, val filePath: String = "")
 
 data class AppUpdateInfo(
     val currentVersion: String,

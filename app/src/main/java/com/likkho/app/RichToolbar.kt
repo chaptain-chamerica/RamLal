@@ -1,5 +1,7 @@
 package com.likkho.app
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -24,6 +26,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.likkho.app.R
+import com.likkho.app.editor.FontRegistry
 import com.likkho.app.editor.RichTextEditorState
 import kotlinx.coroutines.launch
 
@@ -53,7 +56,24 @@ fun RichToolbar(
     var wikiBusy by remember { mutableStateOf(false) }; var sugg by remember { mutableStateOf<List<WikiSuggestion>>(emptyList()) }
     var latex by remember { mutableStateOf("") }; var cat by remember { mutableStateOf(0) }
     var word by remember { mutableStateOf("") }; var wordBusy by remember { mutableStateOf(false) }; var wordResult by remember { mutableStateOf<WordAnalysisRecord?>(null) }
-    var fontId by remember { mutableStateOf<String?>(null) }; var fontsOn by remember { mutableStateOf(false) }
+    var fontId by remember { mutableStateOf<String?>(null) }
+    val fontPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val imported = vm.importCustomFont(uri)
+                if (imported != null) {
+                    editorState?.setFont(imported.id)
+                    fontId = imported.id
+                    hooks.applyFont(imported.id)
+                    hint = "Added font: ${imported.name}"
+                    kotlinx.coroutines.delay(2200)
+                    hint = null
+                } else {
+                    vm.showStatus("Please select a valid .ttf or .otf font file.")
+                }
+            }
+        }
+    }
     LaunchedEffect(wikiQ, wikiLang) { sugg = if (wikiQ.isBlank()) emptyList() else runCatching { hooks.wikipediaSuggest(wikiQ, wikiLang) }.getOrDefault(emptyList()) }
 
     fun fmt(a: FormatAction, sticky: Boolean = true) { hooks.applyFormat(a); if (sticky) active[a] = !(active[a] ?: false) }
@@ -121,15 +141,47 @@ fun RichToolbar(
                 }
             }
             Pop.FONTS -> Pop1 {
+                val activeFont = if (editorState != null) editorState.activeFontId else fontId
+                val fontsActive = activeFont != null
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Custom Fonts", style = sansStyle(11.sp, w.muted, FontWeight.SemiBold), modifier = Modifier.weight(1f))
-                    Box(Modifier.clickable { fontsOn = !fontsOn; if (!fontsOn) { fontId = null; hooks.applyFont(null) } }) { WikiSwitch(fontsOn) }
+                    Text(
+                        "Fonts (Tap to Enable/Disable)",
+                        style = sansStyle(11.sp, w.muted, FontWeight.SemiBold),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Box(
+                        Modifier.clickable {
+                            if (fontsActive) {
+                                editorState?.setFont(null)
+                                fontId = null
+                                hooks.applyFont(null)
+                            }
+                        }
+                    ) { WikiSwitch(fontsActive) }
                 }
-                val builtin = listOf("builtin_serif" to "Cormorant", "builtin_sans" to "Jakarta Sans", "builtin_mono" to "Monospace") + vm.customFonts.map { it.id to it.name }
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    builtin.forEach { (id, n) -> TChip(n, fontId == id) { fontId = id; hooks.applyFont(id) } }
-                    TChip("+ English .ttf", false) { scope.launch { hooks.pickFont("en")?.let { vm.customFonts.add(it) } } }
-                    TChip("+ हिन्दी .ttf", false) { scope.launch { hooks.pickFont("hi")?.let { vm.customFonts.add(it) } } }
+                val allFonts = FontRegistry.builtinFonts + vm.customFonts.map { it.id to it.name }
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    for ((id, name) in allFonts) {
+                        val selected = activeFont == id
+                        TChip(name, selected) {
+                            if (selected) {
+                                editorState?.setFont(null)
+                                fontId = null
+                                hooks.applyFont(null)
+                            } else {
+                                editorState?.setFont(id)
+                                fontId = id
+                                hooks.applyFont(id)
+                                pop = Pop.NONE
+                            }
+                        }
+                    }
+                    TChip("+ Add .ttf", false) {
+                        fontPickerLauncher.launch(arrayOf("*/*"))
+                    }
                 }
             }
             Pop.SIZE -> Pop1 {
@@ -218,7 +270,8 @@ fun RichToolbar(
             CategorySep()
 
             // Group 3: Typography & Sizing
-            ToolGlyph(painterResource(R.drawable.ic_font_aa), "Fonts", on = pop == Pop.FONTS) { toggle(Pop.FONTS) }
+            val fontToolOn = pop == Pop.FONTS || (editorState?.activeFontId ?: fontId) != null
+            ToolGlyph(painterResource(R.drawable.ic_font_aa), "Fonts", on = fontToolOn) { toggle(Pop.FONTS) }
             ToolGlyph(Icons.Outlined.FormatSize, "Text Size", on = pop == Pop.SIZE) { toggle(Pop.SIZE) }
             val h1On = editorState?.isH1Active ?: (active[FormatAction.H1] == true)
             val h2On = editorState?.isH2Active ?: (active[FormatAction.H2] == true)

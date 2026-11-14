@@ -292,4 +292,76 @@ class RichTextEditorStateTest {
         editor.toggleHeading(2)
         assertFalse(editor.spans.any { it.style == SpanStyle.Heading(2) })
     }
+
+    @Test
+    fun font_enable_typesEnglishAndHindi_disable_neverUndos_and_cursorMoveNeverAutoEnables() {
+        val editor = RichTextEditorState()
+        assertNull(editor.activeFontId)
+
+        // 1. Enable built-in font and type English
+        editor.setFont(FontRegistry.BUILTIN_MONO)
+        assertEquals(FontRegistry.BUILTIN_MONO, editor.activeFontId)
+        editor.onTextFieldValueChange(TextFieldValue("Mono ", TextRange(5)))
+        assertEquals(listOf(Span(0, 5, SpanStyle.FontId(FontRegistry.BUILTIN_MONO))), editor.spans)
+
+        // 2. Switch to custom Hindi/English font and type Hindi text
+        val customId = "custom_font_devanagari"
+        editor.setFont(customId)
+        assertEquals(customId, editor.activeFontId)
+        val withHindi = "Mono मेरा नाम "
+        editor.onTextFieldValueChange(TextFieldValue(withHindi, TextRange(withHindi.length)))
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.FontId(FontRegistry.BUILTIN_MONO))))
+        assertTrue(editor.spans.contains(Span(5, withHindi.length, SpanStyle.FontId(customId))))
+
+        // 3. Disable font tool: previous styled text must NOT be undone, future text must be default
+        editor.setFont(null)
+        assertNull(editor.activeFontId)
+        val afterDisable = withHindi + "Normal"
+        editor.onTextFieldValueChange(TextFieldValue(afterDisable, TextRange(afterDisable.length)))
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.FontId(FontRegistry.BUILTIN_MONO))))
+        assertTrue(editor.spans.contains(Span(5, withHindi.length, SpanStyle.FontId(customId))))
+        assertFalse(editor.spans.any { it.end > withHindi.length })
+
+        // 4. Moving cursor inside font-styled word when disabled must NOT auto-enable font tool
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(2)))
+        assertNull(editor.activeFontId)
+
+        // 5. Typing at cursor inside "Mono" while disabled splits the font span without styling inserted char
+        editor.onTextFieldValueChange(TextFieldValue("MoXno मेरा नाम Normal", TextRange(3)))
+        assertNull(editor.activeFontId)
+        val monoSpans = editor.spans.filter { it.style == SpanStyle.FontId(FontRegistry.BUILTIN_MONO) }
+        assertEquals(listOf(Span(0, 2, SpanStyle.FontId(FontRegistry.BUILTIN_MONO)), Span(3, 6, SpanStyle.FontId(FontRegistry.BUILTIN_MONO))), monoSpans)
+    }
+
+    @Test
+    fun font_selection_applyReplaceAndClear_and_htmlRoundTrip() {
+        val editor = RichTextEditorState("Hello दुनिया")
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(6, 12)))
+        editor.setFont(FontRegistry.BUILTIN_SERIF)
+        assertEquals(listOf(Span(6, 12, SpanStyle.FontId(FontRegistry.BUILTIN_SERIF))), editor.spans)
+
+        // Replace font on same selection
+        editor.setFont("custom_font_abc")
+        assertEquals(listOf(Span(6, 12, SpanStyle.FontId("custom_font_abc"))), editor.spans)
+
+        // Combine with Bold + Heading and verify HTML round-trip
+        editor.toggleBold()
+        editor.toggleHeading(2)
+        val html = editor.toHtml()
+        assertTrue(html.contains("data-font=\"custom_font_abc\""))
+        assertTrue(html.contains("<h2>"))
+        assertTrue(html.contains("<b>"))
+
+        val reimported = RichTextEditorState.fromHtml(html)
+        assertEquals("Hello दुनिया", reimported.text)
+        assertTrue(reimported.spans.contains(Span(6, 12, SpanStyle.FontId("custom_font_abc"))))
+        assertTrue(reimported.spans.contains(Span(6, 12, SpanStyle.Bold)))
+        assertTrue(reimported.spans.contains(Span(6, 12, SpanStyle.Heading(2))))
+
+        // Clear font on selection
+        reimported.onTextFieldValueChange(reimported.textFieldValue.copy(selection = TextRange(6, 12)))
+        reimported.setFont(null)
+        assertFalse(reimported.spans.any { it.style is SpanStyle.FontId })
+    }
 }
+

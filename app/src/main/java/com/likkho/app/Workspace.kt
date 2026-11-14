@@ -221,6 +221,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         }.fontMetrics,
                     )
                 }
+                val context = androidx.compose.ui.platform.LocalContext.current
                 var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
 
                 BasicTextField(
@@ -229,7 +230,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     readOnly = reading,
                     textStyle = editorTextStyle,
                     cursorBrush = SolidColor(w.accent),
-                    visualTransformation = remember(editorState.spans) {
+                    visualTransformation = remember(editorState.spans, vm.customFonts.size) {
                         RichTextVisualTransformation(editorState.spans, w.text)
                     },
                     onTextLayout = { textLayoutResult = it },
@@ -245,14 +246,51 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     descentPx = fontMetrics.descent,
                                     lineMetrics = { segStart, segEnd ->
                                         var bestLevel: Int? = null
+                                        var activeFont: String? = null
                                         for (sp in editorState.spans) {
-                                            val hs = sp.style as? SpanStyle.Heading ?: continue
                                             if (sp.start < segEnd && sp.end > segStart) {
-                                                if (bestLevel == null || hs.level < bestLevel) bestLevel = hs.level
+                                                when (val st = sp.style) {
+                                                    is com.likkho.app.editor.model.SpanStyle.Heading -> {
+                                                        if (bestLevel == null || st.level < bestLevel) bestLevel = st.level
+                                                    }
+                                                    is com.likkho.app.editor.model.SpanStyle.FontId -> {
+                                                        activeFont = st.fontId
+                                                    }
+                                                    else -> {}
+                                                }
                                             }
                                         }
-                                        val fm = bestLevel?.let { headingFontMetrics[it] } ?: fontMetrics
-                                        fm.ascent to fm.descent
+                                        val resolvedTf = activeFont?.let {
+                                            com.likkho.app.editor.FontRegistry.resolveTypeface(context, it)
+                                        }
+                                        val fm = when {
+                                            resolvedTf != null -> {
+                                                val pxSize = with(density) {
+                                                    (bestLevel?.let { HeadingTypographySpec.fontSize(it) } ?: editorTextStyle.fontSize).toPx()
+                                                }
+                                                android.graphics.Paint().apply {
+                                                    typeface = resolvedTf
+                                                    textSize = pxSize
+                                                }.fontMetrics
+                                            }
+                                            bestLevel != null -> headingFontMetrics[bestLevel] ?: fontMetrics
+                                            else -> fontMetrics
+                                        }
+                                        val hasDevanagari = (segStart until segEnd.coerceAtMost(editorState.text.length)).any { idx ->
+                                            editorState.text[idx] in '\u0900'..'\u097F'
+                                        }
+                                        if (hasDevanagari) {
+                                            val pxSize = with(density) {
+                                                (bestLevel?.let { HeadingTypographySpec.fontSize(it) } ?: editorTextStyle.fontSize).toPx()
+                                            }
+                                            val devFm = android.graphics.Paint().apply {
+                                                typeface = android.graphics.Typeface.DEFAULT
+                                                textSize = pxSize
+                                            }.fontMetrics
+                                            minOf(fm.ascent, devFm.ascent) to maxOf(fm.descent, devFm.descent)
+                                        } else {
+                                            fm.ascent to fm.descent
+                                        }
                                     }
                                 )
                             }

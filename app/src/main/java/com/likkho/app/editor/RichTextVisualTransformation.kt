@@ -46,12 +46,14 @@ private fun parseHexColor(hex: String): Color? = try {
 }
 
 /**
- * VisualTransformation that renders H1/H2/H3 headings, bold, italic, underline, strike, and text color
- * in Compose text fields without altering text indices or offsets.
+ * VisualTransformation that renders H1/H2/H3 headings, custom/built-in fonts,
+ * bold, italic, underline, strike, and text color in Compose text fields
+ * without altering text indices or offsets (UTF-16 safe for English & Hindi).
  */
 class RichTextVisualTransformation(
     private val spans: List<Span>,
-    private val defaultTextColor: Color = Color.Unspecified
+    private val defaultTextColor: Color = Color.Unspecified,
+    private val fontResolver: (String) -> FontFamily? = { FontRegistry.resolveFontFamily(it) }
 ) : VisualTransformation {
 
     override fun filter(text: AnnotatedString): TransformedText {
@@ -63,7 +65,10 @@ class RichTextVisualTransformation(
         val textLen = raw.length
         val builder = AnnotatedString.Builder(raw)
 
-        for (span in spans) {
+        // Apply Heading first so explicit FontId can override heading fontFamily if both are set
+        val orderedSpans = spans.sortedBy { if (it.style is SpanStyle.Heading) 0 else 1 }
+
+        for (span in orderedSpans) {
             val s = span.start.coerceIn(0, textLen)
             val e = span.end.coerceIn(0, textLen)
             if (s >= e) continue
@@ -79,6 +84,12 @@ class RichTextVisualTransformation(
                         s,
                         e
                     )
+                }
+                is SpanStyle.FontId -> {
+                    val family = fontResolver(style.fontId)
+                    if (family != null) {
+                        builder.addStyle(androidx.compose.ui.text.SpanStyle(fontFamily = family), s, e)
+                    }
                 }
                 is SpanStyle.Bold -> {
                     builder.addStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold), s, e)

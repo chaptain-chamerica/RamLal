@@ -2,12 +2,14 @@ package com.likkho.app
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.likkho.app.editor.FontRegistry
 import com.likkho.app.storage.CryptoUtils
 import com.likkho.app.storage.UnlockResult
 import com.likkho.app.storage.VaultId
@@ -96,7 +98,11 @@ class AppViewModel @JvmOverloads constructor(
                     } else emptyList()
                 } else emptyList()
 
+                val savedFonts = FontRegistry.loadSavedFonts(fontStorageDir())
+
                 withContext(Dispatchers.Main) {
+                    customFonts.clear()
+                    customFonts.addAll(savedFonts)
                     biometricsEnabled = bio
                     if (hasPrimary) {
                         isLocked = true
@@ -358,9 +364,25 @@ class AppViewModel @JvmOverloads constructor(
         return false
     }
 
+    private fun fontStorageDir(): File =
+        (hooks as? RealFeatureHooks)?.baseStorageDir ?: getApplication<Application>().filesDir
+
+    suspend fun importCustomFont(uri: Uri): CustomFont? = withContext(Dispatchers.IO) {
+        val imported = FontRegistry.importFontFromUri(getApplication(), uri, fontStorageDir())
+        if (imported != null) {
+            withContext(Dispatchers.Main) {
+                if (customFonts.none { it.id == imported.id }) {
+                    customFonts.add(imported)
+                }
+            }
+        }
+        imported
+    }
+
     fun clearAllAppData() {
         viewModelScope.launch(Dispatchers.IO) {
             hooks.clearAllData()
+            FontRegistry.clearAll(fontStorageDir())
             withContext(Dispatchers.Main) {
                 logs.clear(); customFonts.clear()
                 micSettings = MicSettings(); savedPasscode = null; secondaryPasscode = null

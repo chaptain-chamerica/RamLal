@@ -48,6 +48,7 @@ object HtmlSpanCodec {
                     is SpanStyle.Strike -> "<s>$escaped</s>"
                     is SpanStyle.Color -> "<span style=\"color:${s.hex}\">$escaped</span>"
                     is SpanStyle.Highlight -> "<mark style=\"background-color:${s.hex}\">$escaped</mark>"
+                    is SpanStyle.FontId -> "<span data-font=\"${escapeHtml(s.fontId)}\">$escaped</span>"
                     is SpanStyle.Heading -> "<h${s.level}>$escaped</h${s.level}>"
                     else -> escaped
                 }
@@ -109,6 +110,7 @@ object HtmlSpanCodec {
                             is SpanStyle.Strike -> tagName == "s" || tagName == "strike" || tagName == "del"
                             is SpanStyle.Color -> tagName == "span" || tagName == "font"
                             is SpanStyle.Highlight -> tagName == "mark" || tagName == "span"
+                            is SpanStyle.FontId -> tagName == "span" || tagName == "font"
                             is SpanStyle.Heading -> tagName == "h${it.style.level}"
                             else -> false
                         }
@@ -171,12 +173,16 @@ object HtmlSpanCodec {
                 SpanStyle.Highlight(hex)
             }
             "span" -> {
+                val dataFont = extractAttr(rawTag, "data-font")
                 val colorHex = extractColorFromStyle(rawTag, "color")
                 val bgHex = extractColorFromStyle(rawTag, "background-color")
                     ?: extractColorFromStyle(rawTag, "background")
+                val fontFamily = extractColorFromStyle(rawTag, "font-family")
                 when {
+                    dataFont != null -> SpanStyle.FontId(unescapeHtml(dataFont))
                     colorHex != null -> SpanStyle.Color(colorHex)
                     bgHex != null -> SpanStyle.Highlight(bgHex)
+                    fontFamily != null -> SpanStyle.FontId(unescapeHtml(fontFamily))
                     else -> null
                 }
             }
@@ -189,6 +195,11 @@ object HtmlSpanCodec {
             "h3" -> SpanStyle.Heading(3)
             else -> null
         }
+    }
+
+    private fun extractAttr(tag: String, attr: String): String? {
+        val match = Regex("$attr\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE).find(tag)
+        return match?.groupValues?.get(1)?.trim()
     }
 
     private fun extractColorFromStyle(tag: String, property: String): String? {
