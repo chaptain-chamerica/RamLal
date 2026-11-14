@@ -142,24 +142,18 @@ fun RichToolbar(
             }
             Pop.FONTS -> Pop1 {
                 val activeFont = if (editorState != null) editorState.activeFontId else fontId
-                val fontsActive = activeFont != null
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                val allFonts = FontRegistry.builtinFonts + vm.customFonts.map { it.id to it.name }
+                val activeFontName = allFonts.firstOrNull { it.first == activeFont }?.second
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "Fonts (Tap to Enable/Disable)",
                         style = sansStyle(11.sp, w.muted, FontWeight.SemiBold),
                         modifier = Modifier.weight(1f)
                     )
-                    Box(
-                        Modifier.clickable {
-                            if (fontsActive) {
-                                editorState?.setFont(null)
-                                fontId = null
-                                hooks.applyFont(null)
-                            }
-                        }
-                    ) { WikiSwitch(fontsActive) }
+                    if (activeFontName != null) {
+                        Text("Active: $activeFontName", style = monoStyle(10.sp, w.accent))
+                    }
                 }
-                val allFonts = FontRegistry.builtinFonts + vm.customFonts.map { it.id to it.name }
                 Row(
                     Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -175,8 +169,8 @@ fun RichToolbar(
                                 editorState?.setFont(id)
                                 fontId = id
                                 hooks.applyFont(id)
-                                pop = Pop.NONE
                             }
+                            pop = Pop.NONE
                         }
                     }
                     TChip("+ Add .ttf", false) {
