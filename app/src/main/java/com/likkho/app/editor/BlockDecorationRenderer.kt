@@ -16,6 +16,7 @@ data class QuoteBlockRect(
     val top: Float,
     val right: Float,
     val bottom: Float,
+    val barWidth: Float,
     val isFullLine: Boolean = true
 )
 
@@ -29,8 +30,49 @@ data class CodeBoxRect(
 
 /**
  * Pure layout geometry calculator for Quote block bars/tints and Code blocks / inline code boxes.
+ * Tightly wraps actual text bounds without stretching across empty line space or overlapping prior text.
  */
 object BlockDecorationLayoutCalculator {
+
+    private fun prevVisibleCharRight(
+        text: String,
+        lineStart: Int,
+        segStart: Int,
+        getCharLeft: (Int) -> Float,
+        getCharRight: (Int) -> Float
+    ): Float? {
+        var idx = segStart - 1
+        while (idx >= lineStart) {
+            if (!text[idx].isWhitespace()) {
+                val l = getCharLeft(idx)
+                val r = getCharRight(idx)
+                val maxEdge = maxOf(l, r)
+                return if (maxEdge.isFinite()) maxEdge else null
+            }
+            idx--
+        }
+        return null
+    }
+
+    private fun lineSegmentHorizontalBounds(
+        segStart: Int,
+        segEnd: Int,
+        getCharLeft: (Int) -> Float,
+        getCharRight: (Int) -> Float
+    ): Pair<Float, Float>? {
+        var minLeft = Float.POSITIVE_INFINITY
+        var maxRight = Float.NEGATIVE_INFINITY
+        for (idx in segStart until segEnd) {
+            val l = getCharLeft(idx)
+            val r = getCharRight(idx)
+            if (l.isFinite() && r.isFinite()) {
+                minLeft = minOf(minLeft, minOf(l, r))
+                maxRight = maxOf(maxRight, maxOf(l, r))
+            }
+        }
+        if (!minLeft.isFinite() || !maxRight.isFinite() || maxRight <= minLeft) return null
+        return minLeft to maxRight
+    }
 
     fun computeQuoteBlocks(
         text: String,
@@ -40,6 +82,9 @@ object BlockDecorationLayoutCalculator {
         blockOutsetLeftPx: Float = 0f,
         blockOutsetRightPx: Float = 0f,
         inlinePadPx: Float = 0f,
+        barWidthPx: Float = 3f,
+        gapFromPrevPx: Float = 1f,
+        verticalInsetPx: Float = 1f,
         getLineForOffset: (Int) -> Int,
         getLineStart: (Int) -> Int,
         getLineEnd: (Int) -> Int,
@@ -52,7 +97,8 @@ object BlockDecorationLayoutCalculator {
         val quoteSpans = spans.filter { it.style is SpanStyle.Quote }
         if (quoteSpans.isEmpty()) return emptyList()
 
-        val fullLines = sortedSetOf<Int>()
+        data class FullLineEntry(val line: Int, val minLeft: Float, val maxRight: Float)
+        val fullLineMap = sortedMapOf<Int, Pair<Float, Float>>()
         val partialRects = mutableListOf<QuoteBlockRect>()
 
         for (sp in quoteSpans) {
@@ -71,61 +117,67 @@ object BlockDecorationLayoutCalculator {
                 }
                 if (segStart >= segEnd) continue
 
-                if (segStart <= ls) {
-                    fullLines.add(line)
+                val bounds = lineSegmentHorizontalBounds(segStart, segEnd, getCharLeft, getCharRight) ?: continue
+                val (minLeft, maxRight) = bounds
+                val prevRight = if (segStart > ls) prevVisibleCharRight(text, ls, segStart, getCharLeft, getCharRight) else null
+
+                if (prevRight == null) {
+                    val existing = fullLineMap[line]
+                    fullLineMap[line] = if (existing == null) {
+                        minLeft to maxRight
+                    } else {
+                        minOf(existing.first, minLeft) to maxOf(existing.second, maxRight)
+                    }
                 } else {
-                    var minLeft = Float.POSITIVE_INFINITY
-                    var maxRight = Float.NEGATIVE_INFINITY
-                    for (idx in segStart until segEnd) {
-                        val cLeft = getCharLeft(idx)
-                        val cRight = getCharRight(idx)
-                        minLeft = minOf(minLeft, minOf(cLeft, cRight))
-                        maxRight = maxOf(maxRight, maxOf(cLeft, cRight))
+                    val safeStart = minOf(prevRight + gapFromPrevPx, minLeft)
+                    val availableGap = (minLeft - safeStart).coerceAtLeast(0f)
+                    val desiredLeft = (minLeft - inlinePadPx).coerceAtLeast(safeStart)
+                    val effectiveBarWidth = if (availableGap >= 1.5f) {
+                        minOf(barWidthPx, (minLeft - desiredLeft).coerceAtLeast(availableGap.coerceAtMost(barWidthPx)))
+                    } else {
+                        minOf(barWidthPx, (maxRight - minLeft).coerceAtLeast(1.5f))
                     }
-                    if (minLeft.isFinite() && maxRight.isFinite() && maxRight > minLeft) {
-                        partialRects.add(
-                            QuoteBlockRect(
-                                left = minLeft - inlinePadPx,
-                                top = getLineTop(line),
-                                right = maxRight + inlinePadPx,
-                                bottom = getLineBottom(line),
-                                isFullLine = false
-                            )
+                    val top = getLineTop(line) + verticalInsetPx
+                    val bottom = (getLineBottom(line) - verticalInsetPx).coerceAtLeast(top)
+                    partialRects.add(
+                        QuoteBlockRect(
+                            left = desiredLeft,
+                            top = top,
+                            right = (maxRight + blockOutsetRightPx).coerceAtMost(canvasWidth + blockOutsetRightPx),
+                            bottom = bottom,
+                            barWidth = effectiveBarWidth,
+                            isFullLine = false
                         )
-                    }
+                    )
                 }
             }
         }
 
         val blocks = mutableListOf<QuoteBlockRect>()
-        if (fullLines.isNotEmpty()) {
-            var blockStartLine = fullLines.first()
-            var prevLine = blockStartLine
-
-            for (line in fullLines) {
-                if (line > prevLine + 1) {
+        if (fullLineMap.isNotEmpty()) {
+            val entries = fullLineMap.entries.map { FullLineEntry(it.key, it.value.first, it.value.second) }
+            var startIdx = 0
+            for (i in 1..entries.size) {
+                if (i == entries.size || entries[i].line > entries[i - 1].line + 1) {
+                    val group = entries.subList(startIdx, i)
+                    val blockLeft = (group.minOf { it.minLeft } - blockOutsetLeftPx)
+                    val blockRight = (group.maxOf { it.maxRight } + blockOutsetRightPx)
+                        .coerceAtMost(canvasWidth + blockOutsetRightPx)
+                    val top = getLineTop(group.first().line) + verticalInsetPx
+                    val bottom = (getLineBottom(group.last().line) - verticalInsetPx).coerceAtLeast(top)
                     blocks.add(
                         QuoteBlockRect(
-                            left = -blockOutsetLeftPx,
-                            top = getLineTop(blockStartLine),
-                            right = canvasWidth + blockOutsetRightPx,
-                            bottom = getLineBottom(prevLine),
+                            left = blockLeft,
+                            top = top,
+                            right = blockRight,
+                            bottom = bottom,
+                            barWidth = barWidthPx,
                             isFullLine = true
                         )
                     )
-                    blockStartLine = line
+                    startIdx = i
                 }
-                prevLine = line
             }
-            blocks.add(
-                QuoteBlockRect(
-                    left = -blockOutsetLeftPx,
-                    top = getLineTop(blockStartLine),
-                    right = canvasWidth + blockOutsetRightPx,
-                    bottom = getLineBottom(prevLine),
-                    isFullLine = true
-                )
-            )
         }
 
         blocks.addAll(partialRects)
@@ -140,6 +192,8 @@ object BlockDecorationLayoutCalculator {
         blockOutsetLeftPx: Float = 0f,
         blockOutsetRightPx: Float = 0f,
         inlinePadPx: Float,
+        gapFromPrevPx: Float = 1f,
+        verticalInsetPx: Float = 1f,
         getLineForOffset: (Int) -> Int,
         getLineStart: (Int) -> Int,
         getLineEnd: (Int) -> Int,
@@ -152,7 +206,8 @@ object BlockDecorationLayoutCalculator {
         val codeSpans = spans.filter { it.style is SpanStyle.Code }
         if (codeSpans.isEmpty()) return emptyList()
 
-        val blockLines = sortedSetOf<Int>()
+        data class BlockLineEntry(val line: Int, val minLeft: Float, val maxRight: Float)
+        val blockLineMap = sortedMapOf<Int, Pair<Float, Float>>()
         val inlineBoxes = mutableListOf<CodeBoxRect>()
 
         for (sp in codeSpans) {
@@ -178,61 +233,66 @@ object BlockDecorationLayoutCalculator {
                     visibleLineEnd--
                 }
 
-                val coversWholeLine = segStart <= lineStart && segEnd >= visibleLineEnd
-                if (coversWholeLine) {
-                    blockLines.add(line)
+                val bounds = lineSegmentHorizontalBounds(segStart, segEnd, getCharLeft, getCharRight) ?: continue
+                val (minLeft, maxRight) = bounds
+                val prevRight = if (segStart > lineStart) {
+                    prevVisibleCharRight(text, lineStart, segStart, getCharLeft, getCharRight)
+                } else null
+
+                val isStandaloneLineBlock = prevRight == null && segEnd >= visibleLineEnd
+                if (isStandaloneLineBlock) {
+                    val existing = blockLineMap[line]
+                    blockLineMap[line] = if (existing == null) {
+                        minLeft to maxRight
+                    } else {
+                        minOf(existing.first, minLeft) to maxOf(existing.second, maxRight)
+                    }
                 } else {
-                    var minLeft = Float.POSITIVE_INFINITY
-                    var maxRight = Float.NEGATIVE_INFINITY
-                    for (idx in segStart until segEnd) {
-                        val cLeft = getCharLeft(idx)
-                        val cRight = getCharRight(idx)
-                        minLeft = minOf(minLeft, minOf(cLeft, cRight))
-                        maxRight = maxOf(maxRight, maxOf(cLeft, cRight))
+                    val safeMinLeft = if (prevRight != null) {
+                        minOf(prevRight + gapFromPrevPx, minLeft)
+                    } else {
+                        minLeft - inlinePadPx
                     }
-                    if (minLeft.isFinite() && maxRight.isFinite() && maxRight > minLeft) {
-                        inlineBoxes.add(
-                            CodeBoxRect(
-                                left = (minLeft - inlinePadPx).coerceAtLeast(-blockOutsetLeftPx),
-                                top = getLineTop(line) + 1f,
-                                right = (maxRight + inlinePadPx).coerceAtMost(canvasWidth + blockOutsetRightPx),
-                                bottom = getLineBottom(line) - 1f,
-                                isBlock = false
-                            )
+                    val boxLeft = (minLeft - inlinePadPx).coerceAtLeast(safeMinLeft)
+                    val top = getLineTop(line) + verticalInsetPx
+                    val bottom = (getLineBottom(line) - verticalInsetPx).coerceAtLeast(top)
+                    inlineBoxes.add(
+                        CodeBoxRect(
+                            left = boxLeft,
+                            top = top,
+                            right = (maxRight + inlinePadPx).coerceAtMost(canvasWidth + blockOutsetRightPx),
+                            bottom = bottom,
+                            isBlock = false
                         )
-                    }
+                    )
                 }
             }
         }
 
         val result = mutableListOf<CodeBoxRect>()
-        if (blockLines.isNotEmpty()) {
-            var blockStart = blockLines.first()
-            var prev = blockStart
-            for (line in blockLines) {
-                if (line > prev + 1) {
+        if (blockLineMap.isNotEmpty()) {
+            val entries = blockLineMap.entries.map { BlockLineEntry(it.key, it.value.first, it.value.second) }
+            var startIdx = 0
+            for (i in 1..entries.size) {
+                if (i == entries.size || entries[i].line > entries[i - 1].line + 1) {
+                    val group = entries.subList(startIdx, i)
+                    val blockLeft = group.minOf { it.minLeft } - blockOutsetLeftPx
+                    val blockRight = (group.maxOf { it.maxRight } + blockOutsetRightPx)
+                        .coerceAtMost(canvasWidth + blockOutsetRightPx)
+                    val top = getLineTop(group.first().line) + verticalInsetPx
+                    val bottom = (getLineBottom(group.last().line) - verticalInsetPx).coerceAtLeast(top)
                     result.add(
                         CodeBoxRect(
-                            left = -blockOutsetLeftPx,
-                            top = getLineTop(blockStart),
-                            right = canvasWidth + blockOutsetRightPx,
-                            bottom = getLineBottom(prev),
+                            left = blockLeft,
+                            top = top,
+                            right = blockRight,
+                            bottom = bottom,
                             isBlock = true
                         )
                     )
-                    blockStart = line
+                    startIdx = i
                 }
-                prev = line
             }
-            result.add(
-                CodeBoxRect(
-                    left = -blockOutsetLeftPx,
-                    top = getLineTop(blockStart),
-                    right = canvasWidth + blockOutsetRightPx,
-                    bottom = getLineBottom(prev),
-                    isBlock = true
-                )
-            )
         }
 
         result.addAll(inlineBoxes)
@@ -251,9 +311,12 @@ fun DrawScope.drawBlockDecorations(
     val text = layoutResult.layoutInput.text.text
     if (text.isEmpty() || layoutResult.lineCount <= 0 || spans.isEmpty()) return
 
-    val quoteOutsetLeft = 9.dp.toPx()
+    val quoteOutsetLeft = 8.dp.toPx()
     val quoteOutsetRight = 6.dp.toPx()
-    val quoteInlinePad = 5.dp.toPx()
+    val quoteInlinePad = 3.5.dp.toPx()
+    val barWidthPx = 2.5.dp.toPx()
+    val gapFromPrevPx = 1.5.dp.toPx()
+    val verticalInsetPx = 1.dp.toPx()
 
     val quoteBlocks = BlockDecorationLayoutCalculator.computeQuoteBlocks(
         text = text,
@@ -263,6 +326,9 @@ fun DrawScope.drawBlockDecorations(
         blockOutsetLeftPx = quoteOutsetLeft,
         blockOutsetRightPx = quoteOutsetRight,
         inlinePadPx = quoteInlinePad,
+        barWidthPx = barWidthPx,
+        gapFromPrevPx = gapFromPrevPx,
+        verticalInsetPx = verticalInsetPx,
         getLineForOffset = { layoutResult.getLineForOffset(it) },
         getLineStart = { layoutResult.getLineStart(it) },
         getLineEnd = { layoutResult.getLineEnd(it, visibleEnd = false) },
@@ -272,7 +338,6 @@ fun DrawScope.drawBlockDecorations(
         getCharRight = { layoutResult.getBoundingBox(it).right }
     )
 
-    val barWidth = 3.dp.toPx()
     val quoteRadius = 2.dp.toPx()
     for (qb in quoteBlocks) {
         val h = (qb.bottom - qb.top).coerceAtLeast(0f)
@@ -286,13 +351,13 @@ fun DrawScope.drawBlockDecorations(
         )
         drawRoundRect(
             color = quoteBarColor,
-            topLeft = Offset(qb.left, qb.top + 1.dp.toPx()),
-            size = Size(barWidth, (h - 2.dp.toPx()).coerceAtLeast(0f)),
-            cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
+            topLeft = Offset(qb.left, qb.top),
+            size = Size(qb.barWidth.coerceAtMost(w), h),
+            cornerRadius = CornerRadius(qb.barWidth / 2f, qb.barWidth / 2f)
         )
     }
 
-    val codeOutset = 6.dp.toPx()
+    val codeOutset = 5.dp.toPx()
     val codeBoxes = BlockDecorationLayoutCalculator.computeCodeBoxes(
         text = text,
         spans = spans,
@@ -301,6 +366,8 @@ fun DrawScope.drawBlockDecorations(
         blockOutsetLeftPx = codeOutset,
         blockOutsetRightPx = codeOutset,
         inlinePadPx = 3.dp.toPx(),
+        gapFromPrevPx = gapFromPrevPx,
+        verticalInsetPx = verticalInsetPx,
         getLineForOffset = { layoutResult.getLineForOffset(it) },
         getLineStart = { layoutResult.getLineStart(it) },
         getLineEnd = { layoutResult.getLineEnd(it, visibleEnd = false) },
