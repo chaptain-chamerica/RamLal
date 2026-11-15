@@ -28,8 +28,13 @@ data class CodeBoxRect(
     val isBlock: Boolean
 )
 
+data class DividerLine(
+    val y: Float
+)
+
 /**
- * Pure layout geometry calculator for Quote block bars/tints and Code blocks / inline code boxes.
+ * Pure layout geometry calculator for Quote block bars/tints, Code blocks / inline code boxes,
+ * paragraph dividers, and H1/H2/H3 heading underline dividers.
  * Tightly wraps actual text bounds without stretching across empty line space or overlapping prior text.
  */
 object BlockDecorationLayoutCalculator {
@@ -72,6 +77,67 @@ object BlockDecorationLayoutCalculator {
         }
         if (!minLeft.isFinite() || !maxRight.isFinite() || maxRight <= minLeft) return null
         return minLeft to maxRight
+    }
+
+    fun computeDividerLines(
+        text: String,
+        spans: List<Span>,
+        lineCount: Int,
+        activeHeadingLevel: Int? = null,
+        cursorOffset: Int = 0,
+        getLineForOffset: (Int) -> Int,
+        getLineTop: (Int) -> Float,
+        getLineBottom: (Int) -> Float
+    ): List<DividerLine> {
+        if (lineCount <= 0) return emptyList()
+        val ys = mutableListOf<Float>()
+
+        // 1. Explicit paragraph divider spans (<hr>)
+        for (sp in spans) {
+            if (sp.style is SpanStyle.Divider && text.isNotEmpty()) {
+                val off = sp.start.coerceIn(0, text.length - 1)
+                val line = getLineForOffset(off).coerceIn(0, lineCount - 1)
+                val midY = (getLineTop(line) + getLineBottom(line)) / 2f
+                ys.add(midY)
+            }
+        }
+
+        // 2. Dividers directly underneath H1/H2/H3 headings
+        val headingEndLines = sortedSetOf<Int>()
+        if (text.isNotEmpty()) {
+            for (sp in spans) {
+                if (sp.style is SpanStyle.Heading) {
+                    val s = sp.start.coerceIn(0, text.length)
+                    var e = sp.end.coerceIn(0, text.length)
+                    while (e > s && text[e - 1] == '\n') e--
+                    if (s < e) {
+                        val lastLine = getLineForOffset((e - 1).coerceAtLeast(s)).coerceIn(0, lineCount - 1)
+                        headingEndLines.add(lastLine)
+                    }
+                }
+            }
+        }
+
+        // 3. Immediate divider under current cursor line when H1/H2/H3 tool is enabled
+        if (activeHeadingLevel != null) {
+            val safeCursor = cursorOffset.coerceIn(0, text.length)
+            val cursorLine = getLineForOffset(safeCursor).coerceIn(0, lineCount - 1)
+            headingEndLines.add(cursorLine)
+        }
+
+        for (line in headingEndLines) {
+            val bottomY = (getLineBottom(line) - 1f).coerceAtLeast(getLineTop(line))
+            ys.add(bottomY)
+        }
+
+        if (ys.isEmpty()) return emptyList()
+        val deduped = mutableListOf<DividerLine>()
+        for (y in ys.sorted()) {
+            if (deduped.isEmpty() || kotlin.math.abs(y - deduped.last().y) > 2f) {
+                deduped.add(DividerLine(y))
+            }
+        }
+        return deduped
     }
 
     fun computeQuoteBlocks(
@@ -306,10 +372,35 @@ fun DrawScope.drawBlockDecorations(
     quoteBgColor: Color,
     quoteBarColor: Color,
     codeBgColor: Color,
-    codeBorderColor: Color
+    codeBorderColor: Color,
+    dividerColor: Color = codeBorderColor,
+    activeHeadingLevel: Int? = null,
+    cursorOffset: Int = 0
 ) {
     val text = layoutResult.layoutInput.text.text
-    if (text.isEmpty() || layoutResult.lineCount <= 0 || spans.isEmpty()) return
+    if (layoutResult.lineCount <= 0) return
+
+    val dividers = BlockDecorationLayoutCalculator.computeDividerLines(
+        text = text,
+        spans = spans,
+        lineCount = layoutResult.lineCount,
+        activeHeadingLevel = activeHeadingLevel,
+        cursorOffset = cursorOffset,
+        getLineForOffset = { layoutResult.getLineForOffset(it) },
+        getLineTop = { layoutResult.getLineTop(it) },
+        getLineBottom = { layoutResult.getLineBottom(it) }
+    )
+    val hairlineStrokePx = 0.75.dp.toPx()
+    for (div in dividers) {
+        drawLine(
+            color = dividerColor,
+            start = Offset(0f, div.y),
+            end = Offset(size.width, div.y),
+            strokeWidth = hairlineStrokePx
+        )
+    }
+
+    if (text.isEmpty() || spans.isEmpty()) return
 
     val quoteOutsetLeft = 8.dp.toPx()
     val quoteOutsetRight = 6.dp.toPx()

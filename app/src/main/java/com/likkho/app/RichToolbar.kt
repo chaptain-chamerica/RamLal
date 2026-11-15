@@ -339,7 +339,9 @@ fun RichToolbar(
             ToolGlyph(Icons.Outlined.Code, "Code Block", on = codeOn) {
                 if (editorState != null) editorState.toggleCode() else fmt(FormatAction.CODE)
             }
-            ToolGlyph(Icons.Outlined.HorizontalRule, "Section Divider") { fmt(FormatAction.DIVIDER, false) }
+            ToolGlyph(Icons.Outlined.HorizontalRule, "Section Divider") {
+                if (editorState != null) editorState.insertDivider() else fmt(FormatAction.DIVIDER, false)
+            }
 
             CategorySep()
 

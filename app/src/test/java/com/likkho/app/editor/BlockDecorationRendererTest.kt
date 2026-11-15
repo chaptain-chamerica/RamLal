@@ -166,4 +166,78 @@ class BlockDecorationRendererTest {
         assertTrue(boxes[1].left >= 32f)
         assertEquals(72f, boxes[1].right, 0.01f) // 60 + 12 pad
     }
+
+    @Test
+    fun dividerLines_computeParagraphDividers_headingDividers_activeHeadingCursorDivider_andDedup() {
+        // Lines:
+        // 0: "H1\n" [0..3) -> top=0, bottom=40 (Heading 1)
+        // 1: "\u200B\n" [3..5) -> top=40, bottom=60 (Divider -> midY = 50f)
+        // 2: "H2\n" [5..8) -> top=60, bottom=90 (Heading 2)
+        // 3: "H3\n" [8..11) -> top=90, bottom=115 (Heading 3)
+        // 4: "Body" [11..15) -> top=115, bottom=140 (activeHeadingLevel preview on cursor line 4)
+        val div = RichTextEditorState.DIVIDER_MARKER
+        val text = "H1\n$div\nH2\nH3\nBody"
+        val lineRanges = listOf(0 to 3, 3 to 5, 5 to 8, 8 to 11, 11 to 15)
+        val lineTops = listOf(0f, 40f, 60f, 90f, 115f)
+        val lineBottoms = listOf(40f, 60f, 90f, 115f, 140f)
+        val spans = listOf(
+            Span(0, 2, SpanStyle.Heading(1)),
+            Span(3, 4, SpanStyle.Divider),
+            Span(5, 7, SpanStyle.Heading(2)),
+            Span(8, 10, SpanStyle.Heading(3))
+        )
+
+        val dividers = BlockDecorationLayoutCalculator.computeDividerLines(
+            text = text,
+            spans = spans,
+            lineCount = lineRanges.size,
+            activeHeadingLevel = 1,
+            cursorOffset = 13,
+            getLineForOffset = { off ->
+                val clamped = off.coerceIn(0, text.length)
+                lineRanges.indexOfFirst { clamped in it.first until it.second }
+                    .let { if (it == -1) lineRanges.lastIndex else it }
+            },
+            getLineTop = { lineTops[it] },
+            getLineBottom = { lineBottoms[it] }
+        )
+
+        assertEquals(
+            listOf(
+                DividerLine(39f),  // H1 bottom (40 - 1)
+                DividerLine(50f),  // Explicit paragraph divider midpoint ((40 + 60) / 2)
+                DividerLine(89f),  // H2 bottom (90 - 1)
+                DividerLine(114f), // H3 bottom (115 - 1)
+                DividerLine(139f)  // Active heading cursor line 4 preview (140 - 1)
+            ),
+            dividers
+        )
+
+        // When cursor is on an empty document with H1/H2/H3 enabled, immediate divider still renders
+        val emptyDocDividers = BlockDecorationLayoutCalculator.computeDividerLines(
+            text = "",
+            spans = emptyList(),
+            lineCount = 1,
+            activeHeadingLevel = 2,
+            cursorOffset = 0,
+            getLineForOffset = { 0 },
+            getLineTop = { 0f },
+            getLineBottom = { 32f }
+        )
+        assertEquals(listOf(DividerLine(31f)), emptyDocDividers)
+
+        // When cursor is already inside an existing heading line, dedup prevents double divider
+        val dedupedDividers = BlockDecorationLayoutCalculator.computeDividerLines(
+            text = "Title",
+            spans = listOf(Span(0, 5, SpanStyle.Heading(1))),
+            lineCount = 1,
+            activeHeadingLevel = 1,
+            cursorOffset = 5,
+            getLineForOffset = { 0 },
+            getLineTop = { 0f },
+            getLineBottom = { 40f }
+        )
+        assertEquals(listOf(DividerLine(39f)), dedupedDividers)
+    }
 }
+

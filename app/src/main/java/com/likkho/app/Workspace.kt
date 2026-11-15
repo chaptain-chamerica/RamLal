@@ -19,7 +19,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -82,7 +84,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
         val now = System.currentTimeMillis()
         val base = initial ?: DiaryLog(id = "log_$now", heading = "", createdAt = now)
         val htmlContent = editorState.toHtml()
-        val plain = editorState.text.take(140).replace("\n", " ")
+        val plain = editorState.text.replace(RichTextEditorState.DIVIDER_MARKER, " ").replace("\n", " ").trim().take(140)
         val log = base.copy(
             heading = heading.ifBlank { "Untitled" },
             contentHtml = htmlContent,
@@ -227,6 +229,26 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 }
                 val context = androidx.compose.ui.platform.LocalContext.current
                 var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+                var isEditorFocused by remember { mutableStateOf(false) }
+                var cursorVisible by remember { mutableStateOf(true) }
+
+                LaunchedEffect(
+                    isEditorFocused,
+                    reading,
+                    editorState.textFieldValue,
+                    editorState.activeFontSizePx,
+                    editorState.activeHeadingLevel
+                ) {
+                    if (isEditorFocused && !reading) {
+                        cursorVisible = true
+                        while (true) {
+                            delay(530L)
+                            cursorVisible = !cursorVisible
+                        }
+                    } else {
+                        cursorVisible = false
+                    }
+                }
 
                 BasicTextField(
                     value = editorState.textFieldValue,
@@ -234,7 +256,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     readOnly = reading,
                     textStyle = editorTextStyle,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    cursorBrush = SolidColor(w.accent),
+                    cursorBrush = SolidColor(if (textLayoutResult == null) w.accent else Color.Transparent),
                     visualTransformation = remember(editorState.spans, vm.customFonts.size, w.isDark) {
                         RichTextVisualTransformation(
                             spans = editorState.spans,
@@ -244,25 +266,32 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         )
                     },
                     onTextLayout = { textLayoutResult = it },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 400.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 400.dp)
+                        .onFocusChanged { isEditorFocused = it.isFocused },
                     decorationBox = { inner ->
                         Box(
-                            modifier = Modifier.drawBehind {
-                                val layout = textLayoutResult ?: return@drawBehind
-                                drawBlockDecorations(
-                                    layoutResult = layout,
-                                    spans = editorState.spans,
-                                    quoteBgColor = w.accent.copy(alpha = if (w.isDark) 0.11f else 0.055f),
-                                    quoteBarColor = w.accent,
-                                    codeBgColor = w.surface,
-                                    codeBorderColor = w.border.copy(alpha = 0.55f)
-                                )
-                                drawTextHighlights(
-                                    layoutResult = layout,
-                                    spans = editorState.spans,
-                                    ascentPx = fontMetrics.ascent,
-                                    descentPx = fontMetrics.descent,
-                                    lineMetrics = { segStart, segEnd ->
+                            modifier = Modifier
+                                .drawBehind {
+                                    val layout = textLayoutResult ?: return@drawBehind
+                                    drawBlockDecorations(
+                                        layoutResult = layout,
+                                        spans = editorState.spans,
+                                        quoteBgColor = w.accent.copy(alpha = if (w.isDark) 0.11f else 0.055f),
+                                        quoteBarColor = w.accent,
+                                        codeBgColor = w.surface,
+                                        codeBorderColor = w.border.copy(alpha = 0.55f),
+                                        dividerColor = w.border,
+                                        activeHeadingLevel = editorState.activeHeadingLevel,
+                                        cursorOffset = editorState.selection.start
+                                    )
+                                    drawTextHighlights(
+                                        layoutResult = layout,
+                                        spans = editorState.spans,
+                                        ascentPx = fontMetrics.ascent,
+                                        descentPx = fontMetrics.descent,
+                                        lineMetrics = { segStart, segEnd ->
                                         var bestLevel: Int? = null
                                         var activeFont: String? = null
                                         var customSizePx: Float? = null
@@ -319,6 +348,39 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     }
                                 )
                             }
+                                .drawWithContent {
+                                    drawContent()
+                                    val layout = textLayoutResult ?: return@drawWithContent
+                                    if (!isEditorFocused || reading || !cursorVisible) return@drawWithContent
+                                    val sel = editorState.textFieldValue.selection
+                                    if (!sel.collapsed) return@drawWithContent
+
+                                    val cursorOffset = sel.start.coerceIn(0, editorState.text.length)
+                                    val cursorRect = layout.getCursorRect(cursorOffset)
+                                    val line = layout.getLineForOffset(cursorOffset).coerceIn(0, (layout.lineCount - 1).coerceAtLeast(0))
+                                    val baseline = layout.getLineBaseline(line)
+                                    val targetCursorSp = editorState.activeFontSizePx?.sp
+                                        ?: editorState.activeHeadingLevel?.let { HeadingTypographySpec.fontSize(it) }
+                                        ?: editorTextStyle.fontSize
+                                    val cursorSizePx = with(density) { targetCursorSp.toPx() }
+                                    val activeTypeface = editorState.activeFontId?.let {
+                                        com.likkho.app.editor.FontRegistry.resolveTypeface(context, it)
+                                    } ?: (resolvedTypefaceState.value as? android.graphics.Typeface)
+                                    val cursorFm = android.graphics.Paint().apply {
+                                        typeface = activeTypeface
+                                        textSize = cursorSizePx
+                                    }.fontMetrics
+                                    val cursorH = (cursorFm.descent - cursorFm.ascent).coerceAtLeast(cursorSizePx)
+                                    val rawTop = baseline + cursorFm.ascent
+                                    val top = if (line == 0 && rawTop < 0f) 0f else rawTop
+                                    val cursorW = 2.dp.toPx()
+                                    val x = cursorRect.left.coerceIn(0f, (size.width - cursorW).coerceAtLeast(0f))
+                                    drawRect(
+                                        color = w.accent,
+                                        topLeft = androidx.compose.ui.geometry.Offset(x, top),
+                                        size = androidx.compose.ui.geometry.Size(cursorW, cursorH)
+                                    )
+                                }
                         ) {
                             if (editorState.text.isEmpty()) Text("Start writing...", style = proseStyle(16.sp, w.muted.copy(alpha = 0.65f), italic = true))
                             inner()

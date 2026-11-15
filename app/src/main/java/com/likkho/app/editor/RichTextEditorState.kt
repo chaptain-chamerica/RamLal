@@ -267,6 +267,63 @@ class RichTextEditorState(
         }
     }
 
+    fun insertDivider() {
+        val sel = selection
+        val oldText = text
+        val pos = sel.min.coerceIn(0, oldText.length)
+        val selEnd = sel.max.coerceIn(pos, oldText.length)
+
+        val needLeadingNewline = pos > 0 && oldText[pos - 1] != '\n'
+        val needTrailingNewline = selEnd >= oldText.length || oldText[selEnd] != '\n'
+
+        val prefix = if (needLeadingNewline) "\n" else ""
+        val suffix = if (needTrailingNewline) "\n" else ""
+        val inserted = "$prefix$DIVIDER_MARKER$suffix"
+
+        val newText = oldText.substring(0, pos) + inserted + oldText.substring(selEnd)
+        val deletedCount = selEnd - pos
+        val insertedCount = inserted.length
+        val markerIdx = pos + prefix.length
+        val newCursor = (markerIdx + 2).coerceAtMost(newText.length)
+
+        val updatedSpans = mutableListOf<Span>()
+        for (sp in spans) {
+            var s = sp.start
+            var e = sp.end
+
+            if (deletedCount > 0) {
+                when {
+                    e <= pos -> {}
+                    s >= selEnd -> {
+                        s -= deletedCount
+                        e -= deletedCount
+                    }
+                    s >= pos && e <= selEnd -> continue
+                    s < pos && e > selEnd -> e -= deletedCount
+                    s < pos && e > pos -> e = pos
+                    s < selEnd && e > selEnd -> {
+                        s = pos
+                        e -= deletedCount
+                    }
+                }
+            }
+
+            when {
+                e <= pos -> updatedSpans.add(Span(s, e, sp.style))
+                s >= pos -> updatedSpans.add(Span(s + insertedCount, e + insertedCount, sp.style))
+                else -> {
+                    if (pos > s) updatedSpans.add(Span(s, pos, sp.style))
+                    if (e > pos) updatedSpans.add(Span(pos + insertedCount, e + insertedCount, sp.style))
+                }
+            }
+        }
+
+        updatedSpans.add(Span(markerIdx, markerIdx + 1, SpanStyle.Divider))
+        activeHeadingLevel = null
+        spans = normalizeSpans(updatedSpans, newText.length)
+        textFieldValue = TextFieldValue(newText, TextRange(newCursor))
+    }
+
     private fun currentLineBounds(str: String, cursor: Int): Pair<Int, Int> {
         val pos = cursor.coerceIn(0, str.length)
         var start = pos
@@ -486,6 +543,8 @@ class RichTextEditorState(
     fun toHtml(): String = HtmlSpanCodec.toHtml(text, spans)
 
     companion object {
+        const val DIVIDER_MARKER = "\u200B"
+
         fun fromHtml(html: String): RichTextEditorState {
             val (text, spans) = HtmlSpanCodec.fromHtml(html)
             return RichTextEditorState(text, spans)

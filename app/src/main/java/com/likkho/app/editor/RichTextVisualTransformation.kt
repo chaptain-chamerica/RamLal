@@ -151,6 +151,9 @@ class RichTextVisualTransformation(
                 is SpanStyle.Highlight -> {
                     // Handled by HighlightRenderer to bound highlight strictly from ascender to descender
                 }
+                is SpanStyle.Divider -> {
+                    builder.addStyle(androidx.compose.ui.text.SpanStyle(color = Color.Transparent), s, e)
+                }
                 else -> {}
             }
         }

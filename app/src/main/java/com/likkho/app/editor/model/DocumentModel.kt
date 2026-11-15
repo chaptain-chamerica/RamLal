@@ -141,6 +141,13 @@ sealed interface SpanStyle {
         override val valueString: String? = null
     }
 
+    @Serializable
+    @SerialName("divider")
+    data object Divider : SpanStyle {
+        override val styleKey: String = "divider"
+        override val valueString: String? = null
+    }
+
     companion object {
         fun fromRecord(record: SpanStyleRecord): SpanStyle = when (record.style.lowercase()) {
             "bold" -> Bold
@@ -157,6 +164,7 @@ sealed interface SpanStyle {
             "heading" -> Heading(record.value?.toIntOrNull()?.coerceIn(1, 3) ?: 1)
             "quote" -> Quote
             "code" -> Code
+            "divider" -> Divider
             else -> Bold
         }
     }

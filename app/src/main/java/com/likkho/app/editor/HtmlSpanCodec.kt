@@ -60,6 +60,7 @@ object HtmlSpanCodec {
                     is SpanStyle.Code -> "<code>$escaped</code>"
                     is SpanStyle.Quote -> "<blockquote>$escaped</blockquote>"
                     is SpanStyle.Heading -> "<h${s.level}>$escaped</h${s.level}>"
+                    is SpanStyle.Divider -> "<hr>"
                     else -> escaped
                 }
             }
@@ -108,7 +109,14 @@ object HtmlSpanCodec {
                 val rawTag = if (isClosing) tagContent.substring(1).trim() else tagContent
 
                 val spaceIdx = rawTag.indexOf(' ')
-                val tagName = (if (spaceIdx == -1) rawTag else rawTag.substring(0, spaceIdx)).lowercase()
+                val tagName = (if (spaceIdx == -1) rawTag else rawTag.substring(0, spaceIdx)).trimEnd('/').lowercase()
+
+                if (!isClosing && tagName == "hr") {
+                    val markerPos = plainText.length
+                    plainText.append(RichTextEditorState.DIVIDER_MARKER)
+                    spans.add(Span(markerPos, markerPos + 1, SpanStyle.Divider))
+                    continue
+                }
 
                 if (isClosing) {
                     // Match and close the corresponding open tag

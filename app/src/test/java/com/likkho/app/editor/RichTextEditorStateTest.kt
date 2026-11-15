@@ -515,6 +515,54 @@ class RichTextEditorStateTest {
         reimported.setFontSizePx(18)
         assertTrue(reimported.spans.contains(Span(9, 15, SpanStyle.SizePx(18f))))
     }
+
+    @Test
+    fun divider_insertEmptyMidEnd_resetsHeading_and_htmlRoundTrip() {
+        // 1. Insert divider on empty editor
+        val emptyEditor = RichTextEditorState()
+        emptyEditor.insertDivider()
+        assertEquals("${RichTextEditorState.DIVIDER_MARKER}\n", emptyEditor.text)
+        assertEquals(TextRange(2), emptyEditor.selection)
+        assertEquals(listOf(Span(0, 1, SpanStyle.Divider)), emptyEditor.spans)
+
+        // 2. Insert divider after H1 heading resets activeHeadingLevel and places cursor on new line
+        val editor = RichTextEditorState()
+        editor.toggleHeading(1)
+        assertTrue(editor.isH1Active)
+        editor.onTextFieldValueChange(TextFieldValue("Title", TextRange(5)))
+        editor.insertDivider()
+
+        assertFalse(editor.isH1Active)
+        assertNull(editor.activeHeadingLevel)
+        val expectedText = "Title\n${RichTextEditorState.DIVIDER_MARKER}\n"
+        assertEquals(expectedText, editor.text)
+        assertEquals(TextRange(expectedText.length), editor.selection)
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Heading(1))))
+        assertTrue(editor.spans.contains(Span(6, 7, SpanStyle.Divider)))
+
+        // Type paragraph below divider
+        editor.onTextFieldValueChange(TextFieldValue("${expectedText}Next", TextRange(expectedText.length + 4)))
+
+        // 3. Insert divider mid-line between "Hello" and "World"
+        val midEditor = RichTextEditorState("HelloWorld")
+        midEditor.onTextFieldValueChange(midEditor.textFieldValue.copy(selection = TextRange(5)))
+        midEditor.insertDivider()
+        assertEquals("Hello\n${RichTextEditorState.DIVIDER_MARKER}\nWorld", midEditor.text)
+        assertEquals(TextRange(8), midEditor.selection)
+        assertEquals(listOf(Span(6, 7, SpanStyle.Divider)), midEditor.spans)
+
+        // 4. HTML round-trip for <hr>, <hr/>, and <hr />
+        val html = editor.toHtml()
+        assertTrue(html.contains("<hr>"))
+        val reimported = RichTextEditorState.fromHtml(html)
+        assertEquals(editor.text, reimported.text)
+        assertEquals(editor.spans, reimported.spans)
+
+        val selfClosing = RichTextEditorState.fromHtml("Top<br><hr/><br>Mid<br><hr /><br>Bottom")
+        assertEquals(
+            "Top\n${RichTextEditorState.DIVIDER_MARKER}\nMid\n${RichTextEditorState.DIVIDER_MARKER}\nBottom",
+            selfClosing.text
+        )
+        assertEquals(2, selfClosing.spans.count { it.style is SpanStyle.Divider })
+    }
 }
-
-
