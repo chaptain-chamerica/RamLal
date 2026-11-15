@@ -53,6 +53,9 @@ class RichTextEditorState(
     var activeFontId by mutableStateOf<String?>(null)
         private set
 
+    var activeFontSizePx by mutableStateOf<Int?>(null)
+        private set
+
     var isQuoteActive by mutableStateOf(false)
         private set
 
@@ -169,6 +172,19 @@ class RichTextEditorState(
             removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.FontId }
             if (cleanId != null) {
                 applyStyleToRange(sel.min, sel.max, SpanStyle.FontId(cleanId))
+            }
+        }
+    }
+
+    fun setFontSizePx(px: Int?) {
+        val cleanPx = px?.coerceIn(10, 48)
+        activeFontSizePx = cleanPx
+
+        val sel = selection
+        if (sel.min < sel.max) {
+            removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.SizePx }
+            if (cleanPx != null) {
+                applyStyleToRange(sel.min, sel.max, SpanStyle.SizePx(cleanPx.toFloat()))
             }
         }
     }
@@ -357,6 +373,7 @@ class RichTextEditorState(
                             is SpanStyle.Color -> activeTextColor == style.hex
                             is SpanStyle.Highlight -> activeHighlightColor == style.hex
                             is SpanStyle.FontId -> activeFontId == style.fontId
+                            is SpanStyle.SizePx -> activeFontSizePx != null && activeFontSizePx == style.sizePx.toInt()
                             is SpanStyle.Quote -> isQuoteActive
                             is SpanStyle.Code -> isCodeActive
                             is SpanStyle.Heading -> !hasNewlineInInsert && activeHeadingLevel == style.level
@@ -406,6 +423,9 @@ class RichTextEditorState(
             }
             activeFontId?.let { fontId ->
                 updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.FontId(fontId)))
+            }
+            activeFontSizePx?.let { px ->
+                updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.SizePx(px.toFloat())))
             }
             if (isQuoteActive) {
                 updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Quote))

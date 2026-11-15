@@ -72,8 +72,9 @@ class RichTextVisualTransformation(
                 is SpanStyle.Heading -> 0
                 is SpanStyle.Quote -> 1
                 is SpanStyle.Code -> 2
-                is SpanStyle.FontId -> 3
-                else -> 4
+                is SpanStyle.SizePx -> 3
+                is SpanStyle.FontId -> 4
+                else -> 5
             }
         }
 
@@ -121,6 +122,13 @@ class RichTextVisualTransformation(
                     if (family != null) {
                         builder.addStyle(androidx.compose.ui.text.SpanStyle(fontFamily = family), s, e)
                     }
+                }
+                is SpanStyle.SizePx -> {
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(fontSize = style.sizePx.coerceIn(10f, 48f).sp),
+                        s,
+                        e
+                    )
                 }
                 is SpanStyle.Bold -> {
                     builder.addStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold), s, e)

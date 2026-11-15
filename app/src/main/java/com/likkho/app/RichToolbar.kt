@@ -179,11 +179,18 @@ fun RichToolbar(
                 }
             }
             Pop.SIZE -> Pop1 {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Text Size: ${sizePx.toInt()}px", style = sansStyle(11.sp, w.text, FontWeight.SemiBold), modifier = Modifier.weight(1f))
-                    WikiButton("Disable", { sizeOn = false; hooks.applyFontSizePx(null) }, kind = if (sizeOn) BtnKind.DANGER else BtnKind.OUTLINE, height = 30.dp, fontSize = 11)
-                }
-                WikiSlider(sizePx, { sizePx = it; sizeOn = true; hooks.applyFontSizePx(it.toInt()) }, 10f..48f)
+                val currentPx = editorState?.activeFontSizePx ?: sizePx.toInt()
+                Text("Text Size: ${currentPx}px", style = sansStyle(11.sp, w.text, FontWeight.SemiBold))
+                WikiSlider(
+                    currentPx.toFloat(),
+                    {
+                        sizePx = it
+                        sizeOn = true
+                        editorState?.setFontSizePx(it.toInt())
+                        hooks.applyFontSizePx(it.toInt())
+                    },
+                    10f..48f
+                )
             }
             Pop.MEDIA -> Pop1 {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -266,7 +273,20 @@ fun RichToolbar(
             // Group 3: Typography & Sizing
             val fontToolOn = pop == Pop.FONTS || (editorState?.activeFontId ?: fontId) != null
             ToolGlyph(painterResource(R.drawable.ic_font_aa), "Fonts", on = fontToolOn) { toggle(Pop.FONTS) }
-            ToolGlyph(Icons.Outlined.FormatSize, "Text Size", on = pop == Pop.SIZE) { toggle(Pop.SIZE) }
+            val textPxOn = editorState?.activeFontSizePx != null || (editorState == null && sizeOn)
+            ToolGlyph(Icons.Outlined.FormatSize, "Text Size", on = textPxOn) {
+                if (textPxOn) {
+                    sizeOn = false
+                    editorState?.setFontSizePx(null)
+                    hooks.applyFontSizePx(null)
+                    if (pop == Pop.SIZE) pop = Pop.NONE
+                } else {
+                    sizeOn = true
+                    editorState?.setFontSizePx(sizePx.toInt())
+                    hooks.applyFontSizePx(sizePx.toInt())
+                    pop = Pop.SIZE
+                }
+            }
             val h1On = editorState?.isH1Active ?: (active[FormatAction.H1] == true)
             val h2On = editorState?.isH2Active ?: (active[FormatAction.H2] == true)
             val h3On = editorState?.isH3Active ?: (active[FormatAction.H3] == true)

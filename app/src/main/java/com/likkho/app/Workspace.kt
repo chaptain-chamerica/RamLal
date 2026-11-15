@@ -265,6 +265,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     lineMetrics = { segStart, segEnd ->
                                         var bestLevel: Int? = null
                                         var activeFont: String? = null
+                                        var customSizePx: Float? = null
                                         var hasQuote = false
                                         var hasCode = false
                                         for (sp in editorState.spans) {
@@ -274,6 +275,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                                         if (bestLevel == null || st.level < bestLevel) bestLevel = st.level
                                                     }
                                                     is SpanStyle.FontId -> activeFont = st.fontId
+                                                    is SpanStyle.SizePx -> customSizePx = st.sizePx
                                                     is SpanStyle.Quote -> hasQuote = true
                                                     is SpanStyle.Code -> hasCode = true
                                                     else -> {}
@@ -285,7 +287,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                             hasQuote -> com.likkho.app.editor.FontRegistry.BUILTIN_SERIF
                                             else -> null
                                         }
-                                        val effectiveSp = bestLevel?.let { HeadingTypographySpec.fontSize(it) }
+                                        val effectiveSp = customSizePx?.coerceIn(10f, 48f)?.sp
+                                            ?: bestLevel?.let { HeadingTypographySpec.fontSize(it) }
                                             ?: if (hasCode && activeFont == null) 14.5.sp else editorTextStyle.fontSize
                                         val pxSize = with(density) { effectiveSp.toPx() }
                                         val resolvedTf = effectiveFontId?.let {

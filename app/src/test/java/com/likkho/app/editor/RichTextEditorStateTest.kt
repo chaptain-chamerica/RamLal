@@ -470,6 +470,51 @@ class RichTextEditorStateTest {
             .text
         assertTrue(transformed.paragraphStyles.isEmpty())
     }
+
+    @Test
+    fun textPx_enable_sliderUpdates_disableNeverUndos_cursorMoveNeverAutoEnables_and_htmlRoundTrip() {
+        val editor = RichTextEditorState()
+        assertNull(editor.activeFontSizePx)
+
+        // 1. Enable at 24px and type
+        editor.setFontSizePx(24)
+        assertEquals(24, editor.activeFontSizePx)
+        editor.onTextFieldValueChange(TextFieldValue("Big", TextRange(3)))
+        assertEquals(listOf(Span(0, 3, SpanStyle.SizePx(24f))), editor.spans)
+
+        // 2. Slider changes to 36px and type more
+        editor.setFontSizePx(36)
+        assertEquals(36, editor.activeFontSizePx)
+        editor.onTextFieldValueChange(TextFieldValue("Big Huge", TextRange(8)))
+        assertTrue(editor.spans.contains(Span(0, 3, SpanStyle.SizePx(24f))))
+        assertTrue(editor.spans.contains(Span(3, 8, SpanStyle.SizePx(36f))))
+
+        // 3. Disable (second click on tool icon): previous sizes stay intact, future typing is default
+        editor.setFontSizePx(null)
+        assertNull(editor.activeFontSizePx)
+        editor.onTextFieldValueChange(TextFieldValue("Big Huge normal", TextRange(15)))
+        assertEquals(
+            listOf(Span(0, 3, SpanStyle.SizePx(24f)), Span(3, 8, SpanStyle.SizePx(36f))),
+            editor.spans
+        )
+
+        // 4. Placing cursor inside "Big" while disabled MUST NOT auto-enable Text Px
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(1)))
+        assertNull(editor.activeFontSizePx)
+
+        // 5. HTML round-trip preserves font-size px spans
+        val html = editor.toHtml()
+        assertTrue(html.contains("font-size:24px"))
+        assertTrue(html.contains("font-size:36px"))
+        val reimported = RichTextEditorState.fromHtml(html)
+        assertEquals(editor.text, reimported.text)
+        assertEquals(editor.spans, reimported.spans)
+
+        // 6. Selection update via slider replaces size cleanly
+        reimported.onTextFieldValueChange(reimported.textFieldValue.copy(selection = TextRange(9, 15)))
+        reimported.setFontSizePx(18)
+        assertTrue(reimported.spans.contains(Span(9, 15, SpanStyle.SizePx(18f))))
+    }
 }
 
 

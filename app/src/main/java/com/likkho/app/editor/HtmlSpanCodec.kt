@@ -56,6 +56,7 @@ object HtmlSpanCodec {
                     is SpanStyle.Color -> "<span style=\"color:${s.hex}\">$escaped</span>"
                     is SpanStyle.Highlight -> "<mark style=\"background-color:${s.hex}\">$escaped</mark>"
                     is SpanStyle.FontId -> "<span data-font=\"${escapeHtml(s.fontId)}\">$escaped</span>"
+                    is SpanStyle.SizePx -> "<span style=\"font-size:${s.sizePx.toInt()}px\">$escaped</span>"
                     is SpanStyle.Code -> "<code>$escaped</code>"
                     is SpanStyle.Quote -> "<blockquote>$escaped</blockquote>"
                     is SpanStyle.Heading -> "<h${s.level}>$escaped</h${s.level}>"
@@ -120,6 +121,7 @@ object HtmlSpanCodec {
                             is SpanStyle.Color -> tagName == "span" || tagName == "font"
                             is SpanStyle.Highlight -> tagName == "mark" || tagName == "span"
                             is SpanStyle.FontId -> tagName == "span" || tagName == "font"
+                            is SpanStyle.SizePx -> tagName == "span"
                             is SpanStyle.Quote -> tagName == "blockquote"
                             is SpanStyle.Code -> tagName == "code"
                             is SpanStyle.Heading -> tagName == "h${it.style.level}"
@@ -186,12 +188,19 @@ object HtmlSpanCodec {
             "span" -> {
                 val dataFont = extractAttr(rawTag, "data-font")
                 val colorHex = extractColorFromStyle(rawTag, "color")
+                val fontSizeCss = extractColorFromStyle(rawTag, "font-size")
+                val parsedPx = fontSizeCss
+                    ?.lowercase()
+                    ?.removeSuffix("px")
+                    ?.trim()
+                    ?.toFloatOrNull()
                 val bgHex = extractColorFromStyle(rawTag, "background-color")
                     ?: extractColorFromStyle(rawTag, "background")
                 val fontFamily = extractColorFromStyle(rawTag, "font-family")
                 when {
                     dataFont != null -> SpanStyle.FontId(unescapeHtml(dataFont))
                     colorHex != null -> SpanStyle.Color(colorHex)
+                    parsedPx != null -> SpanStyle.SizePx(parsedPx)
                     bgHex != null -> SpanStyle.Highlight(bgHex)
                     fontFamily != null -> SpanStyle.FontId(unescapeHtml(fontFamily))
                     else -> null
