@@ -284,6 +284,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                             modifier = Modifier
                                 .drawBehind {
                                     val layout = textLayoutResult ?: return@drawBehind
+                                    if (layout.layoutInput.text.text != editorState.text) return@drawBehind
                                     drawBlockDecorations(
                                         layoutResult = layout,
                                         spans = editorState.spans,
@@ -365,10 +366,12 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     drawContent()
                                     val layout = textLayoutResult ?: return@drawWithContent
                                     if (!isEditorFocused || reading || !cursorVisible) return@drawWithContent
+                                    if (layout.lineCount <= 0) return@drawWithContent
                                     val sel = editorState.textFieldValue.selection
                                     if (!sel.collapsed) return@drawWithContent
 
-                                    val cursorOffset = sel.start.coerceIn(0, editorState.text.length)
+                                    val layoutTextLen = layout.layoutInput.text.text.length
+                                    val cursorOffset = sel.start.coerceIn(0, layoutTextLen)
                                     val cursorRect = layout.getCursorRect(cursorOffset)
                                     val line = layout.getLineForOffset(cursorOffset).coerceIn(0, (layout.lineCount - 1).coerceAtLeast(0))
                                     val baseline = layout.getLineBaseline(line)
@@ -398,10 +401,15 @@ fun WorkspaceScreen(vm: AppViewModel) {
                             if (editorState.text.isEmpty()) Text("Start writing...", style = proseStyle(16.sp, w.muted.copy(alpha = 0.65f), italic = true))
                             inner()
                             val layout = textLayoutResult
-                            if (layout != null && editorState.spans.any { it.style is SpanStyle.Todo }) {
-                                val todoGeoms = remember(layout, editorState.spans, editorState.text, density) {
+                            if (layout != null &&
+                                layout.lineCount > 0 &&
+                                layout.layoutInput.text.text == editorState.text &&
+                                editorState.spans.any { it.style is SpanStyle.Todo }
+                            ) {
+                                val layoutText = layout.layoutInput.text.text
+                                val todoGeoms = remember(layout, editorState.spans, layoutText, density) {
                                     BlockDecorationLayoutCalculator.computeTodoCheckboxes(
-                                        text = editorState.text,
+                                        text = layoutText,
                                         spans = editorState.spans,
                                         lineCount = layout.lineCount,
                                         densityScale = density.density,
@@ -413,25 +421,27 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     )
                                 }
                                 todoGeoms.forEachIndexed { idx, geom ->
-                                    val hitW = with(density) { (geom.hitRight - geom.hitLeft).coerceAtLeast(24f).toDp() }
-                                    val hitH = with(density) { (geom.hitBottom - geom.hitTop).coerceAtLeast(24f).toDp() }
-                                    Box(
-                                        modifier = Modifier
-                                            .offset { IntOffset(geom.hitLeft.roundToInt(), geom.hitTop.roundToInt()) }
-                                            .size(hitW, hitH)
-                                            .semantics {
-                                                contentDescription = if (geom.checked) "Checked item" else "Unchecked item"
-                                            }
-                                            .testTag("canvas_checkbox_$idx")
-                                            .clickable(
-                                                interactionSource = remember { MutableInteractionSource() },
-                                                indication = null
-                                            ) {
-                                                if (editorState.toggleTodoAt(geom.spanStart) && reading) {
-                                                    save(showFeedback = false)
+                                    key(geom.spanStart) {
+                                        val hitW = with(density) { (geom.hitRight - geom.hitLeft).coerceAtLeast(24f).toDp() }
+                                        val hitH = with(density) { (geom.hitBottom - geom.hitTop).coerceAtLeast(24f).toDp() }
+                                        Box(
+                                            modifier = Modifier
+                                                .offset { IntOffset(geom.hitLeft.roundToInt(), geom.hitTop.roundToInt()) }
+                                                .size(hitW, hitH)
+                                                .semantics {
+                                                    contentDescription = if (geom.checked) "Checked item" else "Unchecked item"
                                                 }
-                                            }
-                                    )
+                                                .testTag("canvas_checkbox_$idx")
+                                                .clickable(
+                                                    interactionSource = remember { MutableInteractionSource() },
+                                                    indication = null
+                                                ) {
+                                                    if (editorState.toggleTodoAt(geom.spanStart) && reading) {
+                                                        save(showFeedback = false)
+                                                    }
+                                                }
+                                        )
+                                    }
                                 }
                             }
                         }

@@ -176,7 +176,8 @@ object BlockDecorationLayoutCalculator {
         val out = mutableListOf<BulletMarkerGeom>()
         for (sp in spans) {
             if (sp.style !is SpanStyle.Bullet) continue
-            val s = sp.start.coerceIn(0, text.length - 1)
+            if (sp.start < 0 || sp.start >= text.length) continue
+            val s = sp.start
             val line = getLineForOffset(s).coerceIn(0, lineCount - 1)
             val lineTop = getLineTop(line)
             val lineBottom = getLineBottom(line)
@@ -207,7 +208,8 @@ object BlockDecorationLayoutCalculator {
         val out = mutableListOf<TodoCheckboxGeom>()
         for (sp in spans) {
             val todoStyle = sp.style as? SpanStyle.Todo ?: continue
-            val s = sp.start.coerceIn(0, text.length - 1)
+            if (sp.start < 0 || sp.start >= text.length) continue
+            val s = sp.start
             val e = sp.end.coerceIn(s + 1, text.length)
             val line = getLineForOffset(s).coerceIn(0, lineCount - 1)
             val lineTop = getLineTop(line)
@@ -215,7 +217,7 @@ object BlockDecorationLayoutCalculator {
             val lineH = (lineBottom - lineTop).coerceAtLeast(16f * densityScale)
             val glyphLeft = getCharLeft(s)
             val glyphRight = getCharRight(s)
-            val prefixRight = getCharRight((e - 1).coerceAtLeast(s))
+            val prefixRight = getCharRight((e - 1).coerceIn(0, text.length - 1))
             val availW = (glyphRight - glyphLeft).coerceAtLeast(14f * densityScale)
             val boxSize = (lineH * 0.56f)
                 .coerceIn(14f * densityScale, 24f * densityScale)

@@ -306,7 +306,39 @@ class BlockDecorationRendererTest {
         assertEquals(80f, todos[1].boxTop + todos[1].boxSize / 2f, 0.01f)
         // Hit box stays left of first text character ('T' starts at x=32) so tapping text never triggers checkbox
         assertTrue(todos[0].hitRight <= 32f)
+
+        // Regression test: stale layout (shorter or empty text than spans) must never query out-of-bounds offsets
+        val strictGetChar: (Int) -> Float = { idx ->
+            if (idx !in 0 until 2) throw IllegalArgumentException("offset($idx) out of bounds [0, 2)")
+            idx * 16f
+        }
+        assertTrue(
+            BlockDecorationLayoutCalculator.computeTodoCheckboxes(
+                text = "",
+                spans = listOf(Span(0, 2, SpanStyle.Todo(false))),
+                lineCount = 1,
+                getLineForOffset = { 0 },
+                getLineTop = { 0f },
+                getLineBottom = { 32f },
+                getCharLeft = { throw IllegalArgumentException("Should not query empty text") },
+                getCharRight = { throw IllegalArgumentException("Should not query empty text") }
+            ).isEmpty()
+        )
+        assertEquals(
+            1,
+            BlockDecorationLayoutCalculator.computeTodoCheckboxes(
+                text = "☐ ",
+                spans = listOf(Span(0, 2, SpanStyle.Todo(false)), Span(5, 7, SpanStyle.Todo(false))),
+                lineCount = 1,
+                getLineForOffset = { 0 },
+                getLineTop = { 0f },
+                getLineBottom = { 32f },
+                getCharLeft = strictGetChar,
+                getCharRight = strictGetChar
+            ).size
+        )
     }
 }
+
 
 
