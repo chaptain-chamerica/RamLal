@@ -216,7 +216,7 @@ fun PfpAvatar(pfp: Pfp?, size: Dp, modifier: Modifier = Modifier) {
             Image(
                 painter = painterResource(R.drawable.ic_app_open_icon),
                 contentDescription = "App Icon",
-                modifier = Modifier.fillMaxSize().padding(size * 0.16f),
+                modifier = Modifier.fillMaxSize().padding(size * 0.08f),
                 contentScale = ContentScale.Fit,
             )
         }

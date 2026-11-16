@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Centers @drawable/ic_app_open_icon safely inside Android 12+ splash icon circle -->
+<!-- Centers @drawable/ic_app_open_icon (~43% of 288dp splash canvas) safely inside the splash circle -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item
-        android:width="112dp"
-        android:height="112dp"
+        android:width="288dp"
+        android:height="288dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
+    <item
+        android:width="84dp"
+        android:height="84dp"
         android:drawable="@drawable/ic_app_open_icon"
         android:gravity="center" />
 </layer-list>
