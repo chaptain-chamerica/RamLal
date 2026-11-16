@@ -417,6 +417,8 @@ fun RichToolbar(
             ToolGlyph(Icons.Outlined.Schedule, "Insert Date/Time Stamp") { onInsertText(" " + fmtDateTimeShort(System.currentTimeMillis()) + " ") }
             ToolGlyph(Icons.Outlined.UploadFile, "Import Document") { scope.launch { hint = "Importing..."; hint = runCatching { hooks.importDocument() }.getOrElse { "Import failed." }; kotlinx.coroutines.delay(2500); hint = null } }
         }
+        // Hair-thin line framing the bottom edge of the toolbar above the OS navigation bar
+        Box(Modifier.fillMaxWidth().height(0.5.dp).background(w.border))
     }
     wordResult?.let { WordAnalysisDialog(it) { wordResult = null } }
 }

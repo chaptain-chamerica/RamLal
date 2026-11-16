@@ -114,7 +114,12 @@ fun WorkspaceScreen(vm: AppViewModel) {
     }
     BackHandler { if (selImg != null || selAud != null) { selImg = null; selAud = null } else vm.navigateTo(Route.HOME) }
 
-    Column(Modifier.fillMaxSize().background(w.bg).imePadding()) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(w.bg)
+            .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+    ) {
         // ---------- header ----------
         Column(Modifier.fillMaxWidth().background(w.surface)) {
             Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -519,6 +524,13 @@ fun WorkspaceScreen(vm: AppViewModel) {
             onSpoiler = { hooks.applySpoiler(it) },
             editorState = editorState,
         )
+        if (!reading) {
+            val density = LocalDensity.current
+            val isImeOpen = WindowInsets.ime.getBottom(density) > WindowInsets.navigationBars.getBottom(density)
+            if (!isImeOpen) {
+                Spacer(Modifier.height(8.dp))
+            }
+        }
     }
 
     if (showReminder) ReminderDialog(reminderAt, { showReminder = false }) { reminderAt = it }
