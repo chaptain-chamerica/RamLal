@@ -565,4 +565,134 @@ class RichTextEditorStateTest {
         )
         assertEquals(2, selfClosing.spans.count { it.style is SpanStyle.Divider })
     }
+
+    @Test
+    fun bulletList_toggle_enterContinue_enterEmptyExit_backspaceExit_and_cursorSnap() {
+        val editor = RichTextEditorState()
+
+        // 1. Toggle Bullet on empty doc
+        editor.toggleBullet()
+        assertTrue(editor.isBulletActive)
+        assertEquals("• ", editor.text)
+        assertEquals(TextRange(2), editor.selection)
+        assertEquals(listOf(Span(0, 2, SpanStyle.Bullet)), editor.spans)
+
+        // 2. Type "First" and press Enter -> auto-adds "• " on line 2
+        editor.onTextFieldValueChange(TextFieldValue("• First", TextRange(7)))
+        editor.onTextFieldValueChange(TextFieldValue("• First\n", TextRange(8)))
+        assertTrue(editor.isBulletActive)
+        assertEquals("• First\n• ", editor.text)
+        assertEquals(TextRange(10), editor.selection)
+        assertEquals(listOf(Span(0, 2, SpanStyle.Bullet), Span(8, 10, SpanStyle.Bullet)), editor.spans)
+
+        // 3. Press Enter on empty bullet line 2 -> exits bullet list cleanly
+        editor.onTextFieldValueChange(TextFieldValue("• First\n• \n", TextRange(11)))
+        assertFalse(editor.isBulletActive)
+        assertEquals("• First\n", editor.text)
+        assertEquals(TextRange(8), editor.selection)
+        assertEquals(listOf(Span(0, 2, SpanStyle.Bullet)), editor.spans)
+
+        // 4. Cursor placed inside "• " prefix snaps forward to after prefix
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(0)))
+        assertEquals(TextRange(2), editor.selection)
+        assertTrue(editor.isBulletActive)
+
+        // 5. Backspace inside prefix ("• First" -> "•First") removes entire bullet prefix
+        editor.onTextFieldValueChange(TextFieldValue("•First\n", TextRange(1)))
+        assertFalse(editor.isBulletActive)
+        assertEquals("First\n", editor.text)
+        assertEquals(TextRange(0), editor.selection)
+        assertTrue(editor.spans.isEmpty())
+    }
+
+    @Test
+    fun numberedList_autoIncrement_renumbering_toggleOff_and_multiLineSelection() {
+        val editor = RichTextEditorState()
+        editor.toggleNumbered()
+        assertTrue(editor.isNumberedActive)
+        assertEquals("1. ", editor.text)
+
+        // Type first item and press Enter -> becomes "2. "
+        editor.onTextFieldValueChange(TextFieldValue("1. One", TextRange(6)))
+        editor.onTextFieldValueChange(TextFieldValue("1. One\n", TextRange(7)))
+        assertEquals("1. One\n2. ", editor.text)
+        assertEquals(TextRange(10), editor.selection)
+
+        // Type second and third items
+        editor.onTextFieldValueChange(TextFieldValue("1. One\n2. Two", TextRange(13)))
+        editor.onTextFieldValueChange(TextFieldValue("1. One\n2. Two\n", TextRange(14)))
+        editor.onTextFieldValueChange(TextFieldValue("1. One\n2. Two\n3. Three", TextRange(22)))
+
+        // Move cursor onto item 2 and toggle Numbered off -> item 3 becomes a fresh list starting at 1!
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(11)))
+        assertTrue(editor.isNumberedActive)
+        editor.toggleNumbered()
+        assertFalse(editor.isNumberedActive)
+        assertEquals("1. One\nTwo\n1. Three", editor.text)
+        val numSpans = editor.spans.filter { it.style is SpanStyle.Numbered }
+        assertEquals(listOf(Span(0, 3, SpanStyle.Numbered), Span(11, 14, SpanStyle.Numbered)), numSpans)
+
+        // Re-enabling Numbered on "Two" bridges the list back into 1., 2., 3.
+        editor.toggleNumbered()
+        assertTrue(editor.isNumberedActive)
+        assertEquals("1. One\n2. Two\n3. Three", editor.text)
+
+        // Select multiple plain lines and convert to Numbered
+        val multi = RichTextEditorState("Alpha\nBeta\nGamma")
+        multi.onTextFieldValueChange(multi.textFieldValue.copy(selection = TextRange(0, multi.text.length)))
+        multi.toggleNumbered()
+        assertEquals("1. Alpha\n2. Beta\n3. Gamma", multi.text)
+    }
+
+    @Test
+    fun checkBox_toggle_canvasClickCheckUncheck_strikethroughVisual_and_htmlRoundTrip() {
+        val editor = RichTextEditorState()
+        editor.toggleTodo()
+        assertTrue(editor.isTodoActive)
+        assertEquals("☐ ", editor.text)
+        assertEquals(listOf(Span(0, 2, SpanStyle.Todo(checked = false))), editor.spans)
+
+        // Type item & press Enter -> next checkbox is always unchecked
+        editor.onTextFieldValueChange(TextFieldValue("☐ Milk", TextRange(6)))
+        editor.onTextFieldValueChange(TextFieldValue("☐ Milk\n", TextRange(7)))
+        editor.onTextFieldValueChange(TextFieldValue("☐ Milk\n☐ Eggs", TextRange(13)))
+
+        // Clicking first checkbox on canvas checks it without changing cursor or selection
+        val preSelection = editor.selection
+        assertTrue(editor.toggleTodoAt(0))
+        assertEquals("☑ Milk\n☐ Eggs", editor.text)
+        assertEquals(preSelection, editor.selection)
+        assertTrue(editor.spans.contains(Span(0, 2, SpanStyle.Todo(checked = true))))
+        assertTrue(editor.spans.contains(Span(7, 9, SpanStyle.Todo(checked = false))))
+
+        // RichTextVisualTransformation strikes through checked line content "Milk"
+        val transformed = RichTextVisualTransformation(editor.spans)
+            .filter(androidx.compose.ui.text.AnnotatedString(editor.text))
+            .text
+        assertTrue(transformed.spanStyles.any {
+            it.start == 2 && it.end == 6 &&
+                it.item.textDecoration == androidx.compose.ui.text.style.TextDecoration.LineThrough
+        })
+
+        // Clicking first checkbox again unchecks it
+        assertTrue(editor.toggleTodoAt(0))
+        assertEquals("☐ Milk\n☐ Eggs", editor.text)
+        assertTrue(editor.spans.contains(Span(0, 2, SpanStyle.Todo(checked = false))))
+
+        // Check second item and combine with Bullet + Numbered for full HTML round-trip
+        assertTrue(editor.toggleTodoAt(7))
+        editor.onTextFieldValueChange(TextFieldValue("☐ Milk\n☑ Eggs\n", TextRange(14)))
+        // Enter auto-adds "☐ " at line 3; exit line 3 with Enter -> "☐ Milk\n☑ Eggs\n"
+        editor.onTextFieldValueChange(TextFieldValue("${editor.text}\n", TextRange(editor.text.length + 1)))
+        // Switch line 3 to Bullet then Numbered on another line
+        val doc = RichTextEditorState.fromHtml(
+            "Intro<br><ul><li><b>Bullet1</b></li><li>Bullet2</li></ul><br><ol><li>Step1</li><li>Step2</li></ol><br><ul data-checklist=\"true\"><li data-checked=\"false\">Milk</li><li data-checked=\"true\">Eggs</li></ul>"
+        )
+        assertEquals("Intro\n• Bullet1\n• Bullet2\n1. Step1\n2. Step2\n☐ Milk\n☑ Eggs", doc.text)
+        val reHtml = doc.toHtml()
+        val reimported = RichTextEditorState.fromHtml(reHtml)
+        assertEquals(doc.text, reimported.text)
+        assertEquals(doc.spans, reimported.spans)
+    }
 }
+

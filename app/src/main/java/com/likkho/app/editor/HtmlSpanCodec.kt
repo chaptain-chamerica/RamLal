@@ -13,15 +13,105 @@ object HtmlSpanCodec {
     fun toHtml(text: String, spans: List<Span>): String {
         if (text.isEmpty()) return ""
         val normalized = normalizeSpans(spans, text.length)
-        if (normalized.isEmpty()) {
-            return escapeHtml(text).replace("\n", "<br>")
+        val hasListSpans = normalized.any {
+            it.style is SpanStyle.Bullet || it.style is SpanStyle.Numbered || it.style is SpanStyle.Todo
+        }
+        if (!hasListSpans) {
+            return renderRangeToHtml(text, normalized, 0, text.length)
         }
 
-        // Collect all slice boundaries
-        val boundaries = mutableSetOf(0, text.length)
-        for (sp in normalized) {
-            boundaries.add(sp.start.coerceIn(0, text.length))
-            boundaries.add(sp.end.coerceIn(0, text.length))
+        // Line-based rendering when list items exist so <ul>/<ol>/checklist tags stay well-formed
+        val lines = mutableListOf<Pair<Int, Int>>()
+        var start = 0
+        while (start <= text.length) {
+            var end = start
+            while (end < text.length && text[end] != '\n') end++
+            lines.add(start to end)
+            if (end >= text.length) break
+            start = end + 1
+        }
+
+        val sb = StringBuilder()
+        var idx = 0
+        while (idx < lines.size) {
+            if (idx > 0) sb.append("<br>")
+            val (ls, le) = lines[idx]
+            val prefixSpan = normalized.firstOrNull {
+                it.start == ls && it.end <= le &&
+                    (it.style is SpanStyle.Bullet || it.style is SpanStyle.Numbered || it.style is SpanStyle.Todo)
+            }
+            if (prefixSpan == null) {
+                sb.append(renderRangeToHtml(text, normalized, ls, le))
+                idx++
+                continue
+            }
+
+            when (prefixSpan.style) {
+                is SpanStyle.Bullet -> {
+                    sb.append("<ul>")
+                    while (idx < lines.size) {
+                        val (cls, cle) = lines[idx]
+                        val ps = normalized.firstOrNull {
+                            it.start == cls && it.end <= cle && it.style is SpanStyle.Bullet
+                        } ?: break
+                        val content = renderRangeToHtml(text, normalized, ps.end, cle)
+                        sb.append("<li>").append(content).append("</li>")
+                        idx++
+                    }
+                    sb.append("</ul>")
+                }
+                is SpanStyle.Numbered -> {
+                    sb.append("<ol>")
+                    while (idx < lines.size) {
+                        val (cls, cle) = lines[idx]
+                        val ps = normalized.firstOrNull {
+                            it.start == cls && it.end <= cle && it.style is SpanStyle.Numbered
+                        } ?: break
+                        val content = renderRangeToHtml(text, normalized, ps.end, cle)
+                        sb.append("<li>").append(content).append("</li>")
+                        idx++
+                    }
+                    sb.append("</ol>")
+                }
+                is SpanStyle.Todo -> {
+                    sb.append("<ul data-checklist=\"true\">")
+                    while (idx < lines.size) {
+                        val (cls, cle) = lines[idx]
+                        val ps = normalized.firstOrNull {
+                            it.start == cls && it.end <= cle && it.style is SpanStyle.Todo
+                        } ?: break
+                        val todoStyle = ps.style as SpanStyle.Todo
+                        val content = renderRangeToHtml(text, normalized, ps.end, cle)
+                        sb.append("<li data-checked=\"${todoStyle.checked}\">").append(content).append("</li>")
+                        idx++
+                    }
+                    sb.append("</ul>")
+                }
+                else -> idx++
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun renderRangeToHtml(
+        text: String,
+        normalized: List<Span>,
+        rangeStart: Int,
+        rangeEnd: Int
+    ): String {
+        if (rangeStart >= rangeEnd) return ""
+        val rangeSpans = normalized.filter {
+            it.end > rangeStart && it.start < rangeEnd &&
+                it.style !is SpanStyle.Bullet && it.style !is SpanStyle.Numbered && it.style !is SpanStyle.Todo
+        }
+        if (rangeSpans.isEmpty()) {
+            return escapeHtml(text.substring(rangeStart, rangeEnd)).replace("\n", "<br>")
+        }
+
+        val boundaries = mutableSetOf(rangeStart, rangeEnd)
+        for (sp in rangeSpans) {
+            boundaries.add(sp.start.coerceIn(rangeStart, rangeEnd))
+            boundaries.add(sp.end.coerceIn(rangeStart, rangeEnd))
         }
         val sortedPoints = boundaries.sorted()
 
@@ -34,8 +124,7 @@ object HtmlSpanCodec {
             val rawSegment = text.substring(start, end)
             var escaped = escapeHtml(rawSegment).replace("\n", "<br>")
 
-            // Find all spans active across [start, end), placing inline styles inner and Quote/Heading outer
-            val active = normalized
+            val active = rangeSpans
                 .filter { it.start <= start && it.end >= end }
                 .sortedBy {
                     when (it.style) {
@@ -46,7 +135,6 @@ object HtmlSpanCodec {
                     }
                 }
 
-            // Wrap with tags in consistent order
             for (sp in active) {
                 escaped = when (val s = sp.style) {
                     is SpanStyle.Bold -> "<b>$escaped</b>"
@@ -70,6 +158,8 @@ object HtmlSpanCodec {
         return sb.toString()
     }
 
+    private enum class HtmlListMode { UL, OL, CHECKLIST }
+
     fun fromHtml(html: String): Pair<String, List<Span>> {
         if (html.isEmpty()) return Pair("", emptyList())
 
@@ -84,6 +174,10 @@ object HtmlSpanCodec {
 
         data class OpenTag(val style: SpanStyle, val startIndex: Int)
         val stack = mutableListOf<OpenTag>()
+
+        var currentListMode: HtmlListMode? = null
+        var listHasEmittedItem = false
+        var olCounter = 0
 
         var i = 0
         val len = html.length
@@ -115,6 +209,65 @@ object HtmlSpanCodec {
                     val markerPos = plainText.length
                     plainText.append(RichTextEditorState.DIVIDER_MARKER)
                     spans.add(Span(markerPos, markerPos + 1, SpanStyle.Divider))
+                    continue
+                }
+
+                if (!isClosing && tagName == "ul") {
+                    val isChecklist = extractAttr(rawTag, "data-checklist").equals("true", ignoreCase = true) ||
+                        extractAttr(rawTag, "data-type").equals("checklist", ignoreCase = true)
+                    currentListMode = if (isChecklist) HtmlListMode.CHECKLIST else HtmlListMode.UL
+                    listHasEmittedItem = false
+                    olCounter = 0
+                    continue
+                }
+
+                if (!isClosing && tagName == "ol") {
+                    currentListMode = HtmlListMode.OL
+                    listHasEmittedItem = false
+                    olCounter = 0
+                    continue
+                }
+
+                if (isClosing && (tagName == "ul" || tagName == "ol")) {
+                    currentListMode = null
+                    listHasEmittedItem = false
+                    olCounter = 0
+                    continue
+                }
+
+                if (!isClosing && tagName == "li") {
+                    if (listHasEmittedItem || (plainText.isNotEmpty() && plainText[plainText.length - 1] != '\n')) {
+                        plainText.append('\n')
+                    }
+                    listHasEmittedItem = true
+                    val checkedAttr = extractAttr(rawTag, "data-checked")
+                    val pStart = plainText.length
+                    when {
+                        currentListMode == HtmlListMode.CHECKLIST || checkedAttr != null -> {
+                            val checked = checkedAttr.equals("true", ignoreCase = true)
+                            val prefix = if (checked) {
+                                RichTextEditorState.TODO_CHECKED_PREFIX
+                            } else {
+                                RichTextEditorState.TODO_UNCHECKED_PREFIX
+                            }
+                            plainText.append(prefix)
+                            spans.add(Span(pStart, plainText.length, SpanStyle.Todo(checked)))
+                        }
+                        currentListMode == HtmlListMode.OL -> {
+                            olCounter++
+                            val prefix = "$olCounter. "
+                            plainText.append(prefix)
+                            spans.add(Span(pStart, plainText.length, SpanStyle.Numbered))
+                        }
+                        else -> {
+                            plainText.append(RichTextEditorState.BULLET_PREFIX)
+                            spans.add(Span(pStart, plainText.length, SpanStyle.Bullet))
+                        }
+                    }
+                    continue
+                }
+
+                if (isClosing && tagName == "li") {
                     continue
                 }
 

@@ -239,5 +239,74 @@ class BlockDecorationRendererTest {
         )
         assertEquals(listOf(DividerLine(39f)), dedupedDividers)
     }
+
+    @Test
+    fun bulletMarkers_and_todoCheckboxes_computeAlignedGeometryAndNonOverlappingHitBoxes() {
+        val text = "• Bullet\n☐ Todo1\n☑ Todo2"
+        val lineRanges = listOf(0 to 9, 9 to 17, 17 to 24)
+        val lineTops = listOf(0f, 32f, 64f)
+        val lineBottoms = listOf(32f, 64f, 96f)
+        val spans = listOf(
+            Span(0, 2, SpanStyle.Bullet),
+            Span(9, 11, SpanStyle.Todo(checked = false)),
+            Span(17, 19, SpanStyle.Todo(checked = true))
+        )
+
+        fun lineForOffset(off: Int): Int {
+            val clamped = off.coerceIn(0, text.length)
+            return lineRanges.indexOfFirst { clamped in it.first until it.second }
+                .let { if (it == -1) lineRanges.lastIndex else it }
+        }
+
+        val bullets = BlockDecorationLayoutCalculator.computeBulletMarkers(
+            text = text,
+            spans = spans,
+            lineCount = lineRanges.size,
+            densityScale = 1f,
+            getLineForOffset = ::lineForOffset,
+            getLineTop = { lineTops[it] },
+            getLineBottom = { lineBottoms[it] },
+            getCharLeft = { idx ->
+                val l = lineForOffset(idx)
+                (idx - lineRanges[l].first) * 14f
+            },
+            getCharRight = { idx ->
+                val l = lineForOffset(idx)
+                (idx - lineRanges[l].first + 1) * 14f
+            }
+        )
+        assertEquals(1, bullets.size)
+        assertEquals(16f, bullets[0].centerY, 0.01f)
+        assertTrue(bullets[0].radius in 2.2f..5f)
+
+        val todos = BlockDecorationLayoutCalculator.computeTodoCheckboxes(
+            text = text,
+            spans = spans,
+            lineCount = lineRanges.size,
+            densityScale = 1f,
+            getLineForOffset = ::lineForOffset,
+            getLineTop = { lineTops[it] },
+            getLineBottom = { lineBottoms[it] },
+            getCharLeft = { idx ->
+                val l = lineForOffset(idx)
+                (idx - lineRanges[l].first) * 16f
+            },
+            getCharRight = { idx ->
+                val l = lineForOffset(idx)
+                (idx - lineRanges[l].first + 1) * 16f
+            }
+        )
+
+        assertEquals(2, todos.size)
+        assertEquals(9, todos[0].spanStart)
+        assertFalse(todos[0].checked)
+        assertEquals(48f, todos[0].boxTop + todos[0].boxSize / 2f, 0.01f)
+        assertEquals(17, todos[1].spanStart)
+        assertTrue(todos[1].checked)
+        assertEquals(80f, todos[1].boxTop + todos[1].boxSize / 2f, 0.01f)
+        // Hit box stays left of first text character ('T' starts at x=32) so tapping text never triggers checkbox
+        assertTrue(todos[0].hitRight <= 32f)
+    }
 }
+
 

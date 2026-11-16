@@ -328,9 +328,18 @@ fun RichToolbar(
             CategorySep()
 
             // Group 5: Lists & Structural Blocks
-            ToolGlyph(Icons.Outlined.FormatListBulleted, "Bullet List", on = active[FormatAction.BULLET] == true) { fmt(FormatAction.BULLET) }
-            ToolGlyph(Icons.Outlined.FormatListNumbered, "Numbered List", on = active[FormatAction.NUMBERED] == true) { fmt(FormatAction.NUMBERED) }
-            ToolGlyph(Icons.Outlined.CheckBox, "Checklist", on = active[FormatAction.TODO] == true) { fmt(FormatAction.TODO) }
+            val bulletOn = editorState?.isBulletActive ?: (active[FormatAction.BULLET] == true)
+            val numberedOn = editorState?.isNumberedActive ?: (active[FormatAction.NUMBERED] == true)
+            val todoOn = editorState?.isTodoActive ?: (active[FormatAction.TODO] == true)
+            ToolGlyph(Icons.Outlined.FormatListBulleted, "Bullet List", on = bulletOn) {
+                if (editorState != null) editorState.toggleBullet() else fmt(FormatAction.BULLET)
+            }
+            ToolGlyph(Icons.Outlined.FormatListNumbered, "Numbered List", on = numberedOn) {
+                if (editorState != null) editorState.toggleNumbered() else fmt(FormatAction.NUMBERED)
+            }
+            ToolGlyph(Icons.Outlined.CheckBox, "Checklist", on = todoOn) {
+                if (editorState != null) editorState.toggleTodo() else fmt(FormatAction.TODO)
+            }
             val quoteOn = editorState?.isQuoteActive ?: (active[FormatAction.QUOTE] == true)
             val codeOn = editorState?.isCodeActive ?: (active[FormatAction.CODE] == true)
             ToolGlyph(Icons.Outlined.FormatQuote, "Quote Block", on = quoteOn) {

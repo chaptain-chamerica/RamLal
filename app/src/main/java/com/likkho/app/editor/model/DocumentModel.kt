@@ -148,6 +148,27 @@ sealed interface SpanStyle {
         override val valueString: String? = null
     }
 
+    @Serializable
+    @SerialName("bullet")
+    data object Bullet : SpanStyle {
+        override val styleKey: String = "bullet"
+        override val valueString: String? = null
+    }
+
+    @Serializable
+    @SerialName("numbered")
+    data object Numbered : SpanStyle {
+        override val styleKey: String = "numbered"
+        override val valueString: String? = null
+    }
+
+    @Serializable
+    @SerialName("todo")
+    data class Todo(val checked: Boolean = false) : SpanStyle {
+        override val styleKey: String = "todo"
+        override val valueString: String get() = checked.toString()
+    }
+
     companion object {
         fun fromRecord(record: SpanStyleRecord): SpanStyle = when (record.style.lowercase()) {
             "bold" -> Bold
@@ -165,6 +186,9 @@ sealed interface SpanStyle {
             "quote" -> Quote
             "code" -> Code
             "divider" -> Divider
+            "bullet" -> Bullet
+            "numbered" -> Numbered
+            "todo" -> Todo(record.value.equals("true", ignoreCase = true))
             else -> Bold
         }
     }

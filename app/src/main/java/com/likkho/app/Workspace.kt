@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
@@ -28,6 +29,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
@@ -38,6 +42,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.likkho.app.editor.BlockDecorationLayoutCalculator
 import com.likkho.app.editor.HeadingTypographySpec
 import com.likkho.app.editor.RichTextEditorState
 import com.likkho.app.editor.RichTextVisualTransformation
@@ -80,7 +85,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
     var spoilerAsk by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
 
-    fun save() {
+    fun save(showFeedback: Boolean = true) {
         val now = System.currentTimeMillis()
         val base = initial ?: DiaryLog(id = "log_$now", heading = "", createdAt = now)
         val htmlContent = editorState.toHtml()
@@ -100,8 +105,10 @@ fun WorkspaceScreen(vm: AppViewModel) {
         )
         vm.upsertLog(log, false)
         hooks.scheduleReminder(log, reminderAt)
-        saved = true
-        scope.launch { delay(1500); saved = false }
+        if (showFeedback) {
+            saved = true
+            scope.launch { delay(1500); saved = false }
+        }
     }
     BackHandler { if (selImg != null || selAud != null) { selImg = null; selAud = null } else vm.navigateTo(Route.HOME) }
 
@@ -262,7 +269,9 @@ fun WorkspaceScreen(vm: AppViewModel) {
                             spans = editorState.spans,
                             defaultTextColor = w.text,
                             quoteTextColor = w.text.copy(alpha = 0.85f),
-                            codeTextColor = w.text
+                            codeTextColor = w.text,
+                            numberedColor = w.accent,
+                            todoCheckedTextColor = w.muted
                         )
                     },
                     onTextLayout = { textLayoutResult = it },
@@ -284,7 +293,11 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                         codeBorderColor = w.border.copy(alpha = 0.55f),
                                         dividerColor = w.border,
                                         activeHeadingLevel = editorState.activeHeadingLevel,
-                                        cursorOffset = editorState.selection.start
+                                        cursorOffset = editorState.selection.start,
+                                        bulletColor = w.text.copy(alpha = 0.85f),
+                                        todoUncheckedBorderColor = w.text.copy(alpha = 0.58f),
+                                        todoUncheckedBgColor = w.surface,
+                                        todoCheckedFillColor = w.accent
                                     )
                                     drawTextHighlights(
                                         layoutResult = layout,
@@ -384,6 +397,43 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         ) {
                             if (editorState.text.isEmpty()) Text("Start writing...", style = proseStyle(16.sp, w.muted.copy(alpha = 0.65f), italic = true))
                             inner()
+                            val layout = textLayoutResult
+                            if (layout != null && editorState.spans.any { it.style is SpanStyle.Todo }) {
+                                val todoGeoms = remember(layout, editorState.spans, editorState.text, density) {
+                                    BlockDecorationLayoutCalculator.computeTodoCheckboxes(
+                                        text = editorState.text,
+                                        spans = editorState.spans,
+                                        lineCount = layout.lineCount,
+                                        densityScale = density.density,
+                                        getLineForOffset = { layout.getLineForOffset(it) },
+                                        getLineTop = { layout.getLineTop(it) },
+                                        getLineBottom = { layout.getLineBottom(it) },
+                                        getCharLeft = { layout.getBoundingBox(it).left },
+                                        getCharRight = { layout.getBoundingBox(it).right }
+                                    )
+                                }
+                                todoGeoms.forEachIndexed { idx, geom ->
+                                    val hitW = with(density) { (geom.hitRight - geom.hitLeft).coerceAtLeast(24f).toDp() }
+                                    val hitH = with(density) { (geom.hitBottom - geom.hitTop).coerceAtLeast(24f).toDp() }
+                                    Box(
+                                        modifier = Modifier
+                                            .offset { IntOffset(geom.hitLeft.roundToInt(), geom.hitTop.roundToInt()) }
+                                            .size(hitW, hitH)
+                                            .semantics {
+                                                contentDescription = if (geom.checked) "Checked item" else "Unchecked item"
+                                            }
+                                            .testTag("canvas_checkbox_$idx")
+                                            .clickable(
+                                                interactionSource = remember { MutableInteractionSource() },
+                                                indication = null
+                                            ) {
+                                                if (editorState.toggleTodoAt(geom.spanStart) && reading) {
+                                                    save(showFeedback = false)
+                                                }
+                                            }
+                                    )
+                                }
+                            }
                         }
                     }
                 )

@@ -54,6 +54,8 @@ class RichTextVisualTransformation(
     private val defaultTextColor: Color = Color.Unspecified,
     private val quoteTextColor: Color = Color.Unspecified,
     private val codeTextColor: Color = Color.Unspecified,
+    private val numberedColor: Color = Color.Unspecified,
+    private val todoCheckedTextColor: Color = Color.Unspecified,
     private val fontResolver: (String) -> FontFamily? = { FontRegistry.resolveFontFamily(it) }
 ) : VisualTransformation {
 
@@ -74,7 +76,15 @@ class RichTextVisualTransformation(
                 is SpanStyle.Code -> 2
                 is SpanStyle.SizePx -> 3
                 is SpanStyle.FontId -> 4
-                else -> 5
+                is SpanStyle.Bold,
+                is SpanStyle.Italic,
+                is SpanStyle.Underline,
+                is SpanStyle.Strike,
+                is SpanStyle.Color -> 5
+                is SpanStyle.Todo -> 6
+                is SpanStyle.Bullet,
+                is SpanStyle.Numbered -> 7
+                else -> 8
             }
         }
 
@@ -146,6 +156,53 @@ class RichTextVisualTransformation(
                     val color = parseHexColor(style.hex)
                     if (color != null) {
                         builder.addStyle(androidx.compose.ui.text.SpanStyle(color = color), s, e)
+                    }
+                }
+                is SpanStyle.Bullet -> {
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontFamily = WikiFonts.sans,
+                            color = Color.Transparent,
+                            letterSpacing = 4.sp
+                        ),
+                        s,
+                        e
+                    )
+                }
+                is SpanStyle.Numbered -> {
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontFamily = WikiFonts.sans,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (numberedColor != Color.Unspecified) numberedColor else defaultTextColor
+                        ),
+                        s,
+                        e
+                    )
+                }
+                is SpanStyle.Todo -> {
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontFamily = WikiFonts.sans,
+                            color = Color.Transparent,
+                            letterSpacing = 3.sp
+                        ),
+                        s,
+                        e
+                    )
+                    if (style.checked && e < textLen) {
+                        var lineEnd = e
+                        while (lineEnd < textLen && raw[lineEnd] != '\n') lineEnd++
+                        if (e < lineEnd) {
+                            builder.addStyle(
+                                androidx.compose.ui.text.SpanStyle(
+                                    color = if (todoCheckedTextColor != Color.Unspecified) todoCheckedTextColor else Color.Unspecified,
+                                    textDecoration = TextDecoration.LineThrough
+                                ),
+                                e,
+                                lineEnd
+                            )
+                        }
                     }
                 }
                 is SpanStyle.Highlight -> {

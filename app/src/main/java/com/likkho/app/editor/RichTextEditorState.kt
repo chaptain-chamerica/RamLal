@@ -62,12 +62,25 @@ class RichTextEditorState(
     var isCodeActive by mutableStateOf(false)
         private set
 
+    var isBulletActive by mutableStateOf(false)
+        private set
+
+    var isNumberedActive by mutableStateOf(false)
+        private set
+
+    var isTodoActive by mutableStateOf(false)
+        private set
+
     val isH1Active: Boolean get() = activeHeadingLevel == 1
     val isH2Active: Boolean get() = activeHeadingLevel == 2
     val isH3Active: Boolean get() = activeHeadingLevel == 3
 
     val text: String get() = textFieldValue.text
     val selection: TextRange get() = textFieldValue.selection
+
+    init {
+        syncListActiveState(initialText.length)
+    }
 
     // =========================================================================
     //  Tool Toggles & Actions
@@ -267,6 +280,126 @@ class RichTextEditorState(
         }
     }
 
+    private enum class ListKind { BULLET, NUMBERED, TODO }
+
+    fun toggleBullet() = toggleListKind(ListKind.BULLET)
+
+    fun toggleNumbered() = toggleListKind(ListKind.NUMBERED)
+
+    fun toggleTodo() = toggleListKind(ListKind.TODO)
+
+    /**
+     * Toggles the checked state of a canvas checkbox whose prefix starts at [prefixStart].
+     * Preserves text length, selection, and all other spans cleanly.
+     */
+    fun toggleTodoAt(prefixStart: Int): Boolean {
+        val currentText = text
+        val idx = spans.indexOfFirst { it.start == prefixStart && it.style is SpanStyle.Todo }
+        if (idx == -1) return false
+        val targetSpan = spans[idx]
+        val oldTodo = targetSpan.style as SpanStyle.Todo
+        val newChecked = !oldTodo.checked
+        val newChar = if (newChecked) TODO_CHECKED_PREFIX[0] else TODO_UNCHECKED_PREFIX[0]
+        val newText = if (prefixStart in currentText.indices) {
+            currentText.substring(0, prefixStart) + newChar + currentText.substring(prefixStart + 1)
+        } else {
+            currentText
+        }
+        val updatedSpans = spans.mapIndexed { i, sp ->
+            if (i == idx) sp.copy(style = SpanStyle.Todo(checked = newChecked)) else sp
+        }
+        spans = normalizeSpans(updatedSpans, newText.length)
+        textFieldValue = textFieldValue.copy(text = newText)
+        return true
+    }
+
+    private fun toggleListKind(target: ListKind) {
+        val currentText = text
+        val sel = selection
+        val selectedLines = collectSelectedLines(currentText, sel.min, sel.max)
+
+        // If cursor is collapsed on a divider line, insert a new list item line below the divider
+        if (sel.collapsed && selectedLines.size == 1) {
+            val (ls, le) = selectedLines[0]
+            if (isDividerLine(spans, ls, le)) {
+                val prefix = when (target) {
+                    ListKind.BULLET -> BULLET_PREFIX
+                    ListKind.NUMBERED -> "1. "
+                    ListKind.TODO -> TODO_UNCHECKED_PREFIX
+                }
+                val style = when (target) {
+                    ListKind.BULLET -> SpanStyle.Bullet
+                    ListKind.NUMBERED -> SpanStyle.Numbered
+                    ListKind.TODO -> SpanStyle.Todo(false)
+                }
+                val edits = listOf(TextEdit(le, le, "\n$prefix", null))
+                val (editedText, shiftedSpans, _) = applyTextEdits(currentText, spans, edits, sel.start, sel.end)
+                val newPrefixStart = le + 1
+                val newSpans = (shiftedSpans + Span(newPrefixStart, newPrefixStart + prefix.length, style)).toMutableList()
+                val newCursor = newPrefixStart + prefix.length
+                val (finalText, finalSpans, finalCursor, _) = renumberNumberedLists(editedText, newSpans, newCursor, newCursor)
+                spans = normalizeSpans(finalSpans, finalText.length)
+                textFieldValue = TextFieldValue(finalText, TextRange(finalCursor))
+                syncListActiveState(finalCursor)
+                return
+            }
+        }
+
+        val editableLines = selectedLines.filter { (ls, le) -> !isDividerLine(spans, ls, le) }
+        if (editableLines.isEmpty()) return
+
+        fun matchesTarget(style: SpanStyle?): Boolean = when (target) {
+            ListKind.BULLET -> style is SpanStyle.Bullet
+            ListKind.NUMBERED -> style is SpanStyle.Numbered
+            ListKind.TODO -> style is SpanStyle.Todo
+        }
+
+        val allAlreadyTarget = editableLines.all { (ls, le) ->
+            matchesTarget(findListPrefixOnLine(spans, ls, le)?.style)
+        }
+
+        val edits = mutableListOf<TextEdit>()
+        val droppedPrefixes = mutableSetOf<Span>()
+
+        for ((ls, le) in editableLines) {
+            val existing = findListPrefixOnLine(spans, ls, le)
+            if (allAlreadyTarget) {
+                if (existing != null) {
+                    droppedPrefixes.add(existing)
+                    edits.add(TextEdit(existing.start, existing.end, "", null))
+                }
+            } else {
+                val (newPrefix, newStyle) = when (target) {
+                    ListKind.BULLET -> BULLET_PREFIX to SpanStyle.Bullet
+                    ListKind.NUMBERED -> "1. " to SpanStyle.Numbered
+                    ListKind.TODO -> TODO_UNCHECKED_PREFIX to SpanStyle.Todo(false)
+                }
+                if (existing == null) {
+                    edits.add(TextEdit(ls, ls, newPrefix, newStyle))
+                } else if (!matchesTarget(existing.style)) {
+                    droppedPrefixes.add(existing)
+                    edits.add(TextEdit(existing.start, existing.end, newPrefix, newStyle))
+                }
+            }
+        }
+
+        if (edits.isEmpty()) return
+
+        val baseSpans = spans.filter { it !in droppedPrefixes }
+        val (editedText, shiftedSpans, mappedSel) = applyTextEdits(currentText, baseSpans, edits, sel.min, sel.max)
+        val finalSelStart = if (sel.start <= sel.end) mappedSel.first else mappedSel.second
+        val finalSelEnd = if (sel.start <= sel.end) mappedSel.second else mappedSel.first
+        val (renumText, renumSpans, rStart, rEnd) = renumberNumberedLists(
+            editedText,
+            shiftedSpans.toMutableList(),
+            finalSelStart,
+            finalSelEnd
+        )
+        spans = normalizeSpans(renumSpans, renumText.length)
+        textFieldValue = TextFieldValue(renumText, TextRange(rStart, rEnd))
+        syncListActiveState(rStart)
+    }
+
     fun insertDivider() {
         val sel = selection
         val oldText = text
@@ -320,8 +453,10 @@ class RichTextEditorState(
 
         updatedSpans.add(Span(markerIdx, markerIdx + 1, SpanStyle.Divider))
         activeHeadingLevel = null
-        spans = normalizeSpans(updatedSpans, newText.length)
-        textFieldValue = TextFieldValue(newText, TextRange(newCursor))
+        val (renumText, renumSpans, rCursor, _) = renumberNumberedLists(newText, updatedSpans, newCursor, newCursor)
+        spans = normalizeSpans(renumSpans, renumText.length)
+        textFieldValue = TextFieldValue(renumText, TextRange(rCursor))
+        syncListActiveState(rCursor)
     }
 
     private fun currentLineBounds(str: String, cursor: Int): Pair<Int, Int> {
@@ -331,6 +466,178 @@ class RichTextEditorState(
         var end = pos
         while (end < str.length && str[end] != '\n') end++
         return start to end
+    }
+
+    private fun collectSelectedLines(str: String, selMin: Int, selMax: Int): List<Pair<Int, Int>> {
+        if (str.isEmpty()) return listOf(0 to 0)
+        val firstStart = currentLineBounds(str, selMin).first
+        val effEnd = if (selMin < selMax && selMax > 0 && str[selMax - 1] == '\n') selMax - 1 else selMax
+        val result = mutableListOf<Pair<Int, Int>>()
+        var cur = firstStart
+        while (cur <= str.length) {
+            var le = cur
+            while (le < str.length && str[le] != '\n') le++
+            result.add(cur to le)
+            if (le >= effEnd || le >= str.length) break
+            cur = le + 1
+        }
+        return result
+    }
+
+    private fun allLines(str: String): List<Pair<Int, Int>> {
+        if (str.isEmpty()) return listOf(0 to 0)
+        val lines = mutableListOf<Pair<Int, Int>>()
+        var start = 0
+        while (start <= str.length) {
+            var end = start
+            while (end < str.length && str[end] != '\n') end++
+            lines.add(start to end)
+            if (end >= str.length) break
+            start = end + 1
+        }
+        return lines
+    }
+
+    private fun isListPrefixStyle(style: SpanStyle): Boolean =
+        style is SpanStyle.Bullet || style is SpanStyle.Numbered || style is SpanStyle.Todo
+
+    private fun findListPrefixOnLine(spanList: List<Span>, lineStart: Int, lineEnd: Int): Span? =
+        spanList.firstOrNull { sp ->
+            sp.start == lineStart && sp.end <= lineEnd && isListPrefixStyle(sp.style)
+        }
+
+    private fun isDividerLine(spanList: List<Span>, lineStart: Int, lineEnd: Int): Boolean =
+        spanList.any { it.style is SpanStyle.Divider && it.start >= lineStart && it.start < lineEnd }
+
+    private fun syncListActiveState(cursorPos: Int) {
+        val (ls, le) = currentLineBounds(text, cursorPos)
+        val prefix = findListPrefixOnLine(spans, ls, le)
+        isBulletActive = prefix?.style is SpanStyle.Bullet
+        isNumberedActive = prefix?.style is SpanStyle.Numbered
+        isTodoActive = prefix?.style is SpanStyle.Todo
+    }
+
+    private data class TextEdit(
+        val oldStart: Int,
+        val oldEnd: Int,
+        val newText: String,
+        val createdSpanStyle: SpanStyle?
+    )
+
+    private data class EditOutcome(
+        val text: String,
+        val spans: List<Span>,
+        val selection: Pair<Int, Int>
+    )
+
+    private data class RenumberOutcome(
+        val text: String,
+        val spans: MutableList<Span>,
+        val selStart: Int,
+        val selEnd: Int
+    )
+
+    private fun applyTextEdits(
+        str: String,
+        spanList: List<Span>,
+        rawEdits: List<TextEdit>,
+        selStart: Int,
+        selEnd: Int
+    ): EditOutcome {
+        if (rawEdits.isEmpty()) return EditOutcome(str, spanList, selStart to selEnd)
+        val edits = rawEdits.sortedBy { it.oldStart }
+
+        val sb = StringBuilder()
+        var lastIdx = 0
+        val createdSpans = mutableListOf<Span>()
+        val mappedRanges = ArrayList<Triple<Int, Int, Int>>(edits.size)
+        val editNewBounds = ArrayList<IntRange>(edits.size)
+
+        for (ed in edits) {
+            val os = ed.oldStart.coerceIn(lastIdx, str.length)
+            val oe = ed.oldEnd.coerceIn(os, str.length)
+            sb.append(str, lastIdx, os)
+            val newStart = sb.length
+            sb.append(ed.newText)
+            val newEnd = sb.length
+            if (ed.createdSpanStyle != null && ed.newText.isNotEmpty()) {
+                createdSpans.add(Span(newStart, newEnd, ed.createdSpanStyle))
+            }
+            mappedRanges.add(Triple(os, oe, newEnd))
+            editNewBounds.add(newStart..newEnd)
+            lastIdx = oe
+        }
+        sb.append(str, lastIdx, str.length)
+
+        fun mapPoint(pt: Int, shiftAtBoundary: Boolean): Int {
+            var delta = 0
+            for (i in edits.indices) {
+                val (os, oe, newEnd) = mappedRanges[i]
+                val newStart = editNewBounds[i].first
+                val replacementLen = newEnd - newStart
+                if (os == oe) {
+                    if (pt < os) return pt + delta
+                    if (pt == os) {
+                        return if (shiftAtBoundary) pt + delta + replacementLen else pt + delta
+                    }
+                    delta += replacementLen
+                } else {
+                    if (pt < os) return pt + delta
+                    if (pt <= oe) return newEnd
+                    delta += replacementLen - (oe - os)
+                }
+            }
+            return pt + delta
+        }
+
+        val shiftedSpans = mutableListOf<Span>()
+        for (sp in spanList) {
+            val ns = mapPoint(sp.start, shiftAtBoundary = true)
+            val ne = mapPoint(sp.end, shiftAtBoundary = false)
+            if (ns < ne) shiftedSpans.add(Span(ns, ne, sp.style))
+        }
+        shiftedSpans.addAll(createdSpans)
+
+        val mappedStart = mapPoint(selStart, shiftAtBoundary = true)
+        val mappedEnd = mapPoint(selEnd, shiftAtBoundary = true)
+        return EditOutcome(sb.toString(), shiftedSpans, mappedStart to mappedEnd)
+    }
+
+    private fun renumberNumberedLists(
+        rawText: String,
+        rawSpans: MutableList<Span>,
+        selStart: Int,
+        selEnd: Int
+    ): RenumberOutcome {
+        if (rawSpans.none { it.style is SpanStyle.Numbered }) {
+            return RenumberOutcome(rawText, rawSpans, selStart, selEnd)
+        }
+        val lines = allLines(rawText)
+        var counter = 0
+        val edits = mutableListOf<TextEdit>()
+        val dropped = mutableSetOf<Span>()
+
+        for ((ls, le) in lines) {
+            val numSpan = rawSpans.firstOrNull { it.start == ls && it.end <= le && it.style is SpanStyle.Numbered }
+            if (numSpan != null) {
+                counter++
+                val desired = "$counter. "
+                val actual = rawText.substring(numSpan.start, numSpan.end)
+                if (actual != desired) {
+                    dropped.add(numSpan)
+                    edits.add(TextEdit(numSpan.start, numSpan.end, desired, SpanStyle.Numbered))
+                }
+            } else {
+                counter = 0
+            }
+        }
+
+        if (edits.isEmpty()) {
+            return RenumberOutcome(rawText, rawSpans, selStart, selEnd)
+        }
+        val remaining = rawSpans.filter { it !in dropped }
+        val outcome = applyTextEdits(rawText, remaining, edits, selStart, selEnd)
+        return RenumberOutcome(outcome.text, outcome.spans.toMutableList(), outcome.selection.first, outcome.selection.second)
     }
 
     // =========================================================================
@@ -343,9 +650,18 @@ class RichTextEditorState(
 
         // Case 1: Cursor moved or selection changed without text change
         if (oldText == newText) {
-            textFieldValue = newValue
-            // CRITICAL: Do NOT auto-enable any tool based on cursor position!
-            // Active typing tools stay strictly as user manually configured them.
+            var adjusted = newValue
+            if (newValue.selection.collapsed) {
+                val pos = newValue.selection.start.coerceIn(0, newText.length)
+                val (ls, le) = currentLineBounds(newText, pos)
+                val prefix = findListPrefixOnLine(spans, ls, le)
+                if (prefix != null && pos < prefix.end) {
+                    adjusted = newValue.copy(selection = TextRange(prefix.end))
+                }
+            }
+            textFieldValue = adjusted
+            syncListActiveState(adjusted.selection.start)
+            // CRITICAL: Do NOT auto-enable inline tools based on cursor position!
             return
         }
 
@@ -373,6 +689,56 @@ class RichTextEditorState(
         val insertedText = if (insertedCount > 0) newText.substring(insertedStart, insertedEnd) else ""
         val firstNewlineRel = insertedText.indexOf('\n')
         val hasNewlineInInsert = firstNewlineRel != -1
+
+        // Special Case 2a: Backspace inside a list prefix ("• ", "1. ", "☐ ") cleanly removes the entire list item prefix
+        if (deletedCount in 1..2 && insertedCount == 0) {
+            val touchedPrefix = spans.firstOrNull { sp ->
+                isListPrefixStyle(sp.style) &&
+                    deletedStart >= sp.start &&
+                    deletedEnd <= sp.end
+            }
+            if (touchedPrefix != null) {
+                val edits = listOf(TextEdit(touchedPrefix.start, touchedPrefix.end, "", null))
+                val remaining = spans.filter { it != touchedPrefix }
+                val outcome = applyTextEdits(oldText, remaining, edits, touchedPrefix.start, touchedPrefix.start)
+                val renumbered = renumberNumberedLists(
+                    outcome.text,
+                    outcome.spans.toMutableList(),
+                    outcome.selection.first,
+                    outcome.selection.second
+                )
+                spans = normalizeSpans(renumbered.spans, renumbered.text.length)
+                textFieldValue = TextFieldValue(renumbered.text, TextRange(renumbered.selStart))
+                syncListActiveState(renumbered.selStart)
+                return
+            }
+        }
+
+        // Special Case 2b: Pressing Enter inside or at the end of a list item line
+        val (oldLs, oldLe) = currentLineBounds(oldText, deletedStart)
+        val oldListPrefix = if (insertedText == "\n") findListPrefixOnLine(spans, oldLs, oldLe) else null
+        if (oldListPrefix != null && deletedStart >= oldListPrefix.end) {
+            // Check whether the item had no text other than its prefix (and any deleted selection was everything)
+            val remainingBeforeCursor = oldText.substring(oldListPrefix.end, deletedStart)
+            val remainingAfterCursor = if (deletedEnd < oldLe) oldText.substring(deletedEnd, oldLe) else ""
+            if (remainingBeforeCursor.isEmpty() && remainingAfterCursor.isEmpty()) {
+                // Exit list on Enter of an empty bullet / numbered / checkbox item
+                val edits = listOf(TextEdit(oldListPrefix.start, oldListPrefix.end, "", null))
+                val remaining = spans.filter { it != oldListPrefix }
+                val outcome = applyTextEdits(oldText, remaining, edits, oldListPrefix.start, oldListPrefix.start)
+                val renumbered = renumberNumberedLists(
+                    outcome.text,
+                    outcome.spans.toMutableList(),
+                    outcome.selection.first,
+                    outcome.selection.second
+                )
+                activeHeadingLevel = null
+                spans = normalizeSpans(renumbered.spans, renumbered.text.length)
+                textFieldValue = TextFieldValue(renumbered.text, TextRange(renumbered.selStart))
+                syncListActiveState(renumbered.selStart)
+                return
+            }
+        }
 
         val updatedSpans = mutableListOf<Span>()
 
@@ -441,7 +807,7 @@ class RichTextEditorState(
                             // Style is active: span expands across inserted text
                             updatedSpans.add(Span(s, e + insertedCount, sp.style))
                         } else {
-                            // Style is disabled (or Enter split a heading): split span so inserted text remains unstyled
+                            // Style is disabled (or Enter split a heading / prefix): split span so inserted text remains unstyled
                             if (insertedStart > s) {
                                 updatedSpans.add(Span(s, insertedStart, sp.style))
                             }
@@ -458,7 +824,7 @@ class RichTextEditorState(
             }
         }
 
-        // 2. Apply all currently active tools to newly inserted characters
+        // 2. Apply all currently active tools to newly inserted characters (skip inline styles when Enter creates a new line)
         if (insertedCount > 0) {
             if (isBoldActive) {
                 updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Bold))
@@ -496,14 +862,47 @@ class RichTextEditorState(
                     updatedSpans.add(Span(insertedStart, headingEnd, SpanStyle.Heading(lvl)))
                 }
             }
-            // Pressing Enter starts the new line back in default normal paragraph mode
+            // Pressing Enter starts the new line back in default normal paragraph heading state
             if (hasNewlineInInsert) {
                 activeHeadingLevel = null
             }
         }
 
-        spans = normalizeSpans(updatedSpans, newText.length)
-        textFieldValue = newValue
+        var workingText = newText
+        var workingSpans = updatedSpans
+        var workingSel = newValue.selection
+
+        // Auto-continue list on Enter of a non-empty list item
+        if (oldListPrefix != null && deletedStart >= oldListPrefix.end) {
+            val (nextPrefix, nextStyle) = when (oldListPrefix.style) {
+                is SpanStyle.Bullet -> BULLET_PREFIX to SpanStyle.Bullet
+                is SpanStyle.Numbered -> "1. " to SpanStyle.Numbered
+                is SpanStyle.Todo -> TODO_UNCHECKED_PREFIX to SpanStyle.Todo(checked = false)
+                else -> "" to null
+            }
+            if (nextStyle != null) {
+                val edits = listOf(TextEdit(insertedEnd, insertedEnd, nextPrefix, nextStyle))
+                // Split any non-list spans crossing insertedEnd so they don't color/bold the new prefix marker
+                val cleanBeforeContinue = mutableListOf<Span>()
+                for (sp in workingSpans) {
+                    if (!isListPrefixStyle(sp.style) && sp.start < insertedEnd && sp.end > insertedEnd) {
+                        if (sp.start < insertedStart) cleanBeforeContinue.add(Span(sp.start, insertedStart, sp.style))
+                        cleanBeforeContinue.add(Span(insertedEnd, sp.end, sp.style))
+                    } else {
+                        cleanBeforeContinue.add(sp)
+                    }
+                }
+                val outcome = applyTextEdits(workingText, cleanBeforeContinue, edits, insertedEnd, insertedEnd)
+                workingText = outcome.text
+                workingSpans = outcome.spans.toMutableList()
+                workingSel = TextRange(outcome.selection.first)
+            }
+        }
+
+        val renumbered = renumberNumberedLists(workingText, workingSpans, workingSel.start, workingSel.end)
+        spans = normalizeSpans(renumbered.spans, renumbered.text.length)
+        textFieldValue = TextFieldValue(renumbered.text, TextRange(renumbered.selStart, renumbered.selEnd))
+        syncListActiveState(renumbered.selStart)
     }
 
     private fun applyStyleToRange(start: Int, end: Int, style: SpanStyle) {
@@ -544,6 +943,9 @@ class RichTextEditorState(
 
     companion object {
         const val DIVIDER_MARKER = "\u200B"
+        const val BULLET_PREFIX = "\u2022 "
+        const val TODO_UNCHECKED_PREFIX = "\u2610 "
+        const val TODO_CHECKED_PREFIX = "\u2611 "
 
         fun fromHtml(html: String): RichTextEditorState {
             val (text, spans) = HtmlSpanCodec.fromHtml(html)

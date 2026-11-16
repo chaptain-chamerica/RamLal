@@ -4,6 +4,9 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextLayoutResult
@@ -30,6 +33,24 @@ data class CodeBoxRect(
 
 data class DividerLine(
     val y: Float
+)
+
+data class BulletMarkerGeom(
+    val centerX: Float,
+    val centerY: Float,
+    val radius: Float
+)
+
+data class TodoCheckboxGeom(
+    val spanStart: Int,
+    val checked: Boolean,
+    val boxLeft: Float,
+    val boxTop: Float,
+    val boxSize: Float,
+    val hitLeft: Float,
+    val hitTop: Float,
+    val hitRight: Float,
+    val hitBottom: Float
 )
 
 /**
@@ -138,6 +159,92 @@ object BlockDecorationLayoutCalculator {
             }
         }
         return deduped
+    }
+
+    fun computeBulletMarkers(
+        text: String,
+        spans: List<Span>,
+        lineCount: Int,
+        densityScale: Float = 1f,
+        getLineForOffset: (Int) -> Int,
+        getLineTop: (Int) -> Float,
+        getLineBottom: (Int) -> Float,
+        getCharLeft: (Int) -> Float,
+        getCharRight: (Int) -> Float
+    ): List<BulletMarkerGeom> {
+        if (text.isEmpty() || lineCount <= 0 || spans.isEmpty()) return emptyList()
+        val out = mutableListOf<BulletMarkerGeom>()
+        for (sp in spans) {
+            if (sp.style !is SpanStyle.Bullet) continue
+            val s = sp.start.coerceIn(0, text.length - 1)
+            val line = getLineForOffset(s).coerceIn(0, lineCount - 1)
+            val lineTop = getLineTop(line)
+            val lineBottom = getLineBottom(line)
+            val lineH = (lineBottom - lineTop).coerceAtLeast(12f * densityScale)
+            val glyphLeft = getCharLeft(s)
+            val glyphRight = getCharRight(s)
+            val glyphW = (glyphRight - glyphLeft).coerceAtLeast(8f * densityScale)
+            val radius = (lineH * 0.135f).coerceIn(2.2f * densityScale, 5f * densityScale)
+            val cx = glyphLeft + (glyphW * 0.48f).coerceAtLeast(radius + 1f * densityScale)
+            val cy = (lineTop + lineBottom) / 2f
+            out.add(BulletMarkerGeom(centerX = cx, centerY = cy, radius = radius))
+        }
+        return out
+    }
+
+    fun computeTodoCheckboxes(
+        text: String,
+        spans: List<Span>,
+        lineCount: Int,
+        densityScale: Float = 1f,
+        getLineForOffset: (Int) -> Int,
+        getLineTop: (Int) -> Float,
+        getLineBottom: (Int) -> Float,
+        getCharLeft: (Int) -> Float,
+        getCharRight: (Int) -> Float
+    ): List<TodoCheckboxGeom> {
+        if (text.isEmpty() || lineCount <= 0 || spans.isEmpty()) return emptyList()
+        val out = mutableListOf<TodoCheckboxGeom>()
+        for (sp in spans) {
+            val todoStyle = sp.style as? SpanStyle.Todo ?: continue
+            val s = sp.start.coerceIn(0, text.length - 1)
+            val e = sp.end.coerceIn(s + 1, text.length)
+            val line = getLineForOffset(s).coerceIn(0, lineCount - 1)
+            val lineTop = getLineTop(line)
+            val lineBottom = getLineBottom(line)
+            val lineH = (lineBottom - lineTop).coerceAtLeast(16f * densityScale)
+            val glyphLeft = getCharLeft(s)
+            val glyphRight = getCharRight(s)
+            val prefixRight = getCharRight((e - 1).coerceAtLeast(s))
+            val availW = (glyphRight - glyphLeft).coerceAtLeast(14f * densityScale)
+            val boxSize = (lineH * 0.56f)
+                .coerceIn(14f * densityScale, 24f * densityScale)
+                .coerceAtMost(availW * 0.92f)
+            val boxLeft = glyphLeft + ((availW - boxSize) * 0.32f).coerceAtLeast(0f)
+            val centerY = (lineTop + lineBottom) / 2f
+            val boxTop = centerY - boxSize / 2f
+
+            val hitHalfH = maxOf(lineH / 2f, 18f * densityScale)
+            val hitLeft = (glyphLeft - 4f * densityScale).coerceAtLeast(0f)
+            val hitRight = maxOf(boxLeft + boxSize + 4f * densityScale, prefixRight - 1f * densityScale)
+            val hitTop = (centerY - hitHalfH).coerceAtLeast(0f)
+            val hitBottom = centerY + hitHalfH
+
+            out.add(
+                TodoCheckboxGeom(
+                    spanStart = s,
+                    checked = todoStyle.checked,
+                    boxLeft = boxLeft,
+                    boxTop = boxTop,
+                    boxSize = boxSize,
+                    hitLeft = hitLeft,
+                    hitTop = hitTop,
+                    hitRight = hitRight,
+                    hitBottom = hitBottom
+                )
+            )
+        }
+        return out
     }
 
     fun computeQuoteBlocks(
@@ -375,7 +482,11 @@ fun DrawScope.drawBlockDecorations(
     codeBorderColor: Color,
     dividerColor: Color = codeBorderColor,
     activeHeadingLevel: Int? = null,
-    cursorOffset: Int = 0
+    cursorOffset: Int = 0,
+    bulletColor: Color = quoteBarColor,
+    todoUncheckedBorderColor: Color = codeBorderColor,
+    todoUncheckedBgColor: Color = codeBgColor,
+    todoCheckedFillColor: Color = quoteBarColor
 ) {
     val text = layoutResult.layoutInput.text.text
     if (layoutResult.lineCount <= 0) return
@@ -401,6 +512,79 @@ fun DrawScope.drawBlockDecorations(
     }
 
     if (text.isEmpty() || spans.isEmpty()) return
+
+    val bullets = BlockDecorationLayoutCalculator.computeBulletMarkers(
+        text = text,
+        spans = spans,
+        lineCount = layoutResult.lineCount,
+        densityScale = density,
+        getLineForOffset = { layoutResult.getLineForOffset(it) },
+        getLineTop = { layoutResult.getLineTop(it) },
+        getLineBottom = { layoutResult.getLineBottom(it) },
+        getCharLeft = { layoutResult.getBoundingBox(it).left },
+        getCharRight = { layoutResult.getBoundingBox(it).right }
+    )
+    for (bm in bullets) {
+        drawCircle(
+            color = bulletColor,
+            radius = bm.radius,
+            center = Offset(bm.centerX, bm.centerY)
+        )
+    }
+
+    val todos = BlockDecorationLayoutCalculator.computeTodoCheckboxes(
+        text = text,
+        spans = spans,
+        lineCount = layoutResult.lineCount,
+        densityScale = density,
+        getLineForOffset = { layoutResult.getLineForOffset(it) },
+        getLineTop = { layoutResult.getLineTop(it) },
+        getLineBottom = { layoutResult.getLineBottom(it) },
+        getCharLeft = { layoutResult.getBoundingBox(it).left },
+        getCharRight = { layoutResult.getBoundingBox(it).right }
+    )
+    val todoBorderPx = 1.6.dp.toPx()
+    for (td in todos) {
+        val r = td.boxSize * 0.22f
+        val topLeft = Offset(td.boxLeft, td.boxTop)
+        val boxSz = Size(td.boxSize, td.boxSize)
+        if (td.checked) {
+            drawRoundRect(
+                color = todoCheckedFillColor,
+                topLeft = topLeft,
+                size = boxSz,
+                cornerRadius = CornerRadius(r, r)
+            )
+            val checkPath = Path().apply {
+                moveTo(td.boxLeft + td.boxSize * 0.23f, td.boxTop + td.boxSize * 0.52f)
+                lineTo(td.boxLeft + td.boxSize * 0.43f, td.boxTop + td.boxSize * 0.72f)
+                lineTo(td.boxLeft + td.boxSize * 0.77f, td.boxTop + td.boxSize * 0.30f)
+            }
+            drawPath(
+                path = checkPath,
+                color = Color.White,
+                style = Stroke(
+                    width = (td.boxSize * 0.13f).coerceAtLeast(1.8.dp.toPx()),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round
+                )
+            )
+        } else {
+            drawRoundRect(
+                color = todoUncheckedBgColor,
+                topLeft = topLeft,
+                size = boxSz,
+                cornerRadius = CornerRadius(r, r)
+            )
+            drawRoundRect(
+                color = todoUncheckedBorderColor,
+                topLeft = topLeft,
+                size = boxSz,
+                cornerRadius = CornerRadius(r, r),
+                style = Stroke(width = todoBorderPx)
+            )
+        }
+    }
 
     val quoteOutsetLeft = 8.dp.toPx()
     val quoteOutsetRight = 6.dp.toPx()
