@@ -214,10 +214,10 @@ fun PfpAvatar(pfp: Pfp?, size: Dp, modifier: Modifier = Modifier) {
             contentAlignment = Alignment.Center,
         ) {
             Image(
-                painter = painterResource(R.drawable.ic_ramlal_icon),
+                painter = painterResource(R.drawable.ic_app_open_icon),
                 contentDescription = "App Icon",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().padding(size * 0.16f),
+                contentScale = ContentScale.Fit,
             )
         }
     } else {

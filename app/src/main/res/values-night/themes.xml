@@ -8,7 +8,7 @@
 
     <style name="Theme.Likkho.Starting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/likkho_splash_bg</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_likkho_splash</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_app_open_splash</item>
         <item name="windowSplashScreenIconBackgroundColor">@color/likkho_splash_bg</item>
         <item name="postSplashScreenTheme">@style/Theme.Likkho</item>
         <item name="android:windowLightStatusBar">true</item>

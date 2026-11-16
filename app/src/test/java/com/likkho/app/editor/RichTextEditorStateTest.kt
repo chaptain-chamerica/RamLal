@@ -832,5 +832,77 @@ class RichTextEditorStateTest {
         assertEquals(editor.text, reimported.text)
         assertEquals(editor.spans, reimported.spans)
     }
+
+    @Test
+    fun superscript_and_subscript_toggle_mutualExclusion_visualBaselineShift_and_htmlRoundTrip() {
+        val editor = RichTextEditorState()
+        assertFalse(editor.isSuperscriptActive)
+        assertFalse(editor.isSubscriptActive)
+
+        // 1. Type "H" normally, enable Subscript and type "2", disable Subscript and type "O + x"
+        editor.onTextFieldValueChange(TextFieldValue("H", TextRange(1)))
+        editor.toggleSubscript()
+        assertTrue(editor.isSubscriptActive)
+        assertFalse(editor.isSuperscriptActive)
+        editor.onTextFieldValueChange(TextFieldValue("H2", TextRange(2)))
+        assertEquals(listOf(Span(1, 2, SpanStyle.Subscript)), editor.spans)
+
+        // Disabling Subscript never undoes "2"
+        editor.toggleSubscript()
+        assertFalse(editor.isSubscriptActive)
+        editor.onTextFieldValueChange(TextFieldValue("H2O + x", TextRange(7)))
+        assertEquals(listOf(Span(1, 2, SpanStyle.Subscript)), editor.spans)
+
+        // 2. Enable Superscript and type "2", disable and type end
+        editor.toggleSuperscript()
+        assertTrue(editor.isSuperscriptActive)
+        assertFalse(editor.isSubscriptActive)
+        editor.onTextFieldValueChange(TextFieldValue("H2O + x2", TextRange(8)))
+        assertTrue(editor.spans.contains(Span(7, 8, SpanStyle.Superscript)))
+
+        editor.toggleSuperscript()
+        assertFalse(editor.isSuperscriptActive)
+
+        // Moving cursor inside Subscript/Superscript must NEVER auto-enable tools
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(1)))
+        assertFalse(editor.isSubscriptActive)
+        assertFalse(editor.isSuperscriptActive)
+
+        // 3. Switching selection from Superscript to Subscript replaces mutually exclusively
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(7, 8)))
+        editor.toggleSubscript()
+        assertTrue(editor.isSubscriptActive)
+        assertFalse(editor.isSuperscriptActive)
+        assertTrue(editor.spans.contains(Span(7, 8, SpanStyle.Subscript)))
+        assertFalse(editor.spans.any { it.style == SpanStyle.Superscript })
+
+        // Switch back to Superscript on selection [7, 8)
+        editor.toggleSuperscript()
+        assertTrue(editor.isSuperscriptActive)
+        assertFalse(editor.isSubscriptActive)
+        assertTrue(editor.spans.contains(Span(7, 8, SpanStyle.Superscript)))
+
+        // 4. VisualTransformation applies BaselineShift and scaled fontSize
+        val transformed = RichTextVisualTransformation(editor.spans)
+            .filter(androidx.compose.ui.text.AnnotatedString(editor.text))
+            .text
+        val subSpan = transformed.spanStyles.firstOrNull { it.start == 1 && it.end == 2 }
+        assertNotNull(subSpan)
+        assertEquals(androidx.compose.ui.text.style.BaselineShift(-0.25f), subSpan!!.item.baselineShift)
+        assertTrue(subSpan.item.fontSize < 16.sp)
+
+        val supSpan = transformed.spanStyles.firstOrNull { it.start == 7 && it.end == 8 }
+        assertNotNull(supSpan)
+        assertEquals(androidx.compose.ui.text.style.BaselineShift(0.45f), supSpan!!.item.baselineShift)
+        assertTrue(supSpan.item.fontSize < 16.sp)
+
+        // 5. HTML round-trip uses <sub> and <sup>
+        val html = editor.toHtml()
+        assertTrue(html.contains("<sub>2</sub>"))
+        assertTrue(html.contains("<sup>2</sup>"))
+        val reimported = RichTextEditorState.fromHtml(html)
+        assertEquals(editor.text, reimported.text)
+        assertEquals(editor.spans, reimported.spans)
+    }
 }
 

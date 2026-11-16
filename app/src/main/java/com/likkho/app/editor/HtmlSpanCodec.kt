@@ -229,6 +229,8 @@ object HtmlSpanCodec {
                     is SpanStyle.Italic -> "<i>$escaped</i>"
                     is SpanStyle.Underline -> "<u>$escaped</u>"
                     is SpanStyle.Strike -> "<s>$escaped</s>"
+                    is SpanStyle.Superscript -> "<sup>$escaped</sup>"
+                    is SpanStyle.Subscript -> "<sub>$escaped</sub>"
                     is SpanStyle.Color -> "<span style=\"color:${s.hex}\">$escaped</span>"
                     is SpanStyle.Highlight -> "<mark style=\"background-color:${s.hex}\">$escaped</mark>"
                     is SpanStyle.FontId -> "<span data-font=\"${escapeHtml(s.fontId)}\">$escaped</span>"
@@ -447,6 +449,8 @@ object HtmlSpanCodec {
                             is SpanStyle.Italic -> tagName == "i" || tagName == "em"
                             is SpanStyle.Underline -> tagName == "u"
                             is SpanStyle.Strike -> tagName == "s" || tagName == "strike" || tagName == "del"
+                            is SpanStyle.Superscript -> tagName == "sup"
+                            is SpanStyle.Subscript -> tagName == "sub"
                             is SpanStyle.Color -> tagName == "span" || tagName == "font"
                             is SpanStyle.Highlight -> tagName == "mark" || tagName == "span"
                             is SpanStyle.FontId -> tagName == "span" || tagName == "font"
@@ -552,6 +556,8 @@ object HtmlSpanCodec {
             "i", "em" -> SpanStyle.Italic
             "u" -> SpanStyle.Underline
             "s", "strike", "del" -> SpanStyle.Strike
+            "sup" -> SpanStyle.Superscript
+            "sub" -> SpanStyle.Subscript
             "mark" -> {
                 val hex = extractColorFromStyle(rawTag, "background-color")
                     ?: extractColorFromStyle(rawTag, "background")

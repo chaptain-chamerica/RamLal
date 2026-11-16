@@ -396,8 +396,14 @@ fun RichToolbar(
             CategorySep()
 
             // Group 7: Script & Mathematics
-            ToolGlyph(Icons.Outlined.Superscript, "Superscript", on = active[FormatAction.SUPERSCRIPT] == true) { fmt(FormatAction.SUPERSCRIPT) }
-            ToolGlyph(Icons.Outlined.Subscript, "Subscript", on = active[FormatAction.SUBSCRIPT] == true) { fmt(FormatAction.SUBSCRIPT) }
+            val superOn = editorState?.isSuperscriptActive ?: (active[FormatAction.SUPERSCRIPT] == true)
+            val subOn = editorState?.isSubscriptActive ?: (active[FormatAction.SUBSCRIPT] == true)
+            ToolGlyph(Icons.Outlined.Superscript, "Superscript", on = superOn) {
+                if (editorState != null) editorState.toggleSuperscript() else fmt(FormatAction.SUPERSCRIPT)
+            }
+            ToolGlyph(Icons.Outlined.Subscript, "Subscript", on = subOn) {
+                if (editorState != null) editorState.toggleSubscript() else fmt(FormatAction.SUBSCRIPT)
+            }
             ToolGlyph(Icons.Outlined.Functions, "LaTeX Formulas", on = pop == Pop.LATEX) { toggle(Pop.LATEX) }
 
             CategorySep()

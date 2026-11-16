@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Centers @drawable/ic_app_open_icon safely inside Android 12+ splash icon circle -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:width="112dp"
+        android:height="112dp"
+        android:drawable="@drawable/ic_app_open_icon"
+        android:gravity="center" />
+</layer-list>

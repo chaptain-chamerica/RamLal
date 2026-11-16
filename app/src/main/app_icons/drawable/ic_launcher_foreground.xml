@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Centers @drawable/ic_app_drawer_icon safely inside Android's 66dp adaptive icon zone -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:width="58dp"
+        android:height="58dp"
+        android:drawable="@drawable/ic_app_drawer_icon"
+        android:gravity="center" />
+</layer-list>

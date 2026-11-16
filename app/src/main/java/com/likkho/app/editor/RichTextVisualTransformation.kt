@@ -8,6 +8,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.BaselineShift
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextIndent
@@ -119,7 +120,26 @@ class RichTextVisualTransformation(
             }
         }
 
-        // Apply base block styles first so explicit FontId / Color override defaults
+        fun baseFontSizeSpAt(s: Int, e: Int): Float {
+            var pxSize: Float? = null
+            var headingLvl: Int? = null
+            var hasCode = false
+            for (other in spans) {
+                if (other.start < e && other.end > s) {
+                    when (val ost = other.style) {
+                        is SpanStyle.SizePx -> pxSize = ost.sizePx
+                        is SpanStyle.Heading -> if (headingLvl == null || ost.level < headingLvl) headingLvl = ost.level
+                        is SpanStyle.Code -> hasCode = true
+                        else -> {}
+                    }
+                }
+            }
+            return pxSize?.coerceIn(10f, 48f)
+                ?: headingLvl?.let { HeadingTypographySpec.fontSize(it).value }
+                ?: if (hasCode) 14.5f else 16f
+        }
+
+        // Apply base block styles first so explicit FontId / Color / Super / Sub override defaults
         val orderedSpans = spans.sortedBy {
             when (it.style) {
                 is SpanStyle.Heading -> 0
@@ -132,10 +152,12 @@ class RichTextVisualTransformation(
                 is SpanStyle.Underline,
                 is SpanStyle.Strike,
                 is SpanStyle.Color -> 5
-                is SpanStyle.Todo -> 6
+                is SpanStyle.Superscript,
+                is SpanStyle.Subscript -> 6
+                is SpanStyle.Todo -> 7
                 is SpanStyle.Bullet,
-                is SpanStyle.Numbered -> 7
-                else -> 8
+                is SpanStyle.Numbered -> 8
+                else -> 9
             }
         }
 
@@ -202,6 +224,28 @@ class RichTextVisualTransformation(
                 }
                 is SpanStyle.Strike -> {
                     builder.addStyle(androidx.compose.ui.text.SpanStyle(textDecoration = TextDecoration.LineThrough), s, e)
+                }
+                is SpanStyle.Superscript -> {
+                    val scaledSp = (baseFontSizeSpAt(s, e) * 0.72f).coerceAtLeast(8f).sp
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontSize = scaledSp,
+                            baselineShift = BaselineShift(0.45f)
+                        ),
+                        s,
+                        e
+                    )
+                }
+                is SpanStyle.Subscript -> {
+                    val scaledSp = (baseFontSizeSpAt(s, e) * 0.72f).coerceAtLeast(8f).sp
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontSize = scaledSp,
+                            baselineShift = BaselineShift(-0.25f)
+                        ),
+                        s,
+                        e
+                    )
                 }
                 is SpanStyle.Color -> {
                     val color = parseHexColor(style.hex)

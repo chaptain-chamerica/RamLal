@@ -260,7 +260,9 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     editorState.activeFontSizePx,
                     editorState.activeHeadingLevel,
                     editorState.canvasAlignment,
-                    editorState.currentIndentLevel
+                    editorState.currentIndentLevel,
+                    editorState.isSuperscriptActive,
+                    editorState.isSubscriptActive
                 ) {
                     if (isEditorFocused && !reading) {
                         cursorVisible = true
@@ -328,6 +330,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                         var customSizePx: Float? = null
                                         var hasQuote = false
                                         var hasCode = false
+                                        var isScript = false
                                         for (sp in editorState.spans) {
                                             if (sp.start < segEnd && sp.end > segStart) {
                                                 when (val st = sp.style) {
@@ -338,6 +341,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                                     is SpanStyle.SizePx -> customSizePx = st.sizePx
                                                     is SpanStyle.Quote -> hasQuote = true
                                                     is SpanStyle.Code -> hasCode = true
+                                                    is SpanStyle.Superscript, is SpanStyle.Subscript -> isScript = true
                                                     else -> {}
                                                 }
                                             }
@@ -347,9 +351,10 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                             hasQuote -> com.likkho.app.editor.FontRegistry.BUILTIN_SERIF
                                             else -> null
                                         }
-                                        val effectiveSp = customSizePx?.coerceIn(10f, 48f)?.sp
+                                        val baseSp = customSizePx?.coerceIn(10f, 48f)?.sp
                                             ?: bestLevel?.let { HeadingTypographySpec.fontSize(it) }
                                             ?: if (hasCode && activeFont == null) 14.5.sp else editorTextStyle.fontSize
+                                        val effectiveSp = if (isScript) (baseSp.value * 0.72f).coerceAtLeast(8f).sp else baseSp
                                         val pxSize = with(density) { effectiveSp.toPx() }
                                         val resolvedTf = effectiveFontId?.let {
                                             com.likkho.app.editor.FontRegistry.resolveTypeface(context, it)
@@ -361,7 +366,13 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                                     textSize = pxSize
                                                 }.fontMetrics
                                             }
-                                            bestLevel != null -> headingFontMetrics[bestLevel] ?: fontMetrics
+                                            bestLevel != null && !isScript -> headingFontMetrics[bestLevel] ?: fontMetrics
+                                            isScript -> {
+                                                android.graphics.Paint().apply {
+                                                    typeface = resolvedTypefaceState.value as? android.graphics.Typeface
+                                                    textSize = pxSize
+                                                }.fontMetrics
+                                            }
                                             else -> fontMetrics
                                         }
                                         val hasDevanagari = (segStart until segEnd.coerceAtMost(editorState.text.length)).any { idx ->
@@ -392,9 +403,14 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     val cursorRect = layout.getCursorRect(cursorOffset)
                                     val line = layout.getLineForOffset(cursorOffset).coerceIn(0, (layout.lineCount - 1).coerceAtLeast(0))
                                     val baseline = layout.getLineBaseline(line)
-                                    val targetCursorSp = editorState.activeFontSizePx?.sp
+                                    val baseCursorSp = editorState.activeFontSizePx?.sp
                                         ?: editorState.activeHeadingLevel?.let { HeadingTypographySpec.fontSize(it) }
                                         ?: editorTextStyle.fontSize
+                                    val targetCursorSp = if (editorState.isSuperscriptActive || editorState.isSubscriptActive) {
+                                        (baseCursorSp.value * 0.72f).coerceAtLeast(8f).sp
+                                    } else {
+                                        baseCursorSp
+                                    }
                                     val cursorSizePx = with(density) { targetCursorSp.toPx() }
                                     val activeTypeface = editorState.activeFontId?.let {
                                         com.likkho.app.editor.FontRegistry.resolveTypeface(context, it)

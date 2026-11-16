@@ -55,6 +55,12 @@ class RichTextEditorState(
     var isStrikeActive by mutableStateOf(false)
         private set
 
+    var isSuperscriptActive by mutableStateOf(false)
+        private set
+
+    var isSubscriptActive by mutableStateOf(false)
+        private set
+
     var activeTextColor by mutableStateOf<String?>(null)
         private set
 
@@ -164,6 +170,52 @@ class RichTextEditorState(
             }
         } else {
             isStrikeActive = !isStrikeActive
+        }
+    }
+
+    fun toggleSuperscript() {
+        val sel = selection
+        if (sel.min < sel.max) {
+            val hasSuper = spans.any { it.style == SpanStyle.Superscript && it.start <= sel.min && it.end >= sel.max }
+            if (hasSuper) {
+                removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Superscript }
+                isSuperscriptActive = false
+            } else {
+                removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Subscript }
+                applyStyleToRange(sel.min, sel.max, SpanStyle.Superscript)
+                isSuperscriptActive = true
+                isSubscriptActive = false
+            }
+        } else {
+            if (isSuperscriptActive) {
+                isSuperscriptActive = false
+            } else {
+                isSuperscriptActive = true
+                isSubscriptActive = false
+            }
+        }
+    }
+
+    fun toggleSubscript() {
+        val sel = selection
+        if (sel.min < sel.max) {
+            val hasSub = spans.any { it.style == SpanStyle.Subscript && it.start <= sel.min && it.end >= sel.max }
+            if (hasSub) {
+                removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Subscript }
+                isSubscriptActive = false
+            } else {
+                removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Superscript }
+                applyStyleToRange(sel.min, sel.max, SpanStyle.Subscript)
+                isSubscriptActive = true
+                isSuperscriptActive = false
+            }
+        } else {
+            if (isSubscriptActive) {
+                isSubscriptActive = false
+            } else {
+                isSubscriptActive = true
+                isSuperscriptActive = false
+            }
         }
     }
 
@@ -978,6 +1030,8 @@ class RichTextEditorState(
                                 is SpanStyle.Italic -> isItalicActive
                                 is SpanStyle.Underline -> isUnderlineActive
                                 is SpanStyle.Strike -> isStrikeActive
+                                is SpanStyle.Superscript -> isSuperscriptActive
+                                is SpanStyle.Subscript -> isSubscriptActive
                                 is SpanStyle.Color -> activeTextColor == style.hex
                                 is SpanStyle.Highlight -> activeHighlightColor == style.hex
                                 is SpanStyle.FontId -> activeFontId == style.fontId
@@ -1023,6 +1077,11 @@ class RichTextEditorState(
             }
             if (isStrikeActive) {
                 updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Strike))
+            }
+            if (isSuperscriptActive) {
+                updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Superscript))
+            } else if (isSubscriptActive) {
+                updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Subscript))
             }
             activeTextColor?.let { hex ->
                 updatedSpans.add(Span(insertedStart, insertedEnd, SpanStyle.Color(hex)))
