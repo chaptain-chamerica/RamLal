@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,6 +50,7 @@ import com.likkho.app.editor.RichTextVisualTransformation
 import com.likkho.app.editor.drawBlockDecorations
 import com.likkho.app.editor.drawTextHighlights
 import com.likkho.app.editor.model.SpanStyle
+import com.likkho.app.editor.toComposeTextAlign
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -193,7 +195,19 @@ fun WorkspaceScreen(vm: AppViewModel) {
             images.filter { it.behindText }.forEach { DraggableImage(it, selImg == it.id, !reading, { selImg = it.id; selAud = null }) { x, y -> images = images.map { m -> if (m.id == it.id) m.copy(x = x, y = y) else m } } }
             audios.filter { it.behindText }.forEach { AudioCard(it, selAud == it.id, !reading) { selAud = it.id; selImg = null } }
             Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                val editorTextStyle = TextStyle(fontFamily = WikiFonts.prose, fontSize = 16.sp, color = w.text)
+                val emptyPendingIndent = if (editorState.text.isEmpty() && editorState.activePendingIndent > 0) {
+                    val indSp = (editorState.activePendingIndent * 24).sp
+                    TextIndent(firstLine = indSp, restLine = indSp)
+                } else {
+                    TextIndent.None
+                }
+                val editorTextStyle = TextStyle(
+                    fontFamily = WikiFonts.prose,
+                    fontSize = 16.sp,
+                    color = w.text,
+                    textAlign = editorState.canvasAlignment.toComposeTextAlign(),
+                    textIndent = emptyPendingIndent
+                )
                 val fontFamilyResolver = LocalFontFamilyResolver.current
                 val density = LocalDensity.current
                 val resolvedTypefaceState = remember(editorTextStyle, fontFamilyResolver) {
@@ -244,7 +258,9 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     reading,
                     editorState.textFieldValue,
                     editorState.activeFontSizePx,
-                    editorState.activeHeadingLevel
+                    editorState.activeHeadingLevel,
+                    editorState.canvasAlignment,
+                    editorState.currentIndentLevel
                 ) {
                     if (isEditorFocused && !reading) {
                         cursorVisible = true
@@ -264,14 +280,15 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     textStyle = editorTextStyle,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     cursorBrush = SolidColor(if (textLayoutResult == null) w.accent else Color.Transparent),
-                    visualTransformation = remember(editorState.spans, vm.customFonts.size, w.isDark) {
+                    visualTransformation = remember(editorState.spans, editorState.canvasAlignment, vm.customFonts.size, w.isDark) {
                         RichTextVisualTransformation(
                             spans = editorState.spans,
                             defaultTextColor = w.text,
                             quoteTextColor = w.text.copy(alpha = 0.85f),
                             codeTextColor = w.text,
                             numberedColor = w.accent,
-                            todoCheckedTextColor = w.muted
+                            todoCheckedTextColor = w.muted,
+                            defaultAlignment = editorState.canvasAlignment
                         )
                     },
                     onTextLayout = { textLayoutResult = it },
@@ -398,7 +415,16 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                     )
                                 }
                         ) {
-                            if (editorState.text.isEmpty()) Text("Start writing...", style = proseStyle(16.sp, w.muted.copy(alpha = 0.65f), italic = true))
+                            if (editorState.text.isEmpty()) {
+                                Text(
+                                    text = "Start writing...",
+                                    modifier = Modifier.fillMaxWidth(),
+                                    style = proseStyle(16.sp, w.muted.copy(alpha = 0.65f), italic = true).copy(
+                                        textAlign = editorState.canvasAlignment.toComposeTextAlign(),
+                                        textIndent = emptyPendingIndent
+                                    )
+                                )
+                            }
                             inner()
                             val layout = textLayoutResult
                             if (layout != null &&

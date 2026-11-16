@@ -8,12 +8,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import com.likkho.app.WikiFonts
 import com.likkho.app.editor.model.Span
 import com.likkho.app.editor.model.SpanStyle
+import com.likkho.app.editor.model.TextAlignment
+
+fun TextAlignment.toComposeTextAlign(): TextAlign = when (this) {
+    TextAlignment.LEFT -> TextAlign.Left
+    TextAlignment.CENTER -> TextAlign.Center
+    TextAlignment.RIGHT -> TextAlign.Right
+    TextAlignment.JUSTIFY -> TextAlign.Justify
+}
 
 object HeadingTypographySpec {
     fun fontSize(level: Int): TextUnit = when (level) {
@@ -56,6 +66,7 @@ class RichTextVisualTransformation(
     private val codeTextColor: Color = Color.Unspecified,
     private val numberedColor: Color = Color.Unspecified,
     private val todoCheckedTextColor: Color = Color.Unspecified,
+    private val defaultAlignment: TextAlignment = TextAlignment.LEFT,
     private val fontResolver: (String) -> FontFamily? = { FontRegistry.resolveFontFamily(it) }
 ) : VisualTransformation {
 
@@ -67,6 +78,46 @@ class RichTextVisualTransformation(
         val raw = text.text
         val textLen = raw.length
         val builder = AnnotatedString.Builder(raw)
+
+        // Emit merged non-overlapping ParagraphStyle strictly on full line bounds [lineStart, paraEnd)
+        // including trailing '\n' so Compose MultiParagraph never inserts an implicit extra blank line.
+        val hasParagraphSpans = spans.any { it.style is SpanStyle.Align || it.style is SpanStyle.Indent }
+        if (hasParagraphSpans) {
+            var lineStart = 0
+            while (lineStart <= textLen) {
+                var lineEnd = lineStart
+                while (lineEnd < textLen && raw[lineEnd] != '\n') lineEnd++
+                val paraEnd = if (lineEnd < textLen && raw[lineEnd] == '\n') lineEnd + 1 else lineEnd
+                if (lineStart < paraEnd) {
+                    var lineAlign: TextAlignment? = null
+                    var lineIndent = 0
+                    for (sp in spans) {
+                        val s = sp.start.coerceIn(0, textLen)
+                        val e = sp.end.coerceIn(0, textLen)
+                        if (s < paraEnd && e > lineStart) {
+                            when (val st = sp.style) {
+                                is SpanStyle.Align -> lineAlign = st.alignment
+                                is SpanStyle.Indent -> if (st.level > lineIndent) lineIndent = st.level
+                                else -> {}
+                            }
+                        }
+                    }
+                    if (lineAlign != null || lineIndent > 0) {
+                        val indentSp = (lineIndent * 24).sp
+                        builder.addStyle(
+                            androidx.compose.ui.text.ParagraphStyle(
+                                textAlign = (lineAlign ?: defaultAlignment).toComposeTextAlign(),
+                                textIndent = if (lineIndent > 0) TextIndent(firstLine = indentSp, restLine = indentSp) else null
+                            ),
+                            lineStart,
+                            paraEnd
+                        )
+                    }
+                }
+                if (lineEnd >= textLen) break
+                lineStart = lineEnd + 1
+            }
+        }
 
         // Apply base block styles first so explicit FontId / Color override defaults
         val orderedSpans = spans.sortedBy {

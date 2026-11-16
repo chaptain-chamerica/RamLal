@@ -169,6 +169,23 @@ sealed interface SpanStyle {
         override val valueString: String get() = checked.toString()
     }
 
+    @Serializable
+    @SerialName("align")
+    data class Align(val alignment: TextAlignment) : SpanStyle {
+        override val styleKey: String = "align"
+        override val valueString: String get() = alignment.value
+    }
+
+    @Serializable
+    @SerialName("indent")
+    data class Indent(val level: Int) : SpanStyle {
+        init {
+            require(level in 1..6) { "Indent level must be 1..6" }
+        }
+        override val styleKey: String = "indent"
+        override val valueString: String get() = level.toString()
+    }
+
     companion object {
         fun fromRecord(record: SpanStyleRecord): SpanStyle = when (record.style.lowercase()) {
             "bold" -> Bold
@@ -189,6 +206,8 @@ sealed interface SpanStyle {
             "bullet" -> Bullet
             "numbered" -> Numbered
             "todo" -> Todo(record.value.equals("true", ignoreCase = true))
+            "align" -> Align(TextAlignment.fromString(record.value ?: "left"))
+            "indent" -> Indent((record.value?.toIntOrNull() ?: 1).coerceIn(1, 6))
             else -> Bold
         }
     }

@@ -2,25 +2,84 @@ package com.likkho.app.editor
 
 import com.likkho.app.editor.model.Span
 import com.likkho.app.editor.model.SpanStyle
+import com.likkho.app.editor.model.TextAlignment
 import com.likkho.app.editor.model.normalizeSpans
+
+data class DecodedRichHtml(
+    val text: String,
+    val spans: List<Span>,
+    val canvasAlignment: TextAlignment = TextAlignment.LEFT
+)
 
 /**
  * Encodes and decodes rich-text spans to and from clean HTML.
- * Supports bold, italic, underline, strikethrough, text color, and highlight color.
+ * Supports inline spans, headings, quote/code, divider, lists, per-paragraph align/indent, and canvas alignment.
  */
 object HtmlSpanCodec {
 
-    fun toHtml(text: String, spans: List<Span>): String {
-        if (text.isEmpty()) return ""
-        val normalized = normalizeSpans(spans, text.length)
-        val hasListSpans = normalized.any {
-            it.style is SpanStyle.Bullet || it.style is SpanStyle.Numbered || it.style is SpanStyle.Todo
+    fun toHtml(text: String, spans: List<Span>): String =
+        toHtml(text, spans, TextAlignment.LEFT)
+
+    fun toHtml(
+        text: String,
+        spans: List<Span>,
+        canvasAlignment: TextAlignment = TextAlignment.LEFT
+    ): String {
+        if (text.isEmpty()) {
+            return if (canvasAlignment != TextAlignment.LEFT) {
+                "<div data-canvas-align=\"${canvasAlignment.value}\"></div>"
+            } else {
+                ""
+            }
         }
-        if (!hasListSpans) {
-            return renderRangeToHtml(text, normalized, 0, text.length)
+        val normalized = normalizeSpans(spans, text.length)
+        val hasBlockOrListSpans = normalized.any {
+            it.style is SpanStyle.Bullet ||
+                it.style is SpanStyle.Numbered ||
+                it.style is SpanStyle.Todo ||
+                it.style is SpanStyle.Align ||
+                it.style is SpanStyle.Indent
         }
 
-        // Line-based rendering when list items exist so <ul>/<ol>/checklist tags stay well-formed
+        val body = if (!hasBlockOrListSpans) {
+            renderRangeToHtml(text, normalized, 0, text.length)
+        } else {
+            renderLinesToHtml(text, normalized)
+        }
+
+        return if (canvasAlignment != TextAlignment.LEFT) {
+            "<div data-canvas-align=\"${canvasAlignment.value}\">$body</div>"
+        } else {
+            body
+        }
+    }
+
+    private fun lineParaEnd(text: String, lineEnd: Int): Int =
+        if (lineEnd < text.length && text[lineEnd] == '\n') lineEnd + 1 else lineEnd
+
+    private fun extractLineAlign(normalized: List<Span>, ls: Int, paraEnd: Int): TextAlignment? {
+        if (ls >= paraEnd) return null
+        return normalized.lastOrNull {
+            it.style is SpanStyle.Align && it.start < paraEnd && it.end > ls
+        }?.let { (it.style as SpanStyle.Align).alignment }
+    }
+
+    private fun extractLineIndent(normalized: List<Span>, ls: Int, paraEnd: Int): Int {
+        if (ls >= paraEnd) return 0
+        return normalized.filter {
+            it.style is SpanStyle.Indent && it.start < paraEnd && it.end > ls
+        }.maxOfOrNull { (it.style as SpanStyle.Indent).level } ?: 0
+    }
+
+    private fun buildBlockAttrs(align: TextAlignment?, indent: Int, extraAttr: String = ""): String {
+        val parts = mutableListOf<String>()
+        if (extraAttr.isNotBlank()) parts.add(extraAttr)
+        if (align != null) parts.add("style=\"text-align:${align.value}\"")
+        if (indent in 1..6) parts.add("data-indent=\"$indent\"")
+        return if (parts.isEmpty()) "" else " " + parts.joinToString(" ")
+    }
+
+    private fun renderLinesToHtml(text: String, normalized: List<Span>): String {
         val lines = mutableListOf<Pair<Int, Int>>()
         var start = 0
         while (start <= text.length) {
@@ -41,7 +100,16 @@ object HtmlSpanCodec {
                     (it.style is SpanStyle.Bullet || it.style is SpanStyle.Numbered || it.style is SpanStyle.Todo)
             }
             if (prefixSpan == null) {
-                sb.append(renderRangeToHtml(text, normalized, ls, le))
+                val paraEnd = lineParaEnd(text, le)
+                val align = extractLineAlign(normalized, ls, paraEnd)
+                val indent = extractLineIndent(normalized, ls, paraEnd)
+                val inner = renderRangeToHtml(text, normalized, ls, le)
+                if (align != null || indent > 0) {
+                    val attrs = buildBlockAttrs(align, indent)
+                    sb.append("<p$attrs>").append(inner).append("</p>")
+                } else {
+                    sb.append(inner)
+                }
                 idx++
                 continue
             }
@@ -54,8 +122,13 @@ object HtmlSpanCodec {
                         val ps = normalized.firstOrNull {
                             it.start == cls && it.end <= cle && it.style is SpanStyle.Bullet
                         } ?: break
+                        val paraEnd = lineParaEnd(text, cle)
+                        val attrs = buildBlockAttrs(
+                            extractLineAlign(normalized, cls, paraEnd),
+                            extractLineIndent(normalized, cls, paraEnd)
+                        )
                         val content = renderRangeToHtml(text, normalized, ps.end, cle)
-                        sb.append("<li>").append(content).append("</li>")
+                        sb.append("<li$attrs>").append(content).append("</li>")
                         idx++
                     }
                     sb.append("</ul>")
@@ -67,8 +140,13 @@ object HtmlSpanCodec {
                         val ps = normalized.firstOrNull {
                             it.start == cls && it.end <= cle && it.style is SpanStyle.Numbered
                         } ?: break
+                        val paraEnd = lineParaEnd(text, cle)
+                        val attrs = buildBlockAttrs(
+                            extractLineAlign(normalized, cls, paraEnd),
+                            extractLineIndent(normalized, cls, paraEnd)
+                        )
                         val content = renderRangeToHtml(text, normalized, ps.end, cle)
-                        sb.append("<li>").append(content).append("</li>")
+                        sb.append("<li$attrs>").append(content).append("</li>")
                         idx++
                     }
                     sb.append("</ol>")
@@ -81,8 +159,14 @@ object HtmlSpanCodec {
                             it.start == cls && it.end <= cle && it.style is SpanStyle.Todo
                         } ?: break
                         val todoStyle = ps.style as SpanStyle.Todo
+                        val paraEnd = lineParaEnd(text, cle)
+                        val attrs = buildBlockAttrs(
+                            extractLineAlign(normalized, cls, paraEnd),
+                            extractLineIndent(normalized, cls, paraEnd),
+                            extraAttr = "data-checked=\"${todoStyle.checked}\""
+                        )
                         val content = renderRangeToHtml(text, normalized, ps.end, cle)
-                        sb.append("<li data-checked=\"${todoStyle.checked}\">").append(content).append("</li>")
+                        sb.append("<li$attrs>").append(content).append("</li>")
                         idx++
                     }
                     sb.append("</ul>")
@@ -102,7 +186,11 @@ object HtmlSpanCodec {
         if (rangeStart >= rangeEnd) return ""
         val rangeSpans = normalized.filter {
             it.end > rangeStart && it.start < rangeEnd &&
-                it.style !is SpanStyle.Bullet && it.style !is SpanStyle.Numbered && it.style !is SpanStyle.Todo
+                it.style !is SpanStyle.Bullet &&
+                it.style !is SpanStyle.Numbered &&
+                it.style !is SpanStyle.Todo &&
+                it.style !is SpanStyle.Align &&
+                it.style !is SpanStyle.Indent
         }
         if (rangeSpans.isEmpty()) {
             return escapeHtml(text.substring(rangeStart, rangeEnd)).replace("\n", "<br>")
@@ -161,23 +249,60 @@ object HtmlSpanCodec {
     private enum class HtmlListMode { UL, OL, CHECKLIST }
 
     fun fromHtml(html: String): Pair<String, List<Span>> {
-        if (html.isEmpty()) return Pair("", emptyList())
+        val decoded = fromHtmlWithMeta(html)
+        return Pair(decoded.text, decoded.spans)
+    }
+
+    fun fromHtmlWithMeta(html: String): DecodedRichHtml {
+        if (html.isEmpty()) return DecodedRichHtml("", emptyList(), TextAlignment.LEFT)
 
         // Quick check: if no '<', it's pure plain text
         if (!html.contains('<')) {
             val unescaped = unescapeHtml(html)
-            return Pair(unescaped, emptyList())
+            return DecodedRichHtml(unescaped, emptyList(), TextAlignment.LEFT)
         }
 
         val plainText = StringBuilder()
         val spans = mutableListOf<Span>()
+        var canvasAlignment = TextAlignment.LEFT
 
         data class OpenTag(val style: SpanStyle, val startIndex: Int)
+        data class OpenParaTag(val startIndex: Int, val styles: List<SpanStyle>)
         val stack = mutableListOf<OpenTag>()
+        val paraStack = mutableListOf<OpenParaTag>()
+        val pendingEmptyLineStyles = mutableMapOf<Int, List<SpanStyle>>()
 
         var currentListMode: HtmlListMode? = null
         var listHasEmittedItem = false
         var olCounter = 0
+        var openLiStart = -1
+        var openLiStyles: List<SpanStyle> = emptyList()
+
+        fun flushOpenLi() {
+            if (openLiStart >= 0 && openLiStyles.isNotEmpty()) {
+                val endIdx = plainText.length
+                if (endIdx > openLiStart) {
+                    for (st in openLiStyles) {
+                        spans.add(Span(openLiStart, endIdx, st))
+                    }
+                }
+            }
+            openLiStart = -1
+            openLiStyles = emptyList()
+        }
+
+        fun extractParagraphStyles(rawTag: String): List<SpanStyle> {
+            val res = mutableListOf<SpanStyle>()
+            val alignStr = extractColorFromStyle(rawTag, "text-align")
+            if (alignStr != null) {
+                res.add(SpanStyle.Align(TextAlignment.fromString(alignStr)))
+            }
+            val indentVal = extractAttr(rawTag, "data-indent")?.toIntOrNull()?.coerceIn(1, 6)
+            if (indentVal != null && indentVal > 0) {
+                res.add(SpanStyle.Indent(indentVal))
+            }
+            return res
+        }
 
         var i = 0
         val len = html.length
@@ -195,7 +320,11 @@ object HtmlSpanCodec {
                 i = closeIdx + 1
 
                 if (tagContent.startsWith("br", ignoreCase = true)) {
+                    val nlOffset = plainText.length
                     plainText.append("\n")
+                    pendingEmptyLineStyles.remove(nlOffset)?.forEach { st ->
+                        spans.add(Span(nlOffset, nlOffset + 1, st))
+                    }
                     continue
                 }
 
@@ -209,6 +338,40 @@ object HtmlSpanCodec {
                     val markerPos = plainText.length
                     plainText.append(RichTextEditorState.DIVIDER_MARKER)
                     spans.add(Span(markerPos, markerPos + 1, SpanStyle.Divider))
+                    continue
+                }
+
+                if (!isClosing && tagName == "div") {
+                    extractAttr(rawTag, "data-canvas-align")?.let {
+                        canvasAlignment = TextAlignment.fromString(it)
+                    }
+                    continue
+                }
+
+                if (isClosing && tagName == "div") {
+                    continue
+                }
+
+                if (!isClosing && tagName == "p") {
+                    if (plainText.isNotEmpty() && plainText[plainText.length - 1] != '\n') {
+                        plainText.append('\n')
+                    }
+                    paraStack.add(OpenParaTag(plainText.length, extractParagraphStyles(rawTag)))
+                    continue
+                }
+
+                if (isClosing && tagName == "p") {
+                    if (paraStack.isNotEmpty()) {
+                        val openP = paraStack.removeAt(paraStack.size - 1)
+                        val endIdx = plainText.length
+                        if (endIdx > openP.startIndex) {
+                            for (st in openP.styles) {
+                                spans.add(Span(openP.startIndex, endIdx, st))
+                            }
+                        } else if (openP.styles.isNotEmpty()) {
+                            pendingEmptyLineStyles[openP.startIndex] = openP.styles
+                        }
+                    }
                     continue
                 }
 
@@ -229,6 +392,7 @@ object HtmlSpanCodec {
                 }
 
                 if (isClosing && (tagName == "ul" || tagName == "ol")) {
+                    flushOpenLi()
                     currentListMode = null
                     listHasEmittedItem = false
                     olCounter = 0
@@ -236,12 +400,15 @@ object HtmlSpanCodec {
                 }
 
                 if (!isClosing && tagName == "li") {
+                    flushOpenLi()
                     if (listHasEmittedItem || (plainText.isNotEmpty() && plainText[plainText.length - 1] != '\n')) {
                         plainText.append('\n')
                     }
                     listHasEmittedItem = true
                     val checkedAttr = extractAttr(rawTag, "data-checked")
                     val pStart = plainText.length
+                    openLiStart = pStart
+                    openLiStyles = extractParagraphStyles(rawTag)
                     when {
                         currentListMode == HtmlListMode.CHECKLIST || checkedAttr != null -> {
                             val checked = checkedAttr.equals("true", ignoreCase = true)
@@ -268,6 +435,7 @@ object HtmlSpanCodec {
                 }
 
                 if (isClosing && tagName == "li") {
+                    flushOpenLi()
                     continue
                 }
 
@@ -321,7 +489,16 @@ object HtmlSpanCodec {
         }
 
         // Close any remaining unclosed tags
+        flushOpenLi()
         val endPos = plainText.length
+        while (paraStack.isNotEmpty()) {
+            val openP = paraStack.removeAt(paraStack.size - 1)
+            if (endPos > openP.startIndex) {
+                for (st in openP.styles) {
+                    spans.add(Span(openP.startIndex, endPos, st))
+                }
+            }
+        }
         while (stack.isNotEmpty()) {
             val open = stack.removeAt(stack.size - 1)
             if (endPos > open.startIndex) {
@@ -330,8 +507,43 @@ object HtmlSpanCodec {
         }
 
         val text = plainText.toString()
-        val normalized = normalizeSpans(spans, text.length)
-        return Pair(text, normalized)
+        val snapped = snapParagraphSpans(text, spans)
+        val normalized = normalizeSpans(snapped, text.length)
+        return DecodedRichHtml(text, normalized, canvasAlignment)
+    }
+
+    private fun snapParagraphSpans(text: String, rawSpans: List<Span>): List<Span> {
+        if (text.isEmpty() || rawSpans.isEmpty()) return rawSpans
+        val hasPara = rawSpans.any { it.style is SpanStyle.Align || it.style is SpanStyle.Indent }
+        if (!hasPara) return rawSpans
+
+        val out = rawSpans.filter { it.style !is SpanStyle.Align && it.style !is SpanStyle.Indent }.toMutableList()
+        val paraSpans = rawSpans.filter { it.style is SpanStyle.Align || it.style is SpanStyle.Indent }
+
+        var ls = 0
+        while (ls <= text.length) {
+            var le = ls
+            while (le < text.length && text[le] != '\n') le++
+            val paraEnd = lineParaEnd(text, le)
+            if (ls < paraEnd) {
+                var align: TextAlignment? = null
+                var indent = 0
+                for (sp in paraSpans) {
+                    if (sp.start < paraEnd && sp.end > ls) {
+                        when (val st = sp.style) {
+                            is SpanStyle.Align -> align = st.alignment
+                            is SpanStyle.Indent -> if (st.level > indent) indent = st.level
+                            else -> {}
+                        }
+                    }
+                }
+                if (align != null) out.add(Span(ls, paraEnd, SpanStyle.Align(align)))
+                if (indent > 0) out.add(Span(ls, paraEnd, SpanStyle.Indent(indent.coerceIn(1, 6))))
+            }
+            if (le >= text.length) break
+            ls = le + 1
+        }
+        return out
     }
 
     private fun parseTagStyle(tagName: String, rawTag: String): SpanStyle? {

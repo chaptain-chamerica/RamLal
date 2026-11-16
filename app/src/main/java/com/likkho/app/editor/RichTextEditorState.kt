@@ -7,6 +7,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.likkho.app.editor.model.Span
 import com.likkho.app.editor.model.SpanStyle
+import com.likkho.app.editor.model.TextAlignment
 import com.likkho.app.editor.model.normalizeSpans
 
 /**
@@ -20,12 +21,25 @@ import com.likkho.app.editor.model.normalizeSpans
  */
 class RichTextEditorState(
     initialText: String = "",
-    initialSpans: List<Span> = emptyList()
+    initialSpans: List<Span> = emptyList(),
+    initialCanvasAlignment: TextAlignment = TextAlignment.LEFT
 ) {
     var textFieldValue by mutableStateOf(TextFieldValue(initialText, TextRange(initialText.length)))
         private set
 
     var spans by mutableStateOf(normalizeSpans(initialSpans, initialText.length))
+        private set
+
+    var canvasAlignment by mutableStateOf(initialCanvasAlignment)
+        private set
+
+    var activePendingIndent by mutableStateOf(0)
+        private set
+
+    var currentLineAlignOverride by mutableStateOf<TextAlignment?>(null)
+        private set
+
+    var currentLineIndentLevel by mutableStateOf(0)
         private set
 
     // Active tool states for future typing
@@ -75,11 +89,14 @@ class RichTextEditorState(
     val isH2Active: Boolean get() = activeHeadingLevel == 2
     val isH3Active: Boolean get() = activeHeadingLevel == 3
 
+    val effectiveAlignment: TextAlignment get() = currentLineAlignOverride ?: canvasAlignment
+    val currentIndentLevel: Int get() = maxOf(currentLineIndentLevel, activePendingIndent)
+
     val text: String get() = textFieldValue.text
     val selection: TextRange get() = textFieldValue.selection
 
     init {
-        syncListActiveState(initialText.length)
+        syncLineState(initialText.length)
     }
 
     // =========================================================================
@@ -280,6 +297,97 @@ class RichTextEditorState(
         }
     }
 
+    /**
+     * Paragraph & Canvas Alignment:
+     * - When text is selected (`sel.min < sel.max`), sets an independent per-paragraph alignment
+     *   for all selected non-divider lines without altering [canvasAlignment].
+     * - When cursor is collapsed, updates [canvasAlignment] so the whole canvas reflects it, and
+     *   clears any paragraph-level override on the cursor's current line.
+     */
+    fun setAlignment(alignment: TextAlignment) {
+        val currentText = text
+        val sel = selection
+        if (sel.min < sel.max) {
+            val selectedLines = collectSelectedLines(currentText, sel.min, sel.max)
+                .filter { (ls, le) -> !isDividerLine(spans, ls, le) }
+            var workingSpans = spans
+            var applied = false
+            for ((ls, le) in selectedLines) {
+                val paraEnd = lineParaEnd(currentText, le)
+                if (ls < paraEnd) {
+                    workingSpans = removeStyleFromList(workingSpans, ls, paraEnd) { it is SpanStyle.Align } +
+                        Span(ls, paraEnd, SpanStyle.Align(alignment))
+                    applied = true
+                }
+            }
+            if (applied) {
+                spans = normalizeSpans(snapLineParagraphSpans(currentText, workingSpans), currentText.length)
+            } else {
+                canvasAlignment = alignment
+            }
+        } else {
+            canvasAlignment = alignment
+            val (ls, le) = currentLineBounds(currentText, sel.start)
+            val paraEnd = lineParaEnd(currentText, le)
+            if (ls < paraEnd && spans.any { it.style is SpanStyle.Align && it.start < paraEnd && it.end > ls }) {
+                removeStyleFromRange(ls, paraEnd) { it is SpanStyle.Align }
+            }
+        }
+        syncLineState(sel.start)
+    }
+
+    fun increaseIndent() {
+        val currentText = text
+        val sel = selection
+        val selectedLines = collectSelectedLines(currentText, sel.min, sel.max)
+            .filter { (ls, le) -> !isDividerLine(spans, ls, le) }
+        if (selectedLines.isEmpty()) return
+
+        var workingSpans = spans
+        for ((ls, le) in selectedLines) {
+            val paraEnd = lineParaEnd(currentText, le)
+            if (ls >= paraEnd) {
+                activePendingIndent = (activePendingIndent + 1).coerceIn(0, MAX_INDENT)
+                continue
+            }
+            val currentLvl = workingSpans
+                .filter { it.style is SpanStyle.Indent && it.start < paraEnd && it.end > ls }
+                .maxOfOrNull { (it.style as SpanStyle.Indent).level } ?: 0
+            val newLvl = (currentLvl + 1).coerceIn(1, MAX_INDENT)
+            workingSpans = removeStyleFromList(workingSpans, ls, paraEnd) { it is SpanStyle.Indent } +
+                Span(ls, paraEnd, SpanStyle.Indent(newLvl))
+        }
+        spans = normalizeSpans(snapLineParagraphSpans(currentText, workingSpans), currentText.length)
+        syncLineState(sel.start)
+    }
+
+    fun decreaseIndent() {
+        val currentText = text
+        val sel = selection
+        val selectedLines = collectSelectedLines(currentText, sel.min, sel.max)
+            .filter { (ls, le) -> !isDividerLine(spans, ls, le) }
+        if (selectedLines.isEmpty()) return
+
+        var workingSpans = spans
+        for ((ls, le) in selectedLines) {
+            val paraEnd = lineParaEnd(currentText, le)
+            if (ls >= paraEnd) {
+                activePendingIndent = (activePendingIndent - 1).coerceIn(0, MAX_INDENT)
+                continue
+            }
+            val currentLvl = workingSpans
+                .filter { it.style is SpanStyle.Indent && it.start < paraEnd && it.end > ls }
+                .maxOfOrNull { (it.style as SpanStyle.Indent).level } ?: 0
+            val newLvl = (currentLvl - 1).coerceIn(0, MAX_INDENT)
+            workingSpans = removeStyleFromList(workingSpans, ls, paraEnd) { it is SpanStyle.Indent }
+            if (newLvl > 0) {
+                workingSpans = workingSpans + Span(ls, paraEnd, SpanStyle.Indent(newLvl))
+            }
+        }
+        spans = normalizeSpans(snapLineParagraphSpans(currentText, workingSpans), currentText.length)
+        syncLineState(sel.start)
+    }
+
     private enum class ListKind { BULLET, NUMBERED, TODO }
 
     fun toggleBullet() = toggleListKind(ListKind.BULLET)
@@ -338,9 +446,9 @@ class RichTextEditorState(
                 val newSpans = (shiftedSpans + Span(newPrefixStart, newPrefixStart + prefix.length, style)).toMutableList()
                 val newCursor = newPrefixStart + prefix.length
                 val (finalText, finalSpans, finalCursor, _) = renumberNumberedLists(editedText, newSpans, newCursor, newCursor)
-                spans = normalizeSpans(finalSpans, finalText.length)
+                spans = normalizeSpans(snapLineParagraphSpans(finalText, finalSpans), finalText.length)
                 textFieldValue = TextFieldValue(finalText, TextRange(finalCursor))
-                syncListActiveState(finalCursor)
+                syncLineState(finalCursor)
                 return
             }
         }
@@ -395,9 +503,9 @@ class RichTextEditorState(
             finalSelStart,
             finalSelEnd
         )
-        spans = normalizeSpans(renumSpans, renumText.length)
+        spans = normalizeSpans(snapLineParagraphSpans(renumText, renumSpans), renumText.length)
         textFieldValue = TextFieldValue(renumText, TextRange(rStart, rEnd))
-        syncListActiveState(rStart)
+        syncLineState(rStart)
     }
 
     fun insertDivider() {
@@ -453,10 +561,11 @@ class RichTextEditorState(
 
         updatedSpans.add(Span(markerIdx, markerIdx + 1, SpanStyle.Divider))
         activeHeadingLevel = null
+        activePendingIndent = 0
         val (renumText, renumSpans, rCursor, _) = renumberNumberedLists(newText, updatedSpans, newCursor, newCursor)
-        spans = normalizeSpans(renumSpans, renumText.length)
+        spans = normalizeSpans(snapLineParagraphSpans(renumText, renumSpans), renumText.length)
         textFieldValue = TextFieldValue(renumText, TextRange(rCursor))
-        syncListActiveState(rCursor)
+        syncLineState(rCursor)
     }
 
     private fun currentLineBounds(str: String, cursor: Int): Pair<Int, Int> {
@@ -498,6 +607,9 @@ class RichTextEditorState(
         return lines
     }
 
+    private fun lineParaEnd(str: String, lineEnd: Int): Int =
+        if (lineEnd < str.length && str[lineEnd] == '\n') lineEnd + 1 else lineEnd
+
     private fun isListPrefixStyle(style: SpanStyle): Boolean =
         style is SpanStyle.Bullet || style is SpanStyle.Numbered || style is SpanStyle.Todo
 
@@ -509,12 +621,61 @@ class RichTextEditorState(
     private fun isDividerLine(spanList: List<Span>, lineStart: Int, lineEnd: Int): Boolean =
         spanList.any { it.style is SpanStyle.Divider && it.start >= lineStart && it.start < lineEnd }
 
-    private fun syncListActiveState(cursorPos: Int) {
-        val (ls, le) = currentLineBounds(text, cursorPos)
+    private fun syncLineState(cursorPos: Int) {
+        val currentText = text
+        val (ls, le) = currentLineBounds(currentText, cursorPos)
         val prefix = findListPrefixOnLine(spans, ls, le)
         isBulletActive = prefix?.style is SpanStyle.Bullet
         isNumberedActive = prefix?.style is SpanStyle.Numbered
         isTodoActive = prefix?.style is SpanStyle.Todo
+
+        val paraEnd = lineParaEnd(currentText, le)
+        if (ls < paraEnd) {
+            currentLineAlignOverride = spans.lastOrNull {
+                it.style is SpanStyle.Align && it.start < paraEnd && it.end > ls
+            }?.let { (it.style as SpanStyle.Align).alignment }
+            currentLineIndentLevel = spans.filter {
+                it.style is SpanStyle.Indent && it.start < paraEnd && it.end > ls
+            }.maxOfOrNull { (it.style as SpanStyle.Indent).level } ?: 0
+        } else {
+            currentLineAlignOverride = null
+            currentLineIndentLevel = 0
+        }
+    }
+
+    private fun snapLineParagraphSpans(rawText: String, rawSpans: List<Span>): List<Span> {
+        if (rawText.isEmpty() || rawSpans.isEmpty()) return rawSpans
+        val hasPara = rawSpans.any { it.style is SpanStyle.Align || it.style is SpanStyle.Indent }
+        if (!hasPara) return rawSpans
+
+        val lines = allLines(rawText)
+        val others = rawSpans.filter { it.style !is SpanStyle.Align && it.style !is SpanStyle.Indent }.toMutableList()
+        val paraSpans = rawSpans.filter { it.style is SpanStyle.Align || it.style is SpanStyle.Indent }
+
+        for ((ls, le) in lines) {
+            val paraEnd = lineParaEnd(rawText, le)
+            if (ls >= paraEnd) continue
+            if (others.any { it.style is SpanStyle.Divider && it.start >= ls && it.start < le }) continue
+
+            var lineAlign: TextAlignment? = null
+            var lineIndent = 0
+            for (sp in paraSpans) {
+                if (sp.start < paraEnd && sp.end > ls) {
+                    when (val st = sp.style) {
+                        is SpanStyle.Align -> lineAlign = st.alignment
+                        is SpanStyle.Indent -> if (st.level > lineIndent) lineIndent = st.level
+                        else -> {}
+                    }
+                }
+            }
+            if (lineAlign != null) {
+                others.add(Span(ls, paraEnd, SpanStyle.Align(lineAlign)))
+            }
+            if (lineIndent > 0) {
+                others.add(Span(ls, paraEnd, SpanStyle.Indent(lineIndent.coerceIn(1, MAX_INDENT))))
+            }
+        }
+        return others
     }
 
     private data class TextEdit(
@@ -592,7 +753,8 @@ class RichTextEditorState(
 
         val shiftedSpans = mutableListOf<Span>()
         for (sp in spanList) {
-            val ns = mapPoint(sp.start, shiftAtBoundary = true)
+            val shiftStartBoundary = sp.style !is SpanStyle.Align && sp.style !is SpanStyle.Indent
+            val ns = mapPoint(sp.start, shiftAtBoundary = shiftStartBoundary)
             val ne = mapPoint(sp.end, shiftAtBoundary = false)
             if (ns < ne) shiftedSpans.add(Span(ns, ne, sp.style))
         }
@@ -659,8 +821,15 @@ class RichTextEditorState(
                     adjusted = newValue.copy(selection = TextRange(prefix.end))
                 }
             }
+            val prevPos = textFieldValue.selection.start.coerceIn(0, oldText.length)
+            val oldLs = currentLineBounds(oldText, prevPos).first
+            val newPos = adjusted.selection.start.coerceIn(0, newText.length)
+            val (newLs, newLe) = currentLineBounds(newText, newPos)
+            if (newLs < lineParaEnd(newText, newLe) || newLs != oldLs) {
+                activePendingIndent = 0
+            }
             textFieldValue = adjusted
-            syncListActiveState(adjusted.selection.start)
+            syncLineState(adjusted.selection.start)
             // CRITICAL: Do NOT auto-enable inline tools based on cursor position!
             return
         }
@@ -707,15 +876,22 @@ class RichTextEditorState(
                     outcome.selection.first,
                     outcome.selection.second
                 )
-                spans = normalizeSpans(renumbered.spans, renumbered.text.length)
+                spans = normalizeSpans(snapLineParagraphSpans(renumbered.text, renumbered.spans), renumbered.text.length)
                 textFieldValue = TextFieldValue(renumbered.text, TextRange(renumbered.selStart))
-                syncListActiveState(renumbered.selStart)
+                syncLineState(renumbered.selStart)
                 return
             }
         }
 
         // Special Case 2b: Pressing Enter inside or at the end of a list item line
         val (oldLs, oldLe) = currentLineBounds(oldText, deletedStart)
+        val prevLineParaEnd = lineParaEnd(oldText, oldLe)
+        val prevLineIndent = if (oldLs < prevLineParaEnd) {
+            spans.filter { it.style is SpanStyle.Indent && it.start < prevLineParaEnd && it.end > oldLs }
+                .maxOfOrNull { (it.style as SpanStyle.Indent).level } ?: 0
+        } else {
+            activePendingIndent
+        }
         val oldListPrefix = if (insertedText == "\n") findListPrefixOnLine(spans, oldLs, oldLe) else null
         if (oldListPrefix != null && deletedStart >= oldListPrefix.end) {
             // Check whether the item had no text other than its prefix (and any deleted selection was everything)
@@ -733,9 +909,10 @@ class RichTextEditorState(
                     outcome.selection.second
                 )
                 activeHeadingLevel = null
-                spans = normalizeSpans(renumbered.spans, renumbered.text.length)
+                activePendingIndent = 0
+                spans = normalizeSpans(snapLineParagraphSpans(renumbered.text, renumbered.spans), renumbered.text.length)
                 textFieldValue = TextFieldValue(renumbered.text, TextRange(renumbered.selStart))
-                syncListActiveState(renumbered.selStart)
+                syncLineState(renumbered.selStart)
                 return
             }
         }
@@ -788,31 +965,40 @@ class RichTextEditorState(
                     }
                     // Insertion is in the middle of this span (s < insertedStart && e > insertedStart)
                     else -> {
-                        val isStyleActive = when (val style = sp.style) {
-                            is SpanStyle.Bold -> isBoldActive
-                            is SpanStyle.Italic -> isItalicActive
-                            is SpanStyle.Underline -> isUnderlineActive
-                            is SpanStyle.Strike -> isStrikeActive
-                            is SpanStyle.Color -> activeTextColor == style.hex
-                            is SpanStyle.Highlight -> activeHighlightColor == style.hex
-                            is SpanStyle.FontId -> activeFontId == style.fontId
-                            is SpanStyle.SizePx -> activeFontSizePx != null && activeFontSizePx == style.sizePx.toInt()
-                            is SpanStyle.Quote -> isQuoteActive
-                            is SpanStyle.Code -> isCodeActive
-                            is SpanStyle.Heading -> !hasNewlineInInsert && activeHeadingLevel == style.level
-                            else -> false
-                        }
-
-                        if (isStyleActive) {
-                            // Style is active: span expands across inserted text
-                            updatedSpans.add(Span(s, e + insertedCount, sp.style))
-                        } else {
-                            // Style is disabled (or Enter split a heading / prefix): split span so inserted text remains unstyled
-                            if (insertedStart > s) {
-                                updatedSpans.add(Span(s, insertedStart, sp.style))
+                        if (sp.style is SpanStyle.Align || sp.style is SpanStyle.Indent) {
+                            if (hasNewlineInInsert && e == insertedStart + 1) {
+                                // Newline inserted right before existing trailing '\n' of this line: keep old line covered without bleeding onto new line
+                                updatedSpans.add(Span(s, insertedStart + firstNewlineRel + 1, sp.style))
+                            } else {
+                                updatedSpans.add(Span(s, e + insertedCount, sp.style))
                             }
-                            if (e > insertedStart) {
-                                updatedSpans.add(Span(insertedEnd, e + insertedCount, sp.style))
+                        } else {
+                            val isStyleActive = when (val style = sp.style) {
+                                is SpanStyle.Bold -> isBoldActive
+                                is SpanStyle.Italic -> isItalicActive
+                                is SpanStyle.Underline -> isUnderlineActive
+                                is SpanStyle.Strike -> isStrikeActive
+                                is SpanStyle.Color -> activeTextColor == style.hex
+                                is SpanStyle.Highlight -> activeHighlightColor == style.hex
+                                is SpanStyle.FontId -> activeFontId == style.fontId
+                                is SpanStyle.SizePx -> activeFontSizePx != null && activeFontSizePx == style.sizePx.toInt()
+                                is SpanStyle.Quote -> isQuoteActive
+                                is SpanStyle.Code -> isCodeActive
+                                is SpanStyle.Heading -> !hasNewlineInInsert && activeHeadingLevel == style.level
+                                else -> false
+                            }
+
+                            if (isStyleActive) {
+                                // Style is active: span expands across inserted text
+                                updatedSpans.add(Span(s, e + insertedCount, sp.style))
+                            } else {
+                                // Style is disabled (or Enter split a heading / prefix): split span so inserted text remains unstyled
+                                if (insertedStart > s) {
+                                    updatedSpans.add(Span(s, insertedStart, sp.style))
+                                }
+                                if (e > insertedStart) {
+                                    updatedSpans.add(Span(insertedEnd, e + insertedCount, sp.style))
+                                }
                             }
                         }
                     }
@@ -865,6 +1051,20 @@ class RichTextEditorState(
             // Pressing Enter starts the new line back in default normal paragraph heading state
             if (hasNewlineInInsert) {
                 activeHeadingLevel = null
+                activePendingIndent = if (oldLs < oldLe) prevLineIndent else 0
+            } else if (activePendingIndent > 0) {
+                val (newLs, newLe) = currentLineBounds(newText, insertedStart)
+                val newParaEnd = lineParaEnd(newText, newLe)
+                if (newLs < newParaEnd) {
+                    updatedSpans.add(Span(newLs, newParaEnd, SpanStyle.Indent(activePendingIndent.coerceIn(1, MAX_INDENT))))
+                }
+                activePendingIndent = 0
+            }
+        } else if (deletedCount > 0) {
+            val pos = newValue.selection.start.coerceIn(0, newText.length)
+            val (curLs, curLe) = currentLineBounds(newText, pos)
+            if (curLs < lineParaEnd(newText, curLe)) {
+                activePendingIndent = 0
             }
         }
 
@@ -885,7 +1085,12 @@ class RichTextEditorState(
                 // Split any non-list spans crossing insertedEnd so they don't color/bold the new prefix marker
                 val cleanBeforeContinue = mutableListOf<Span>()
                 for (sp in workingSpans) {
-                    if (!isListPrefixStyle(sp.style) && sp.start < insertedEnd && sp.end > insertedEnd) {
+                    if (!isListPrefixStyle(sp.style) &&
+                        sp.style !is SpanStyle.Align &&
+                        sp.style !is SpanStyle.Indent &&
+                        sp.start < insertedEnd &&
+                        sp.end > insertedEnd
+                    ) {
                         if (sp.start < insertedStart) cleanBeforeContinue.add(Span(sp.start, insertedStart, sp.style))
                         cleanBeforeContinue.add(Span(insertedEnd, sp.end, sp.style))
                     } else {
@@ -900,9 +1105,10 @@ class RichTextEditorState(
         }
 
         val renumbered = renumberNumberedLists(workingText, workingSpans, workingSel.start, workingSel.end)
-        spans = normalizeSpans(renumbered.spans, renumbered.text.length)
+        val snapped = snapLineParagraphSpans(renumbered.text, renumbered.spans)
+        spans = normalizeSpans(snapped, renumbered.text.length)
         textFieldValue = TextFieldValue(renumbered.text, TextRange(renumbered.selStart, renumbered.selEnd))
-        syncListActiveState(renumbered.selStart)
+        syncLineState(renumbered.selStart)
     }
 
     private fun applyStyleToRange(start: Int, end: Int, style: SpanStyle) {
@@ -912,13 +1118,18 @@ class RichTextEditorState(
         spans = normalizeSpans(spans + Span(s, e, style), text.length)
     }
 
-    private fun removeStyleFromRange(start: Int, end: Int, predicate: (SpanStyle) -> Boolean) {
+    private fun removeStyleFromList(
+        source: List<Span>,
+        start: Int,
+        end: Int,
+        predicate: (SpanStyle) -> Boolean
+    ): List<Span> {
         val s = start.coerceIn(0, text.length)
         val e = end.coerceIn(0, text.length)
-        if (s >= e) return
+        if (s >= e) return source
 
         val result = mutableListOf<Span>()
-        for (sp in spans) {
+        for (sp in source) {
             if (!predicate(sp.style)) {
                 result.add(sp)
                 continue
@@ -936,20 +1147,28 @@ class RichTextEditorState(
                 result.add(Span(e, sp.end, sp.style))
             }
         }
-        spans = normalizeSpans(result, text.length)
+        return result
     }
 
-    fun toHtml(): String = HtmlSpanCodec.toHtml(text, spans)
+    private fun removeStyleFromRange(start: Int, end: Int, predicate: (SpanStyle) -> Boolean) {
+        val s = start.coerceIn(0, text.length)
+        val e = end.coerceIn(0, text.length)
+        if (s >= e) return
+        spans = normalizeSpans(removeStyleFromList(spans, s, e, predicate), text.length)
+    }
+
+    fun toHtml(): String = HtmlSpanCodec.toHtml(text, spans, canvasAlignment)
 
     companion object {
         const val DIVIDER_MARKER = "\u200B"
         const val BULLET_PREFIX = "\u2022 "
         const val TODO_UNCHECKED_PREFIX = "\u2610 "
         const val TODO_CHECKED_PREFIX = "\u2611 "
+        const val MAX_INDENT = 6
 
         fun fromHtml(html: String): RichTextEditorState {
-            val (text, spans) = HtmlSpanCodec.fromHtml(html)
-            return RichTextEditorState(text, spans)
+            val decoded = HtmlSpanCodec.fromHtmlWithMeta(html)
+            return RichTextEditorState(decoded.text, decoded.spans, decoded.canvasAlignment)
         }
     }
 }

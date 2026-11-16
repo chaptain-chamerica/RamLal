@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import com.likkho.app.R
 import com.likkho.app.editor.FontRegistry
 import com.likkho.app.editor.RichTextEditorState
+import com.likkho.app.editor.model.TextAlignment
 import kotlinx.coroutines.launch
 
 private enum class Pop { NONE, COLOR, HIGHLIGHT, FONTS, SIZE, MEDIA, LINK, SPOILER, LOCK, BG, WIKI, LATEX, WORD }
@@ -355,12 +356,42 @@ fun RichToolbar(
             CategorySep()
 
             // Group 6: Alignment & Indents
-            ToolGlyph(Icons.Outlined.FormatAlignLeft, "Align Left", on = active[FormatAction.ALIGN_LEFT] == true) { fmt(FormatAction.ALIGN_LEFT) }
-            ToolGlyph(Icons.Outlined.FormatAlignCenter, "Align Center", on = active[FormatAction.ALIGN_CENTER] == true) { fmt(FormatAction.ALIGN_CENTER) }
-            ToolGlyph(Icons.Outlined.FormatAlignRight, "Align Right", on = active[FormatAction.ALIGN_RIGHT] == true) { fmt(FormatAction.ALIGN_RIGHT) }
-            ToolGlyph(Icons.Outlined.FormatAlignJustify, "Justify", on = active[FormatAction.JUSTIFY] == true) { fmt(FormatAction.JUSTIFY) }
-            ToolGlyph(Icons.Outlined.FormatIndentIncrease, "Indent") { fmt(FormatAction.INDENT, false) }
-            ToolGlyph(Icons.Outlined.FormatIndentDecrease, "Outdent") { fmt(FormatAction.OUTDENT, false) }
+            val effAlign = editorState?.effectiveAlignment
+            ToolGlyph(
+                Icons.Outlined.FormatAlignLeft,
+                "Align Left",
+                on = effAlign == TextAlignment.LEFT || (editorState == null && active[FormatAction.ALIGN_LEFT] == true)
+            ) {
+                if (editorState != null) editorState.setAlignment(TextAlignment.LEFT) else fmt(FormatAction.ALIGN_LEFT)
+            }
+            ToolGlyph(
+                Icons.Outlined.FormatAlignCenter,
+                "Align Center",
+                on = effAlign == TextAlignment.CENTER || (editorState == null && active[FormatAction.ALIGN_CENTER] == true)
+            ) {
+                if (editorState != null) editorState.setAlignment(TextAlignment.CENTER) else fmt(FormatAction.ALIGN_CENTER)
+            }
+            ToolGlyph(
+                Icons.Outlined.FormatAlignRight,
+                "Align Right",
+                on = effAlign == TextAlignment.RIGHT || (editorState == null && active[FormatAction.ALIGN_RIGHT] == true)
+            ) {
+                if (editorState != null) editorState.setAlignment(TextAlignment.RIGHT) else fmt(FormatAction.ALIGN_RIGHT)
+            }
+            ToolGlyph(
+                Icons.Outlined.FormatAlignJustify,
+                "Justify",
+                on = effAlign == TextAlignment.JUSTIFY || (editorState == null && active[FormatAction.JUSTIFY] == true)
+            ) {
+                if (editorState != null) editorState.setAlignment(TextAlignment.JUSTIFY) else fmt(FormatAction.JUSTIFY)
+            }
+            val indentOn = (editorState?.currentIndentLevel ?: 0) > 0
+            ToolGlyph(Icons.Outlined.FormatIndentIncrease, "Indent", on = indentOn) {
+                if (editorState != null) editorState.increaseIndent() else fmt(FormatAction.INDENT, false)
+            }
+            ToolGlyph(Icons.Outlined.FormatIndentDecrease, "Outdent") {
+                if (editorState != null) editorState.decreaseIndent() else fmt(FormatAction.OUTDENT, false)
+            }
 
             CategorySep()
 

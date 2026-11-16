@@ -2,8 +2,12 @@ package com.likkho.app.editor
 
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextIndent
+import androidx.compose.ui.unit.sp
 import com.likkho.app.editor.model.Span
 import com.likkho.app.editor.model.SpanStyle
+import com.likkho.app.editor.model.TextAlignment
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -693,6 +697,140 @@ class RichTextEditorStateTest {
         val reimported = RichTextEditorState.fromHtml(reHtml)
         assertEquals(doc.text, reimported.text)
         assertEquals(doc.spans, reimported.spans)
+    }
+
+    @Test
+    fun alignment_defaultLeft_canvasWideCollapsed_and_perParagraphSelectionOverride() {
+        val editor = RichTextEditorState("First line\nSecond line\nThird line")
+
+        // 1. Default canvas alignment is LEFT
+        assertEquals(TextAlignment.LEFT, editor.canvasAlignment)
+        assertEquals(TextAlignment.LEFT, editor.effectiveAlignment)
+
+        // 2. Collapsed cursor sets canvas-wide alignment across RIGHT, CENTER, JUSTIFY, LEFT
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(2)))
+        editor.setAlignment(TextAlignment.RIGHT)
+        assertEquals(TextAlignment.RIGHT, editor.canvasAlignment)
+        assertEquals(TextAlignment.RIGHT, editor.effectiveAlignment)
+        assertFalse(editor.spans.any { it.style is SpanStyle.Align })
+
+        // 3. Select Second line ("Second line", indices 11..22) and give it CENTER alignment
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(11, 22)))
+        editor.setAlignment(TextAlignment.CENTER)
+        // Canvas alignment remains RIGHT, while Second line gets [11, 23) Align(CENTER) inclusive of '\n'
+        assertEquals(TextAlignment.RIGHT, editor.canvasAlignment)
+        assertEquals(TextAlignment.CENTER, editor.effectiveAlignment)
+        assertTrue(editor.spans.contains(Span(11, 23, SpanStyle.Align(TextAlignment.CENTER))))
+
+        // 4. Changing canvas alignment to JUSTIFY while collapsed on line 3 leaves line 2 CENTER intact
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(26)))
+        editor.setAlignment(TextAlignment.JUSTIFY)
+        assertEquals(TextAlignment.JUSTIFY, editor.canvasAlignment)
+        assertEquals(TextAlignment.JUSTIFY, editor.effectiveAlignment)
+        assertTrue(editor.spans.contains(Span(11, 23, SpanStyle.Align(TextAlignment.CENTER))))
+
+        // Cursor moving back onto line 2 reports effectiveAlignment = CENTER
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(15)))
+        assertEquals(TextAlignment.CENTER, editor.effectiveAlignment)
+
+        // Tapping LEFT while collapsed inside overridden line 2 clears its override and sets canvas LEFT
+        editor.setAlignment(TextAlignment.LEFT)
+        assertEquals(TextAlignment.LEFT, editor.canvasAlignment)
+        assertEquals(TextAlignment.LEFT, editor.effectiveAlignment)
+        assertFalse(editor.spans.any { it.style is SpanStyle.Align })
+    }
+
+    @Test
+    fun indent_and_outdent_singleMultiLine_clamping_emptyCanvasPending_and_enterCarry() {
+        // 1. Empty canvas pending indent applied when typing starts, and outdent reduces it
+        val emptyEditor = RichTextEditorState()
+        assertEquals(0, emptyEditor.currentIndentLevel)
+        emptyEditor.increaseIndent()
+        emptyEditor.increaseIndent()
+        assertEquals(2, emptyEditor.currentIndentLevel)
+        emptyEditor.decreaseIndent()
+        assertEquals(1, emptyEditor.currentIndentLevel)
+
+        emptyEditor.onTextFieldValueChange(TextFieldValue("Alpha", TextRange(5)))
+        assertEquals(listOf(Span(0, 5, SpanStyle.Indent(1))), emptyEditor.spans)
+        assertEquals(1, emptyEditor.currentIndentLevel)
+
+        // Pressing Enter carries indent level onto next line once typed
+        emptyEditor.onTextFieldValueChange(TextFieldValue("Alpha\n", TextRange(6)))
+        assertTrue(emptyEditor.spans.contains(Span(0, 6, SpanStyle.Indent(1))))
+        assertEquals(1, emptyEditor.activePendingIndent)
+        emptyEditor.onTextFieldValueChange(TextFieldValue("Alpha\nBeta", TextRange(10)))
+        assertEquals(listOf(Span(0, 10, SpanStyle.Indent(1))), emptyEditor.spans)
+
+        // 2. Clamping 1..MAX_INDENT and Outdent back to 0
+        repeat(10) { emptyEditor.increaseIndent() } // cursor at line 2 "Beta"
+        assertEquals(RichTextEditorState.MAX_INDENT, emptyEditor.currentIndentLevel)
+        assertTrue(emptyEditor.spans.contains(Span(6, 10, SpanStyle.Indent(RichTextEditorState.MAX_INDENT))))
+
+        repeat(10) { emptyEditor.decreaseIndent() }
+        assertEquals(0, emptyEditor.currentIndentLevel)
+        assertEquals(listOf(Span(0, 6, SpanStyle.Indent(1))), emptyEditor.spans)
+
+        // 3. Multi-line selection adjusts each selected line individually
+        val multi = RichTextEditorState("One\nTwo\nThree")
+        multi.onTextFieldValueChange(multi.textFieldValue.copy(selection = TextRange(0, 7))) // lines 1 & 2
+        multi.increaseIndent()
+        assertEquals(listOf(Span(0, 8, SpanStyle.Indent(1))), multi.spans)
+    }
+
+    @Test
+    fun visualTransformation_mergesAlignAndIndent_and_htmlRoundTripPreservesCanvasAndParagraphAlignAndIndent() {
+        val editor = RichTextEditorState()
+        // Set canvas alignment to CENTER
+        editor.setAlignment(TextAlignment.CENTER)
+        editor.onTextFieldValueChange(TextFieldValue("Header", TextRange(6)))
+        editor.onTextFieldValueChange(TextFieldValue("Header\nBody line", TextRange(16)))
+        editor.onTextFieldValueChange(TextFieldValue("Header\nBody line\n", TextRange(17)))
+
+        // Select "Body line" and align RIGHT + Indent level 2
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(7, 16)))
+        editor.setAlignment(TextAlignment.RIGHT)
+        editor.increaseIndent()
+        editor.increaseIndent()
+
+        // Add an indented & aligned checklist item on line 3
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(17)))
+        editor.toggleTodo()
+        editor.onTextFieldValueChange(TextFieldValue("Header\nBody line\n☐ Task", TextRange(23)))
+        editor.increaseIndent()
+
+        // Verify VisualTransformation merges Align + Indent into non-overlapping ParagraphStyles covering '\n'
+        val transformed = RichTextVisualTransformation(
+            spans = editor.spans,
+            defaultAlignment = editor.canvasAlignment
+        ).filter(androidx.compose.ui.text.AnnotatedString(editor.text)).text
+
+        val bodyPara = transformed.paragraphStyles.firstOrNull { it.start == 7 && it.end == 17 }
+        assertNotNull(bodyPara)
+        assertEquals(TextAlign.Right, bodyPara!!.item.textAlign)
+        assertEquals(TextIndent(48.sp, 48.sp), bodyPara.item.textIndent)
+
+        val taskPara = transformed.paragraphStyles.firstOrNull { it.start == 17 && it.end == 23 }
+        assertNotNull(taskPara)
+        assertEquals(TextAlign.Center, taskPara!!.item.textAlign)
+        assertEquals(TextIndent(24.sp, 24.sp), taskPara.item.textIndent)
+
+        // Verify non-overlapping ParagraphStyles
+        val sortedParas = transformed.paragraphStyles.sortedBy { it.start }
+        for (i in 1 until sortedParas.size) {
+            assertTrue(sortedParas[i].start >= sortedParas[i - 1].end)
+        }
+
+        // Full HTML round-trip preserves canvasAlignment, per-line Align, Indent, and Todo
+        val html = editor.toHtml()
+        assertTrue(html.contains("data-canvas-align=\"center\""))
+        assertTrue(html.contains("text-align:right"))
+        assertTrue(html.contains("data-indent=\"2\""))
+
+        val reimported = RichTextEditorState.fromHtml(html)
+        assertEquals(TextAlignment.CENTER, reimported.canvasAlignment)
+        assertEquals(editor.text, reimported.text)
+        assertEquals(editor.spans, reimported.spans)
     }
 }
 
