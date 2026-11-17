@@ -336,6 +336,7 @@ class BackupEngine(
         record.background?.mediaId?.let { mediaIds.add(it) }
         record.images.forEach { mediaIds.add(it.mediaId) }
         record.audios.forEach { mediaIds.add(it.mediaId) }
+        record.videos.forEach { mediaIds.add(it.mediaId) }
 
         for (mId in mediaIds) {
             if (mediaRepo.exists(mId)) {

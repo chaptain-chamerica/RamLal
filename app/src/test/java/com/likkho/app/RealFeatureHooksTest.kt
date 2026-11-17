@@ -208,12 +208,14 @@ class RealFeatureHooksTest {
 
         val imagePayload = ByteArray(256) { (it * 7).toByte() }
         val audioPayload = ByteArray(512) { (it * 13).toByte() }
+        val videoPayload = ByteArray(768) { (it * 19).toByte() }
 
-        val (imgId, audId) = vaultManager.withActiveDek { dek ->
+        val (imgId, audId, vidId) = vaultManager.withActiveDek { dek ->
             val repo = vaultManager.activeMediaRepository()
             val iId = repo.importMediaBytes("img_inf_test", imagePayload, dek)
             val aId = repo.importMediaBytes("aud_inf_test", audioPayload, dek)
-            iId to aId
+            val vId = repo.importMediaBytes("vid_inf_test", videoPayload, dek)
+            Triple(iId, aId, vId)
         }
 
         val log = DiaryLog(
@@ -229,6 +231,7 @@ class RealFeatureHooksTest {
                     width = 240f,
                     height = 180f,
                     opacity = 0.85f,
+                    rotation = 33f,
                     sizeBytes = imagePayload.size.toLong()
                 )
             ),
@@ -241,6 +244,20 @@ class RealFeatureHooksTest {
                     durationSec = 42,
                     x = 7200f,
                     y = 6100f
+                )
+            ),
+            videoAttachments = listOf(
+                CanvasVideo(
+                    id = vidId,
+                    name = "clip.mp4",
+                    source = vidId,
+                    durationSec = 18,
+                    x = 8100f,
+                    y = 6500f,
+                    width = 320f,
+                    height = 200f,
+                    rotation = 15f,
+                    sizeBytes = videoPayload.size.toLong()
                 )
             )
         )
@@ -255,15 +272,25 @@ class RealFeatureHooksTest {
         assertEquals(1, restored.canvasImages.size)
         assertEquals(5400f, restored.canvasImages[0].x)
         assertEquals(3850f, restored.canvasImages[0].y)
+        assertEquals(33f, restored.canvasImages[0].rotation)
         assertEquals(1, restored.audioAttachments.size)
         assertEquals(7200f, restored.audioAttachments[0].x)
         assertEquals(6100f, restored.audioAttachments[0].y)
+        assertEquals(1, restored.videoAttachments.size)
+        assertEquals(8100f, restored.videoAttachments[0].x)
+        assertEquals(6500f, restored.videoAttachments[0].y)
+        assertEquals(15f, restored.videoAttachments[0].rotation)
 
-        val (readImg, readAud) = vaultManager.withActiveDek { dek ->
+        val (readImg, readAud, readVid) = vaultManager.withActiveDek { dek ->
             val repo = vaultManager.activeMediaRepository()
-            repo.readDecryptedBytes(imgId, dek) to repo.readDecryptedBytes(audId, dek)
+            Triple(
+                repo.readDecryptedBytes(imgId, dek),
+                repo.readDecryptedBytes(audId, dek),
+                repo.readDecryptedBytes(vidId, dek)
+            )
         }
         assertTrue(imagePayload.contentEquals(readImg))
         assertTrue(audioPayload.contentEquals(readAud))
+        assertTrue(videoPayload.contentEquals(readVid))
     }
 }

@@ -41,7 +41,7 @@ private enum class Pop { NONE, COLOR, HIGHLIGHT, FONTS, SIZE, MEDIA, LINK, SPOIL
 @Composable
 fun RichToolbar(
     vm: AppViewModel, lockPin: String?, bgSrc: String?, bgOpacity: Float, recording: Boolean,
-    onRecordToggle: () -> Unit, onAddImage: () -> Unit, onAddAudio: () -> Unit, onLock: (String?) -> Unit,
+    onRecordToggle: () -> Unit, onAddImage: () -> Unit, onAddVideo: () -> Unit = {}, onAddAudio: () -> Unit, onLock: (String?) -> Unit,
     onBgOpacity: (Float) -> Unit, onPickBg: () -> Unit, onRemoveBg: () -> Unit, onEditBg: () -> Unit,
     onInsertText: (String) -> Unit, onSpoiler: (String) -> Unit,
     editorState: RichTextEditorState? = null,
@@ -210,8 +210,9 @@ fun RichToolbar(
                     modifier = Modifier.padding(bottom = 6.dp)
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WikiButton("Pick Image", { pop = Pop.NONE; onAddImage() }, Modifier.weight(1f), icon = Icons.Outlined.AddPhotoAlternate)
-                    WikiButton("Pick Audio", { pop = Pop.NONE; onAddAudio() }, Modifier.weight(1f), icon = Icons.Outlined.AudioFile)
+                    WikiButton("Image", { pop = Pop.NONE; onAddImage() }, Modifier.weight(1f), icon = Icons.Outlined.AddPhotoAlternate)
+                    WikiButton("Video", { pop = Pop.NONE; onAddVideo() }, Modifier.weight(1f), icon = Icons.Outlined.VideoLibrary)
+                    WikiButton("Audio", { pop = Pop.NONE; onAddAudio() }, Modifier.weight(1f), icon = Icons.Outlined.AudioFile)
                 }
             }
             Pop.LINK -> Pop1 {

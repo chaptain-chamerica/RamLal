@@ -51,6 +51,20 @@ data class CanvasAudioRecord(
 )
 
 @Serializable
+data class CanvasVideoRecord(
+    val mediaId: String,
+    val name: String = "",
+    val durationSec: Int = 1,
+    val x: Float = 24f,
+    val y: Float = 140f,
+    val width: Float = 220f,
+    val height: Float = 150f,
+    val rotation: Float = 0f,
+    val behindText: Boolean = false,
+    val sizeBytes: Long = 0
+)
+
+@Serializable
 data class SpanStyleRecord(
     val start: Int,
     val end: Int,
@@ -83,6 +97,7 @@ data class DiaryRecord(
     val background: BackgroundRecord? = null,
     val images: List<CanvasImageRecord> = emptyList(),
     val audios: List<CanvasAudioRecord> = emptyList(),
+    val videos: List<CanvasVideoRecord> = emptyList(),
     val content: List<ContentBlockRecord> = emptyList(),
     val plainPreview: String = "",
     val contentHtml: String = ""

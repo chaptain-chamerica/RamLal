@@ -9,6 +9,7 @@ import com.likkho.app.storage.VaultManager
 import com.likkho.app.storage.model.BackgroundRecord
 import com.likkho.app.storage.model.CanvasAudioRecord
 import com.likkho.app.storage.model.CanvasImageRecord
+import com.likkho.app.storage.model.CanvasVideoRecord
 import com.likkho.app.storage.model.DiaryLockRecord
 import com.likkho.app.storage.model.DiaryRecord
 import com.likkho.app.storage.model.PfpRecord
@@ -535,6 +536,20 @@ fun DiaryLog.toDiaryRecord(): DiaryRecord {
                 behindText = it.behindText
             )
         },
+        videos = videoAttachments.map {
+            CanvasVideoRecord(
+                mediaId = it.id,
+                name = it.name,
+                durationSec = it.durationSec,
+                x = it.x,
+                y = it.y,
+                width = it.width,
+                height = it.height,
+                rotation = it.rotation,
+                behindText = it.behindText,
+                sizeBytes = it.sizeBytes
+            )
+        },
         content = emptyList(),
         plainPreview = plainPreview,
         contentHtml = contentHtml
@@ -582,6 +597,21 @@ fun DiaryRecord.toDiaryLog(): DiaryLog {
                 rotation = it.rotation,
                 playbackRate = it.rate,
                 behindText = it.behindText
+            )
+        },
+        videoAttachments = videos.map {
+            CanvasVideo(
+                id = it.mediaId,
+                name = it.name.ifBlank { "Video_${it.mediaId.take(6)}" },
+                source = it.mediaId,
+                durationSec = it.durationSec,
+                x = it.x,
+                y = it.y,
+                width = it.width,
+                height = it.height,
+                rotation = it.rotation,
+                behindText = it.behindText,
+                sizeBytes = it.sizeBytes
             )
         }
     )

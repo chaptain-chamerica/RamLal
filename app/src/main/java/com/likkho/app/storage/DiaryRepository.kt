@@ -211,6 +211,7 @@ class DiaryRepository(
                 decoded.record.background?.mediaId?.let { mediaIds.add(it) }
                 decoded.record.images.forEach { mediaIds.add(it.mediaId) }
                 decoded.record.audios.forEach { mediaIds.add(it.mediaId) }
+                decoded.record.videos.forEach { mediaIds.add(it.mediaId) }
             } catch (e: Exception) {
                 // Ignore unreadable/corrupt files during collection
             }
@@ -236,6 +237,7 @@ class DiaryRepository(
                 decoded.record.background?.mediaId?.let { diaryMediaIds.add(it) }
                 decoded.record.images.forEach { diaryMediaIds.add(it.mediaId) }
                 decoded.record.audios.forEach { diaryMediaIds.add(it.mediaId) }
+                decoded.record.videos.forEach { diaryMediaIds.add(it.mediaId) }
 
                 if (diaryMediaIds.isNotEmpty()) {
                     val remainingReferenced = collectAllReferencedMediaIds(dek, excludeDiaryId = id)

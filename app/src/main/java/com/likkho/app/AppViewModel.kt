@@ -2,7 +2,11 @@ package com.likkho.app
 
 import android.app.Application
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
+import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -24,6 +28,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.File
 
 data class PendingUnlock(val log: DiaryLog, val action: UnlockAction)
@@ -380,15 +385,26 @@ class AppViewModel @JvmOverloads constructor(
         }.getOrNull() ?: return@withContext null
         if (rawBytes.isEmpty()) return@withContext null
 
+        val orientation = readExifOrientation(rawBytes)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
-        val aspect = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
-            bounds.outWidth.toFloat() / bounds.outHeight.toFloat()
+        val swapDims = isExifDimensionSwapped(orientation)
+        val rawW = if (swapDims) bounds.outHeight else bounds.outWidth
+        val rawH = if (swapDims) bounds.outWidth else bounds.outHeight
+        val aspect = if (rawW > 0 && rawH > 0) {
+            rawW.toFloat() / rawH.toFloat()
         } else {
             4f / 3f
         }
-        val initW = 180f
-        val initH = (initW / aspect).coerceIn(72f, 320f)
+        val initW: Float
+        val initH: Float
+        if (aspect >= 1f) {
+            initW = 200f
+            initH = (initW / aspect).coerceIn(72f, 320f)
+        } else {
+            initH = 240f
+            initW = (initH * aspect).coerceIn(72f, 320f)
+        }
         val mediaId = vaultManager.withActiveDek { dek ->
             vaultManager.activeMediaRepository().importMediaBytes(
                 CryptoUtils.randomId("med_"),
@@ -405,6 +421,74 @@ class AppViewModel @JvmOverloads constructor(
             width = initW,
             height = initH,
             sizeBytes = rawBytes.size.toLong()
+        )
+    }
+
+    suspend fun importVideoUri(uri: Uri, x: Float = 24f, y: Float = 140f): CanvasVideo? = withContext(Dispatchers.IO) {
+        if (!vaultManager.isUnlocked) return@withContext null
+        val app = getApplication<Application>()
+        var displayName: String? = null
+        var reportedSize: Long = 0L
+        runCatching {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx >= 0) displayName = c.getString(nameIdx)
+                    val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx >= 0 && !c.isNull(sizeIdx)) reportedSize = c.getLong(sizeIdx)
+                }
+            }
+        }
+        var durationSec = 1
+        var initW = 220f
+        var initH = 150f
+        var thumbBmp: ImageBitmap? = null
+        runCatching {
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(app, uri)
+                val ms = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                durationSec = ((ms + 500L) / 1000L).toInt().coerceAtLeast(1)
+                val vw = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                val vh = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                val rot = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                val swapped = rot == 90 || rot == 270
+                val dispW = if (swapped) vh else vw
+                val dispH = if (swapped) vw else vh
+                if (dispW > 0 && dispH > 0) {
+                    val aspect = dispW.toFloat() / dispH.toFloat()
+                    if (aspect >= 1f) {
+                        initW = 240f
+                        initH = (initW / aspect).coerceIn(110f, 320f)
+                    } else {
+                        initH = 260f
+                        initW = (initH * aspect).coerceIn(110f, 320f)
+                    }
+                }
+                thumbBmp = mmr.getFrameAtTime(0)?.let { scaleBitmapMax(it, 720).asImageBitmap() }
+            } finally {
+                mmr.release()
+            }
+        }
+        val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
+        val mediaId = stream.use { s ->
+            vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().importMedia(CryptoUtils.randomId("med_"), s, dek, reportedSize)
+            }
+        }
+        val storedSize = if (reportedSize > 0L) reportedSize else vaultManager.activeMediaRepository().getMediaFile(mediaId).length()
+        thumbBmp?.let { imageBitmapCache.put("vthumb_$mediaId", it) }
+        val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Video_${mediaId.take(6)}"
+        CanvasVideo(
+            id = mediaId,
+            name = cleanName,
+            source = mediaId,
+            durationSec = durationSec,
+            x = x.coerceAtLeast(0f),
+            y = y.coerceAtLeast(0f),
+            width = initW,
+            height = initH,
+            sizeBytes = storedSize
         )
     }
 
@@ -476,6 +560,36 @@ class AppViewModel @JvmOverloads constructor(
         }.getOrNull()
     }
 
+    suspend fun openDecryptedMediaDataSource(mediaId: String): MediaDataSource? = withContext(Dispatchers.IO) {
+        if (mediaId.isBlank() || !vaultManager.isUnlocked) return@withContext null
+        runCatching {
+            vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().openMediaDataSource(mediaId, dek)
+            }
+        }.getOrNull()
+    }
+
+    suspend fun loadVideoThumbnailBitmap(mediaId: String): ImageBitmap? {
+        if (mediaId.isBlank()) return null
+        val cacheKey = "vthumb_$mediaId"
+        imageBitmapCache.get(cacheKey)?.let { return it }
+        val bmp = withContext(Dispatchers.IO) {
+            val ds = openDecryptedMediaDataSource(mediaId) ?: return@withContext null
+            runCatching {
+                val mmr = MediaMetadataRetriever()
+                try {
+                    mmr.setDataSource(ds)
+                    mmr.getFrameAtTime(0)?.let { scaleBitmapMax(it, 720).asImageBitmap() }
+                } finally {
+                    mmr.release()
+                    runCatching { ds.close() }
+                }
+            }.getOrNull()
+        } ?: return null
+        imageBitmapCache.put(cacheKey, bmp)
+        return bmp
+    }
+
     suspend fun loadDecryptedImageBitmap(mediaId: String): ImageBitmap? {
         if (mediaId.isBlank()) return null
         imageBitmapCache.get(mediaId)?.let { return it }
@@ -487,6 +601,7 @@ class AppViewModel @JvmOverloads constructor(
 
     private fun decodeSampledBitmap(bytes: ByteArray, maxDim: Int = 1600): ImageBitmap? {
         if (bytes.isEmpty()) return null
+        val orientation = readExifOrientation(bytes)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
@@ -495,7 +610,58 @@ class AppViewModel @JvmOverloads constructor(
             sample *= 2
         }
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
+        val rawBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
+        return applyExifOrientation(rawBitmap, orientation).asImageBitmap()
+    }
+
+    private fun readExifOrientation(bytes: ByteArray): Int = runCatching {
+        ExifInterface(ByteArrayInputStream(bytes))
+            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+    }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+
+    private fun isExifDimensionSwapped(orientation: Int): Boolean =
+        orientation == ExifInterface.ORIENTATION_ROTATE_90 ||
+            orientation == ExifInterface.ORIENTATION_ROTATE_270 ||
+            orientation == ExifInterface.ORIENTATION_TRANSPOSE ||
+            orientation == ExifInterface.ORIENTATION_TRANSVERSE
+
+    private fun applyExifOrientation(bitmap: Bitmap, orientation: Int): Bitmap {
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.postRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.postRotate(270f)
+                matrix.postScale(-1f, 1f)
+            }
+            else -> return bitmap
+        }
+        return runCatching {
+            val oriented = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            if (oriented != bitmap) bitmap.recycle()
+            oriented
+        }.getOrDefault(bitmap)
+    }
+
+    private fun scaleBitmapMax(bitmap: Bitmap, maxDim: Int): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= maxDim && h <= maxDim) return bitmap
+        val scale = minOf(maxDim.toFloat() / w, maxDim.toFloat() / h)
+        val nw = (w * scale).toInt().coerceAtLeast(1)
+        val nh = (h * scale).toInt().coerceAtLeast(1)
+        return runCatching {
+            val scaled = Bitmap.createScaledBitmap(bitmap, nw, nh, true)
+            if (scaled != bitmap) bitmap.recycle()
+            scaled
+        }.getOrDefault(bitmap)
     }
 
     private fun fontStorageDir(): File =

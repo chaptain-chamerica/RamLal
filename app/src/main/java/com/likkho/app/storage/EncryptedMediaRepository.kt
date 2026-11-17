@@ -1,5 +1,6 @@
 package com.likkho.app.storage
 
+import android.media.MediaDataSource
 import com.google.crypto.tink.StreamingAead
 import com.google.crypto.tink.subtle.AesGcmHkdfStreaming
 import java.io.ByteArrayOutputStream
@@ -9,6 +10,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
 
 /**
  * Manages encrypted media storage (images, audio, fonts, pfp, background)
@@ -177,6 +179,61 @@ class EncryptedMediaRepository(
                 baos.write(buffer, 0, read)
             }
             return baos.toByteArray()
+        }
+    }
+
+    /**
+     * Opens a seekable in-memory MediaDataSource backed by Tink StreamingAEAD for random-access
+     * video/audio playback without persisting plaintext to disk or buffering entire large videos in RAM.
+     */
+    fun openMediaDataSource(mediaId: String, dek: ByteArray): MediaDataSource {
+        val file = getMediaFile(mediaId)
+        if (!file.exists()) {
+            throw IOException("Media file not found: $mediaId.$MEDIA_EXTENSION")
+        }
+        val streamingAead = createStreamingAead(dek)
+        val aad = buildAad(mediaId, vaultId)
+        return StreamingEncryptedMediaDataSource(file, streamingAead, aad)
+    }
+
+    private class StreamingEncryptedMediaDataSource(
+        file: File,
+        streamingAead: StreamingAead,
+        aad: ByteArray
+    ) : MediaDataSource() {
+        private val fis = FileInputStream(file)
+        private val channel = streamingAead.newSeekableDecryptingChannel(fis.channel, aad)
+        private var cachedSize: Long = -1L
+
+        @Synchronized
+        override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+            if (position < 0) return -1
+            val totalSize = getSize()
+            if (totalSize >= 0 && position >= totalSize) return -1
+            if (size <= 0) return 0
+            channel.position(position)
+            val bb = ByteBuffer.wrap(buffer, offset, size)
+            var totalRead = 0
+            while (bb.hasRemaining()) {
+                val r = channel.read(bb)
+                if (r == -1) break
+                totalRead += r
+            }
+            return if (totalRead == 0) -1 else totalRead
+        }
+
+        @Synchronized
+        override fun getSize(): Long {
+            if (cachedSize < 0) {
+                cachedSize = runCatching { channel.size() }.getOrDefault(-1L)
+            }
+            return cachedSize
+        }
+
+        @Synchronized
+        override fun close() {
+            runCatching { channel.close() }
+            runCatching { fis.close() }
         }
     }
 

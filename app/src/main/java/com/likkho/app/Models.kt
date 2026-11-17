@@ -38,6 +38,21 @@ data class CanvasAudio(
     val behindText: Boolean = false,
 )
 
+data class CanvasVideo(
+    val id: String,
+    val name: String,
+    val source: String = "",
+    val durationSec: Int = 1,
+    val createdAt: Long = System.currentTimeMillis(),
+    val x: Float = 24f,
+    val y: Float = 140f,
+    val width: Float = 220f,
+    val height: Float = 150f,
+    val rotation: Float = 0f,
+    val behindText: Boolean = false,
+    val sizeBytes: Long = 0,
+)
+
 /** Header PFP: either picture (pfpSource) or Emoji/Text on colored background. null => App icon. */
 data class Pfp(
     val source: String? = null,
@@ -63,6 +78,7 @@ data class DiaryLog(
     val canvasBgOpacity: Float = 0.35f,
     val canvasImages: List<CanvasImage> = emptyList(),
     val audioAttachments: List<CanvasAudio> = emptyList(),
+    val videoAttachments: List<CanvasVideo> = emptyList(),
 ) {
     val dateStamp: String get() = fmtDate(createdAt)
     val timeStamp: String get() = fmtTime(createdAt)
