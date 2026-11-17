@@ -67,6 +67,7 @@ class RichTextVisualTransformation(
     private val codeTextColor: Color = Color.Unspecified,
     private val numberedColor: Color = Color.Unspecified,
     private val todoCheckedTextColor: Color = Color.Unspecified,
+    private val linkColor: Color = Color(0xFF3366CC),
     private val defaultAlignment: TextAlignment = TextAlignment.LEFT,
     private val fontResolver: (String) -> FontFamily? = { FontRegistry.resolveFontFamily(it) }
 ) : VisualTransformation {
@@ -151,6 +152,7 @@ class RichTextVisualTransformation(
                 is SpanStyle.Italic,
                 is SpanStyle.Underline,
                 is SpanStyle.Strike,
+                is SpanStyle.Link,
                 is SpanStyle.Color -> 5
                 is SpanStyle.Superscript,
                 is SpanStyle.Subscript -> 6
@@ -252,6 +254,16 @@ class RichTextVisualTransformation(
                     if (color != null) {
                         builder.addStyle(androidx.compose.ui.text.SpanStyle(color = color), s, e)
                     }
+                }
+                is SpanStyle.Link -> {
+                    builder.addStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            color = linkColor,
+                            textDecoration = TextDecoration.Underline
+                        ),
+                        s,
+                        e
+                    )
                 }
                 is SpanStyle.Bullet -> {
                     builder.addStyle(

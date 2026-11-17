@@ -235,6 +235,7 @@ object HtmlSpanCodec {
                     is SpanStyle.Highlight -> "<mark style=\"background-color:${s.hex}\">$escaped</mark>"
                     is SpanStyle.FontId -> "<span data-font=\"${escapeHtml(s.fontId)}\">$escaped</span>"
                     is SpanStyle.SizePx -> "<span style=\"font-size:${s.sizePx.toInt()}px\">$escaped</span>"
+                    is SpanStyle.Link -> "<a href=\"${escapeHtml(s.url)}\">$escaped</a>"
                     is SpanStyle.Code -> "<code>$escaped</code>"
                     is SpanStyle.Quote -> "<blockquote>$escaped</blockquote>"
                     is SpanStyle.Heading -> "<h${s.level}>$escaped</h${s.level}>"
@@ -455,6 +456,7 @@ object HtmlSpanCodec {
                             is SpanStyle.Highlight -> tagName == "mark" || tagName == "span"
                             is SpanStyle.FontId -> tagName == "span" || tagName == "font"
                             is SpanStyle.SizePx -> tagName == "span"
+                            is SpanStyle.Link -> tagName == "a"
                             is SpanStyle.Quote -> tagName == "blockquote"
                             is SpanStyle.Code -> tagName == "code"
                             is SpanStyle.Heading -> tagName == "h${it.style.level}"
@@ -592,6 +594,10 @@ object HtmlSpanCodec {
             "h1" -> SpanStyle.Heading(1)
             "h2" -> SpanStyle.Heading(2)
             "h3" -> SpanStyle.Heading(3)
+            "a" -> {
+                val href = extractAttr(rawTag, "href")
+                if (!href.isNullOrBlank()) SpanStyle.Link(unescapeHtml(href)) else null
+            }
             "blockquote" -> SpanStyle.Quote
             "code" -> SpanStyle.Code
             else -> null

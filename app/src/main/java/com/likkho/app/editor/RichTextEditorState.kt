@@ -97,6 +97,8 @@ class RichTextEditorState(
 
     val effectiveAlignment: TextAlignment get() = currentLineAlignOverride ?: canvasAlignment
     val currentIndentLevel: Int get() = maxOf(currentLineIndentLevel, activePendingIndent)
+    val hasSelection: Boolean get() = selection.min < selection.max
+    val hasLinkOnSelection: Boolean get() = selectedLinkUrl() != null
 
     val text: String get() = textFieldValue.text
     val selection: TextRange get() = textFieldValue.selection
@@ -269,6 +271,56 @@ class RichTextEditorState(
                 applyStyleToRange(sel.min, sel.max, SpanStyle.SizePx(cleanPx.toFloat()))
             }
         }
+    }
+
+    fun selectedLinkUrl(range: TextRange = selection): String? {
+        if (range.min >= range.max) return null
+        val s = range.min.coerceIn(0, text.length)
+        val e = range.max.coerceIn(0, text.length)
+        if (s >= e) return null
+        return spans.firstOrNull {
+            it.style is SpanStyle.Link && it.start < e && it.end > s
+        }?.let { (it.style as SpanStyle.Link).url }
+    }
+
+    fun linkAtOffset(offset: Int): String? {
+        if (offset < 0 || offset >= text.length) return null
+        return spans.firstOrNull {
+            it.style is SpanStyle.Link && offset >= it.start && offset < it.end
+        }?.let { (it.style as SpanStyle.Link).url }
+    }
+
+    fun applyLinkToRange(rawUrl: String, range: TextRange = selection): Boolean {
+        val s = range.min.coerceIn(0, text.length)
+        val e = range.max.coerceIn(0, text.length)
+        if (s >= e) return false
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) return false
+        val normalized = if (
+            trimmed.contains("://") ||
+            trimmed.startsWith("mailto:", ignoreCase = true) ||
+            trimmed.startsWith("tel:", ignoreCase = true)
+        ) {
+            trimmed
+        } else {
+            "https://$trimmed"
+        }
+        removeStyleFromRange(s, e) { it is SpanStyle.Link }
+        applyStyleToRange(s, e, SpanStyle.Link(normalized))
+        return true
+    }
+
+    fun removeLinkFromRange(range: TextRange = selection): Boolean {
+        val s = range.min.coerceIn(0, text.length)
+        val e = range.max.coerceIn(0, text.length)
+        if (s >= e) return false
+        val hasOverlap = spans.any { it.style is SpanStyle.Link && it.start < e && it.end > s }
+        if (!hasOverlap) return false
+        spans = normalizeSpans(
+            spans.filterNot { it.style is SpanStyle.Link && it.start < e && it.end > s },
+            text.length
+        )
+        return true
     }
 
     fun toggleHeading(level: Int) {
@@ -1039,6 +1091,7 @@ class RichTextEditorState(
                                 is SpanStyle.Quote -> isQuoteActive
                                 is SpanStyle.Code -> isCodeActive
                                 is SpanStyle.Heading -> !hasNewlineInInsert && activeHeadingLevel == style.level
+                                is SpanStyle.Link -> !hasNewlineInInsert
                                 else -> false
                             }
 

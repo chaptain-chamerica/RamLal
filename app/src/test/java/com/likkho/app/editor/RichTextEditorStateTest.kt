@@ -904,5 +904,54 @@ class RichTextEditorStateTest {
         assertEquals(editor.text, reimported.text)
         assertEquals(editor.spans, reimported.spans)
     }
+
+    @Test
+    fun weblink_selectionOnly_urlNormalization_visualUnderline_offsetHit_delink_and_htmlRoundTrip() {
+        val editor = RichTextEditorState("Visit Google today")
+
+        // 1. Collapsed cursor (no selection): applyLinkToRange & removeLinkFromRange MUST NOT work
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(6)))
+        assertFalse(editor.hasSelection)
+        assertFalse(editor.applyLinkToRange("google.com"))
+        assertTrue(editor.spans.isEmpty())
+
+        // 2. Select "Google" [6, 12) and apply link without scheme -> normalizes to https://
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(6, 12)))
+        assertTrue(editor.hasSelection)
+        assertTrue(editor.applyLinkToRange("google.com"))
+        assertTrue(editor.hasLinkOnSelection)
+        assertEquals("https://google.com", editor.selectedLinkUrl())
+        assertEquals(listOf(Span(6, 12, SpanStyle.Link("https://google.com"))), editor.spans)
+
+        // 3. Offset hit-test matches only inside [6, 12)
+        assertNull(editor.linkAtOffset(5))
+        assertEquals("https://google.com", editor.linkAtOffset(6))
+        assertEquals("https://google.com", editor.linkAtOffset(11))
+        assertNull(editor.linkAtOffset(12))
+
+        // 4. VisualTransformation renders link with linkColor and Underline
+        val linkCol = androidx.compose.ui.graphics.Color(0xFF3366CC)
+        val transformed = RichTextVisualTransformation(editor.spans, linkColor = linkCol)
+            .filter(androidx.compose.ui.text.AnnotatedString(editor.text))
+            .text
+        val linkStyle = transformed.spanStyles.firstOrNull { it.start == 6 && it.end == 12 }
+        assertNotNull(linkStyle)
+        assertEquals(linkCol, linkStyle!!.item.color)
+        assertEquals(androidx.compose.ui.text.style.TextDecoration.Underline, linkStyle.item.textDecoration)
+
+        // 5. HTML round-trip uses <a href="...">
+        val html = editor.toHtml()
+        assertEquals("Visit <a href=\"https://google.com\">Google</a> today", html)
+        val reimported = RichTextEditorState.fromHtml(html)
+        assertEquals(editor.text, reimported.text)
+        assertEquals(editor.spans, reimported.spans)
+
+        // 6. Delinking removes link cleanly without deleting text
+        reimported.onTextFieldValueChange(reimported.textFieldValue.copy(selection = TextRange(6, 12)))
+        assertTrue(reimported.removeLinkFromRange())
+        assertEquals("Visit Google today", reimported.text)
+        assertTrue(reimported.spans.isEmpty())
+        assertNull(reimported.selectedLinkUrl())
+    }
 }
 

@@ -31,7 +31,7 @@ import com.likkho.app.editor.RichTextEditorState
 import com.likkho.app.editor.model.TextAlignment
 import kotlinx.coroutines.launch
 
-private enum class Pop { NONE, COLOR, HIGHLIGHT, FONTS, SIZE, MEDIA, LINK, SPOILER, LOCK, BG, WIKI, LATEX, WORD }
+private enum class Pop { NONE, COLOR, HIGHLIGHT, FONTS, SIZE, MEDIA, LINK, SPOILER, LOCK, BG, WIKI, WORD }
 
 /**
  * Editorial formatting toolbar docked at bottom of canvas workspace.
@@ -48,14 +48,18 @@ fun RichToolbar(
 ) {
     val w = wiki(); val hooks = vm.hooks; val scope = rememberCoroutineScope()
     var pop by remember { mutableStateOf(Pop.NONE) }
-    fun toggle(p: Pop) { pop = if (pop == p) Pop.NONE else p }
+    var link by remember { mutableStateOf("") }
+    var pendingLinkRange by remember { mutableStateOf<androidx.compose.ui.text.TextRange?>(null) }
+    fun toggle(p: Pop) {
+        if (p != Pop.LINK) pendingLinkRange = null
+        pop = if (pop == p) Pop.NONE else p
+    }
     val active = remember { mutableStateMapOf<FormatAction, Boolean>() }
     var hint by remember { mutableStateOf<String?>(null) }
     var sizePx by remember { mutableStateOf(16f) }; var sizeOn by remember { mutableStateOf(false) }
-    var link by remember { mutableStateOf("") }; var spoiler by remember { mutableStateOf("") }; var lock by remember { mutableStateOf("") }
+    var spoiler by remember { mutableStateOf("") }; var lock by remember { mutableStateOf("") }
     var wikiQ by remember { mutableStateOf("") }; var wikiLang by remember { mutableStateOf("en") }; var wikiImgs by remember { mutableStateOf(true) }
     var wikiBusy by remember { mutableStateOf(false) }; var sugg by remember { mutableStateOf<List<WikiSuggestion>>(emptyList()) }
-    var latex by remember { mutableStateOf("") }; var cat by remember { mutableStateOf(0) }
     var word by remember { mutableStateOf("") }; var wordBusy by remember { mutableStateOf(false) }; var wordResult by remember { mutableStateOf<WordAnalysisRecord?>(null) }
     var fontId by remember { mutableStateOf<String?>(null) }
     val fontPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -199,7 +203,63 @@ fun RichToolbar(
                     WikiButton("Attach Audio", { pop = Pop.NONE; onAddAudio() }, Modifier.weight(1f), icon = Icons.Outlined.AudioFile)
                 }
             }
-            Pop.LINK -> Pop1 { PopInput(link, { link = it }, "https://...", "Link", KeyboardType.Uri) { hooks.applyLink(link); link = ""; pop = Pop.NONE } }
+            Pop.LINK -> Pop1 {
+                val targetRange = pendingLinkRange ?: editorState?.selection
+                val existingUrl = if (targetRange != null) editorState?.selectedLinkUrl(targetRange) else null
+                val selectedSnippet = if (editorState != null && targetRange != null && targetRange.min < targetRange.max) {
+                    val s = targetRange.min.coerceIn(0, editorState.text.length)
+                    val e = targetRange.max.coerceIn(s, editorState.text.length)
+                    editorState.text.substring(s, e).replace('\n', ' ').trim().take(32)
+                } else {
+                    ""
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (existingUrl != null) "Edit WebLink" else "Add WebLink",
+                        style = sansStyle(11.sp, w.muted, FontWeight.SemiBold),
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (selectedSnippet.isNotEmpty()) {
+                        Text("\"$selectedSnippet\"", style = monoStyle(10.sp, w.accent), maxLines = 1)
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                fun submitLink() {
+                    val trimmed = link.trim()
+                    if (trimmed.isNotEmpty()) {
+                        if (editorState != null && targetRange != null) {
+                            editorState.applyLinkToRange(trimmed, targetRange)
+                        }
+                        hooks.applyLink(trimmed)
+                        link = ""
+                        pendingLinkRange = null
+                        pop = Pop.NONE
+                    }
+                }
+                PopInput(
+                    link,
+                    { link = it },
+                    "https://...",
+                    if (existingUrl != null) "Update" else "Link",
+                    KeyboardType.Uri
+                ) { submitLink() }
+                if (existingUrl != null && targetRange != null) {
+                    WikiButton(
+                        "Delink",
+                        {
+                            editorState?.removeLinkFromRange(targetRange)
+                            link = ""
+                            pendingLinkRange = null
+                            pop = Pop.NONE
+                        },
+                        Modifier.padding(top = 6.dp),
+                        kind = BtnKind.DANGER,
+                        icon = Icons.Outlined.LinkOff,
+                        height = 32.dp,
+                        fontSize = 11
+                    )
+                }
+            }
             Pop.SPOILER -> Pop1 { PopInput(spoiler, { spoiler = it }, "Set Spoiler Passcode...", "Blur", KeyboardType.Text, pw = true) { onSpoiler(spoiler); spoiler = ""; pop = Pop.NONE } }
             Pop.LOCK -> Pop1 {
                 PopInput(lock, { lock = it }, if (lockPin != null) "Change Diary Lock Passcode..." else "Set Diary Lock Passcode...", if (lockPin != null) "Update" else "Lock Diary", KeyboardType.Text, pw = true) { if (lock.isNotBlank()) { onLock(lock.trim()); lock = ""; pop = Pop.NONE } }
@@ -226,16 +286,6 @@ fun RichToolbar(
                     TChip("English", wikiLang == "en") { wikiLang = "en" }; TChip("हिन्दी", wikiLang == "hi") { wikiLang = "hi" }
                     TChip("With Images", wikiImgs) { wikiImgs = true }; TChip("Without Images", !wikiImgs) { wikiImgs = false }
                 }
-            }
-            Pop.LATEX -> Pop1 {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    WikiTextField(latex, { latex = it }, Modifier.weight(1f), "Tap symbols below or type LaTeX (e.g. \\frac{a}{b})...", mono = true)
-                    if (latex.isNotEmpty()) IconBtn(Icons.Outlined.Close, "Clear formula input", { latex = "" }, size = 36.dp, iconSize = 16.dp)
-                }
-                Box(Modifier.fillMaxWidth().padding(vertical = 6.dp).background(w.bg).wikiBorder(w.hairline, 0.5.dp).padding(8.dp)) { Text(latex.ifEmpty { "Live preview" }, style = proseStyle(15.sp, if (latex.isEmpty()) w.muted else w.text, italic = true)) }
-                WikiButton("Insert Formula", { if (latex.isNotBlank()) { hooks.insertLatex(latex); onInsertText(" [$latex] "); latex = ""; pop = Pop.NONE } }, Modifier.fillMaxWidth(), BtnKind.PRIMARY, Icons.Outlined.Functions, height = 36.dp)
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) { MATH_CATEGORIES.forEachIndexed { i, c -> TChip(c.title, cat == i) { cat = i } } }
-                MATH_CATEGORIES[cat].symbols.chunked(6).forEach { r -> Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) { r.forEach { s -> Box(Modifier.weight(1f).height(36.dp).background(w.bg).wikiBorder(w.border, 0.5.dp).clickable { latex += s.latex }, contentAlignment = Alignment.Center) { Text(s.display, style = proseStyle(14.sp, w.text)) } }; repeat(6 - r.size) { Spacer(Modifier.weight(1f)) } } }
             }
             Pop.WORD -> Pop1 {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -404,12 +454,31 @@ fun RichToolbar(
             ToolGlyph(Icons.Outlined.Subscript, "Subscript", on = subOn) {
                 if (editorState != null) editorState.toggleSubscript() else fmt(FormatAction.SUBSCRIPT)
             }
-            ToolGlyph(Icons.Outlined.Functions, "LaTeX Formulas", on = pop == Pop.LATEX) { toggle(Pop.LATEX) }
 
             CategorySep()
 
             // Group 8: Research, Security & Tools
-            ToolGlyph(Icons.Outlined.Link, "Link Selected Text", on = pop == Pop.LINK) { toggle(Pop.LINK) }
+            val linkToolOn = pop == Pop.LINK || editorState?.hasLinkOnSelection == true
+            ToolGlyph(Icons.Outlined.Link, "WebLink (Selected Text)", on = linkToolOn) {
+                if (editorState == null) {
+                    toggle(Pop.LINK)
+                } else if (pop == Pop.LINK) {
+                    pendingLinkRange = null
+                    pop = Pop.NONE
+                } else if (!editorState.hasSelection) {
+                    scope.launch {
+                        hint = "Select text first to add a link."
+                        kotlinx.coroutines.delay(2200)
+                        hint = null
+                    }
+                } else {
+                    val sel = editorState.selection
+                    val range = androidx.compose.ui.text.TextRange(sel.min, sel.max)
+                    pendingLinkRange = range
+                    link = editorState.selectedLinkUrl(range).orEmpty()
+                    pop = Pop.LINK
+                }
+            }
             ToolGlyph(Icons.Outlined.VisibilityOff, "Spoiler", on = pop == Pop.SPOILER) { toggle(Pop.SPOILER) }
             ToolGlyph(if (lockPin != null) Icons.Outlined.Lock else Icons.Outlined.LockOpen, if (lockPin != null) "Diary Locked" else "Lock This Diary Entry", on = pop == Pop.LOCK || lockPin != null) { toggle(Pop.LOCK) }
             ToolGlyph(Icons.Outlined.Public, "Wikipedia (English & Hindi)", on = pop == Pop.WIKI) { toggle(Pop.WIKI) }
@@ -417,8 +486,6 @@ fun RichToolbar(
             ToolGlyph(Icons.Outlined.Schedule, "Insert Date/Time Stamp") { onInsertText(" " + fmtDateTimeShort(System.currentTimeMillis()) + " ") }
             ToolGlyph(Icons.Outlined.UploadFile, "Import Document") { scope.launch { hint = "Importing..."; hint = runCatching { hooks.importDocument() }.getOrElse { "Import failed." }; kotlinx.coroutines.delay(2500); hint = null } }
         }
-        // Hair-thin line framing the bottom edge of the toolbar above the OS navigation bar
-        Box(Modifier.fillMaxWidth().height(0.5.dp).background(w.border))
     }
     wordResult?.let { WordAnalysisDialog(it) { wordResult = null } }
 }

@@ -3,6 +3,8 @@ package com.likkho.app
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
@@ -26,6 +28,8 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
@@ -83,7 +87,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
     var imgStudio by remember { mutableStateOf<String?>(null) }
     var audStudio by remember { mutableStateOf<CanvasAudio?>(null) }
     var bgStudio by remember { mutableStateOf(false) }
-    var latexEdit by remember { mutableStateOf<String?>(null) }
     var spoilerAsk by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
 
@@ -295,6 +298,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                             codeTextColor = w.text,
                             numberedColor = w.accent,
                             todoCheckedTextColor = w.muted,
+                            linkColor = w.link,
                             defaultAlignment = editorState.canvasAlignment
                         )
                     },
@@ -302,7 +306,50 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 400.dp)
-                        .onFocusChanged { isEditorFocused = it.isFocused },
+                        .onFocusChanged { isEditorFocused = it.isFocused }
+                        .pointerInput(editorState, hooks) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                val downPos = down.position
+                                val downTime = System.currentTimeMillis()
+                                val touchSlop = viewConfiguration.touchSlop
+                                val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    if (System.currentTimeMillis() - downTime > longPressTimeout) break
+                                    val dx = change.position.x - downPos.x
+                                    val dy = change.position.y - downPos.y
+                                    if (kotlin.math.hypot(dx, dy) > touchSlop) break
+                                    if (change.changedToUpIgnoreConsumed()) {
+                                        val layout = textLayoutResult
+                                        if (layout != null &&
+                                            layout.layoutInput.text.text == editorState.text &&
+                                            editorState.text.isNotEmpty()
+                                        ) {
+                                            val rawOffset = layout.getOffsetForPosition(change.position)
+                                            val textLen = layout.layoutInput.text.text.length
+                                            val candidateOffsets = buildList {
+                                                if (rawOffset in 0 until textLen) add(rawOffset)
+                                                if (rawOffset - 1 in 0 until textLen) add(rawOffset - 1)
+                                            }
+                                            val hitOffset = candidateOffsets.firstOrNull { idx ->
+                                                val box = layout.getBoundingBox(idx)
+                                                change.position.x in (box.left - 8f)..(box.right + 8f) &&
+                                                    change.position.y in (box.top - 8f)..(box.bottom + 8f) &&
+                                                    editorState.linkAtOffset(idx) != null
+                                            }
+                                            val tappedUrl = hitOffset?.let { editorState.linkAtOffset(it) }
+                                            if (!tappedUrl.isNullOrBlank()) {
+                                                change.consume()
+                                                hooks.openUrl(tappedUrl)
+                                            }
+                                        }
+                                        break
+                                    }
+                                }
+                            }
+                        },
                     decorationBox = { inner ->
                         Box(
                             modifier = Modifier
