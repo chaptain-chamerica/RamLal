@@ -1,12 +1,21 @@
 package com.likkho.app
 
+import android.media.MediaDataSource
+import android.media.MediaPlayer
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -15,22 +24,31 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
@@ -45,7 +63,6 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -59,8 +76,10 @@ import com.likkho.app.editor.drawTextHighlights
 import com.likkho.app.editor.drawTextSpoilers
 import com.likkho.app.editor.model.SpanStyle
 import com.likkho.app.editor.toComposeTextAlign
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /**
@@ -104,6 +123,59 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
     }
 
+    val hScroll = rememberScrollState()
+    val vScroll = rememberScrollState()
+    val outerDensity = LocalDensity.current
+
+    fun currentSpawnCoords(): Pair<Float, Float> {
+        val sx = with(outerDensity) { hScroll.value.toDp().value } + 24f
+        val sy = with(outerDensity) { vScroll.value.toDp().value } + 120f
+        return sx.coerceAtLeast(0f) to sy.coerceAtLeast(0f)
+    }
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val (sx, sy) = currentSpawnCoords()
+                val imported = vm.importImageUri(uri, sx, sy)
+                if (imported != null) {
+                    images = images + imported
+                    selImg = imported.id
+                    selAud = null
+                } else {
+                    vm.showStatus("Could not import image.")
+                }
+            }
+        }
+    }
+    val audioPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val (sx, sy) = currentSpawnCoords()
+                val imported = vm.importAudioUri(uri, sx, sy)
+                if (imported != null) {
+                    audios = audios + imported
+                    selAud = imported.id
+                    selImg = null
+                } else {
+                    vm.showStatus("Could not import audio.")
+                }
+            }
+        }
+    }
+    val bgPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val mediaId = vm.importMediaUri(uri)
+                if (mediaId != null) {
+                    bgSrc = mediaId
+                } else {
+                    vm.showStatus("Could not import background image.")
+                }
+            }
+        }
+    }
+
     fun save(showFeedback: Boolean = true) {
         val now = System.currentTimeMillis()
         val base = initial ?: DiaryLog(id = "log_$now", heading = "", createdAt = now)
@@ -140,8 +212,15 @@ fun WorkspaceScreen(vm: AppViewModel) {
         // ---------- header ----------
         Column(Modifier.fillMaxWidth().background(w.surface)) {
             Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconBtn(Icons.Outlined.ArrowBack, "Back to Homepage", { vm.navigateTo(Route.HOME) }, size = 40.dp)
-                Spacer(Modifier.width(6.dp))
+                IconBtn(
+                    Icons.AutoMirrored.Outlined.ArrowBack,
+                    "Back to Homepage",
+                    { vm.navigateTo(Route.HOME) },
+                    size = 48.dp,
+                    bordered = false,
+                    bg = Color.Transparent
+                )
+                Spacer(Modifier.width(4.dp))
                 Box(Modifier.clickable(enabled = !reading) { showPfp = true }) { PfpAvatar(pfp, 40.dp) }
                 Spacer(Modifier.width(6.dp))
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
@@ -174,7 +253,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
             fun upd(f: (CanvasImage) -> CanvasImage) { images = images.map { if (it.id == im.id) f(it) else it } }
             ControlBar {
                 Bar("Size -", Icons.Outlined.ZoomOut) { upd { it.copy(width = (it.width - 20).coerceAtLeast(50f), height = (it.height - 15).coerceAtLeast(40f)) } }
-                Bar("Size +", Icons.Outlined.ZoomIn) { upd { it.copy(width = (it.width + 20).coerceAtMost(420f), height = it.height + 15) } }
+                Bar("Size +", Icons.Outlined.ZoomIn) { upd { it.copy(width = (it.width + 20).coerceAtMost(720f), height = (it.height + 15).coerceAtMost(720f)) } }
                 Bar("-15°", Icons.Outlined.RotateLeft) { upd { it.copy(rotation = (it.rotation - 15) % 360) } }
                 Bar("+15°", Icons.Outlined.RotateRight) { upd { it.copy(rotation = (it.rotation + 15) % 360) } }
                 Text("Size: ${formatBytes(im.sizeBytes)}", style = monoStyle(10.sp, w.muted))
@@ -211,12 +290,132 @@ fun WorkspaceScreen(vm: AppViewModel) {
             }
         }
 
-        // ---------- canvas ----------
-        Box(Modifier.weight(1f).fillMaxWidth().background(w.bg)) {
-            if (bgSrc != null) Box(Modifier.fillMaxSize().background(w.accent.copy(alpha = bgOpacity * 0.3f))) // TODO(StudioAI): draw real bg image with bgOpacity
-            images.filter { it.behindText }.forEach { DraggableImage(it, selImg == it.id, !reading, { selImg = it.id; selAud = null }) { x, y -> images = images.map { m -> if (m.id == it.id) m.copy(x = x, y = y) else m } } }
-            audios.filter { it.behindText }.forEach { AudioCard(it, selAud == it.id, !reading) { selAud = it.id; selImg = null } }
-            Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        // ---------- canvas (infinite right/bottom media drag, screen-width writing) ----------
+        val bgBitmap by produceState<ImageBitmap?>(null, bgSrc) {
+            value = bgSrc?.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
+        }
+        var writingBlockHeightPx by remember { mutableStateOf(0) }
+        var activeDragBoundsDp by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+        var viewportRootOrigin by remember { mutableStateOf(Offset.Zero) }
+
+        BoxWithConstraints(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(w.bg)
+                .onGloballyPositioned { coords -> viewportRootOrigin = coords.positionInRoot() }
+        ) {
+            val viewportW = maxWidth
+            val viewportH = maxHeight
+            val density = LocalDensity.current
+            val viewportWPx = with(density) { viewportW.toPx() }
+            val viewportHPx = with(density) { viewportH.toPx() }
+            val writingHeightDp = with(density) { writingBlockHeightPx.toDp() }
+
+            val mediaMaxRightDp = maxOf(
+                images.maxOfOrNull { it.x + it.width } ?: 0f,
+                audios.maxOfOrNull { it.x + it.width } ?: 0f,
+                activeDragBoundsDp?.first ?: 0f
+            )
+            val mediaMaxBottomDp = maxOf(
+                images.maxOfOrNull { it.y + it.height } ?: 0f,
+                audios.maxOfOrNull { it.y + it.height } ?: 0f,
+                activeDragBoundsDp?.second ?: 0f
+            )
+            val contentNeedW = if (mediaMaxRightDp > viewportW.value - 32f || activeDragBoundsDp != null || hScroll.value > 0) {
+                maxOf(viewportW, (mediaMaxRightDp + 240f).dp)
+            } else {
+                viewportW
+            }
+            val canvasWidth = maxOf(
+                contentNeedW,
+                with(density) { (hScroll.value + viewportWPx).toDp() }
+            )
+            val contentNeedH = maxOf(
+                viewportH,
+                writingHeightDp + 120.dp,
+                (mediaMaxBottomDp + 240f).dp
+            )
+            val canvasHeight = maxOf(
+                contentNeedH,
+                with(density) { (vScroll.value + viewportHPx).toDp() }
+            )
+
+            if (bgSrc != null) {
+                val bgBmp = bgBitmap
+                if (bgBmp != null) {
+                    Image(
+                        bitmap = bgBmp,
+                        contentDescription = "Canvas background",
+                        contentScale = ContentScale.Crop,
+                        alpha = bgOpacity,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Box(Modifier.fillMaxSize().background(w.accent.copy(alpha = bgOpacity * 0.3f)))
+                }
+            }
+
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .horizontalScroll(hScroll)
+                    .verticalScroll(vScroll)
+            ) {
+                Box(Modifier.size(canvasWidth, canvasHeight)) {
+                    // Layer 1: Behind-text media
+                    images.filter { it.behindText }.forEach { im ->
+                        key(im.id) {
+                            DraggableImage(
+                                im = im,
+                                selected = selImg == im.id,
+                                editable = !reading,
+                                hScroll = hScroll,
+                                vScroll = vScroll,
+                                viewportWPx = viewportWPx,
+                                viewportHPx = viewportHPx,
+                                viewportRootOrigin = viewportRootOrigin,
+                                loadImageBitmap = { id -> vm.loadDecryptedImageBitmap(id) },
+                                onSelect = { selImg = im.id; selAud = null },
+                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onMove = { x, y ->
+                                    activeDragBoundsDp = null
+                                    images = images.map { m -> if (m.id == im.id) m.copy(x = x, y = y) else m }
+                                }
+                            )
+                        }
+                    }
+                    audios.filter { it.behindText }.forEach { a ->
+                        key(a.id) {
+                            AudioCard(
+                                a = a,
+                                selected = selAud == a.id,
+                                editable = !reading,
+                                hScroll = hScroll,
+                                vScroll = vScroll,
+                                viewportWPx = viewportWPx,
+                                viewportHPx = viewportHPx,
+                                viewportRootOrigin = viewportRootOrigin,
+                                loadAudioBytes = { id -> vm.loadDecryptedMediaBytes(id) },
+                                onStatus = { vm.showStatus(it) },
+                                onSelect = { selAud = a.id; selImg = null },
+                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onMove = { x, y ->
+                                    activeDragBoundsDp = null
+                                    audios = audios.map { aud -> if (aud.id == a.id) aud.copy(x = x, y = y) else aud }
+                                }
+                            )
+                        }
+                    }
+
+                    // Layer 2: Writing paragraphs locked to phone screen width (viewportW)
+                    Box(
+                        Modifier
+                            .align(Alignment.TopStart)
+                            .width(viewportW)
+                            .onSizeChanged { writingBlockHeightPx = it.height }
+                            .padding(16.dp)
+                    ) {
                 val emptyPendingIndent = if (editorState.text.isEmpty() && editorState.activePendingIndent > 0) {
                     val indSp = (editorState.activePendingIndent * 24).sp
                     TextIndent(firstLine = indSp, restLine = indSp)
@@ -412,7 +611,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     onTextLayout = { textLayoutResult = it },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 400.dp)
+                        .heightIn(min = (viewportH - 32.dp).coerceAtLeast(360.dp))
                         .onFocusChanged { isEditorFocused = it.isFocused }
                         .pointerInput(editorState, hooks) {
                             awaitEachGesture {
@@ -609,9 +808,53 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     }
                 )
                 }
+                }
+                    // Layer 3: Foreground media
+                    images.filter { !it.behindText }.forEach { im ->
+                        key(im.id) {
+                            DraggableImage(
+                                im = im,
+                                selected = selImg == im.id,
+                                editable = !reading,
+                                hScroll = hScroll,
+                                vScroll = vScroll,
+                                viewportWPx = viewportWPx,
+                                viewportHPx = viewportHPx,
+                                viewportRootOrigin = viewportRootOrigin,
+                                loadImageBitmap = { id -> vm.loadDecryptedImageBitmap(id) },
+                                onSelect = { selImg = im.id; selAud = null },
+                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onMove = { x, y ->
+                                    activeDragBoundsDp = null
+                                    images = images.map { m -> if (m.id == im.id) m.copy(x = x, y = y) else m }
+                                }
+                            )
+                        }
+                    }
+                    audios.filter { !it.behindText }.forEach { a ->
+                        key(a.id) {
+                            AudioCard(
+                                a = a,
+                                selected = selAud == a.id,
+                                editable = !reading,
+                                hScroll = hScroll,
+                                vScroll = vScroll,
+                                viewportWPx = viewportWPx,
+                                viewportHPx = viewportHPx,
+                                viewportRootOrigin = viewportRootOrigin,
+                                loadAudioBytes = { id -> vm.loadDecryptedMediaBytes(id) },
+                                onStatus = { vm.showStatus(it) },
+                                onSelect = { selAud = a.id; selImg = null },
+                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onMove = { x, y ->
+                                    activeDragBoundsDp = null
+                                    audios = audios.map { aud -> if (aud.id == a.id) aud.copy(x = x, y = y) else aud }
+                                }
+                            )
+                        }
+                    }
+                }
             }
-            images.filter { !it.behindText }.forEach { DraggableImage(it, selImg == it.id, !reading, { selImg = it.id; selAud = null }) { x, y -> images = images.map { m -> if (m.id == it.id) m.copy(x = x, y = y) else m } } }
-            audios.filter { !it.behindText }.forEach { AudioCard(it, selAud == it.id, !reading) { selAud = it.id; selImg = null } }
         }
 
         // ---------- toolbar ----------
@@ -621,10 +864,11 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 if (!recording) { hooks.startVoiceRecording(); recording = true }
                 else { recording = false; hooks.stopVoiceRecording()?.let { audios = audios + it; vm.showStatus("Voice recording saved to diary.") } }
             },
-            onAddImage = { scope.launch { hooks.pickImage()?.let { images = images + it; selImg = it.id } } },
-            onAddAudio = { scope.launch { hooks.pickAudio()?.let { audios = audios + it } } },
+            onAddImage = { imagePickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+            onAddAudio = { audioPickerLauncher.launch(arrayOf("audio/*")) },
             onLock = { lockPin = it }, onBgOpacity = { bgOpacity = it },
-            onPickBg = { scope.launch { hooks.pickBackgroundImage()?.let { bgSrc = it } } }, onRemoveBg = { bgSrc = null }, onEditBg = { bgStudio = true },
+            onPickBg = { bgPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+            onRemoveBg = { bgSrc = null }, onEditBg = { bgStudio = true },
             onInsertText = { inserted ->
                 val current = editorState.textFieldValue
                 val pos = current.selection.start
@@ -649,9 +893,43 @@ fun WorkspaceScreen(vm: AppViewModel) {
     }
 
     if (showReminder) ReminderDialog(reminderAt, { showReminder = false }) { reminderAt = it }
-    if (showPfp) PfpStudioDialog(pfp, hooks, { showPfp = false }) { pfp = it }
-    imgStudio?.let { id -> ImageStudioDialog("Image Studio", images.find { it.id == id }?.sizeBytes ?: 0, { imgStudio = null }) { /* TODO(StudioAI): apply edits */ } }
-    if (bgStudio) ImageStudioDialog("Background Image Studio", 0, { bgStudio = false }) { }
+    if (showPfp) PfpStudioDialog(
+        current = pfp,
+        hooks = hooks,
+        onClose = { showPfp = false },
+        onImportPhotoUri = { uri -> vm.importMediaUri(uri) },
+        onSave = { pfp = it }
+    )
+    imgStudio?.let { id ->
+        images.find { it.id == id }?.let { targetImg ->
+            val previewBmp by produceState<ImageBitmap?>(null, targetImg.source) {
+                value = targetImg.source.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
+            }
+            ImageStudioDialog(
+                title = "Image Studio",
+                sizeBytes = targetImg.sizeBytes,
+                onClose = { imgStudio = null },
+                previewBitmap = previewBmp,
+                initialOpacity = targetImg.opacity,
+                onApplyOpacity = { newOpacity ->
+                    images = images.map { m -> if (m.id == targetImg.id) m.copy(opacity = newOpacity) else m }
+                }
+            ) {}
+        } ?: run { imgStudio = null }
+    }
+    if (bgStudio) {
+        val bgPreviewBmp by produceState<ImageBitmap?>(null, bgSrc) {
+            value = bgSrc?.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
+        }
+        ImageStudioDialog(
+            title = "Background Image Studio",
+            sizeBytes = 0,
+            onClose = { bgStudio = false },
+            previewBitmap = bgPreviewBmp,
+            initialOpacity = bgOpacity,
+            onApplyOpacity = { newOpacity -> bgOpacity = newOpacity }
+        ) {}
+    }
     audStudio?.let { AudioStudioDialog(it.name, { audStudio = null }) { } }
     spoilerUnlockPrompt?.let { sp ->
         var passcodeInput by remember(sp.id) { mutableStateOf("") }
@@ -720,37 +998,414 @@ private fun Bar(label: String, icon: ImageVector?, on: Boolean = false, danger: 
 }
 
 @Composable
-private fun DraggableImage(im: CanvasImage, selected: Boolean, editable: Boolean, onSelect: () -> Unit, onMove: (Float, Float) -> Unit) {
+private fun DraggableImage(
+    im: CanvasImage,
+    selected: Boolean,
+    editable: Boolean,
+    hScroll: ScrollState,
+    vScroll: ScrollState,
+    viewportWPx: Float,
+    viewportHPx: Float,
+    viewportRootOrigin: Offset,
+    loadImageBitmap: suspend (String) -> ImageBitmap?,
+    onSelect: () -> Unit,
+    onDragProgress: (Float, Float) -> Unit,
+    onMove: (Float, Float) -> Unit,
+) {
     val w = wiki()
-    var x by remember(im.id) { mutableStateOf(im.x) }; var y by remember(im.id) { mutableStateOf(im.y) }
+    val density = LocalDensity.current
+    var liveX by remember(im.id) { mutableStateOf(im.x) }
+    var liveY by remember(im.id) { mutableStateOf(im.y) }
+    var isDragging by remember(im.id) { mutableStateOf(false) }
+    var fingerRootPos by remember(im.id) { mutableStateOf(Offset.Zero) }
+    var itemCoords by remember(im.id) { mutableStateOf<LayoutCoordinates?>(null) }
+
+    val currentW by rememberUpdatedState(im.width)
+    val currentH by rememberUpdatedState(im.height)
+    val currentViewportOrigin by rememberUpdatedState(viewportRootOrigin)
+    val currentOnSelect by rememberUpdatedState(onSelect)
+    val currentOnDragProgress by rememberUpdatedState(onDragProgress)
+    val currentOnMove by rememberUpdatedState(onMove)
+
+    LaunchedEffect(im.x, im.y) {
+        if (!isDragging) {
+            liveX = im.x
+            liveY = im.y
+        }
+    }
+
+    LaunchedEffect(isDragging) {
+        if (!isDragging) return@LaunchedEffect
+        val edgeZonePx = with(density) { 44.dp.toPx() }
+        val maxStepPx = with(density) { 12.dp.toPx() }
+        while (isDragging) {
+            val relX = fingerRootPos.x - currentViewportOrigin.x
+            val relY = fingerRootPos.y - currentViewportOrigin.y
+            var panPxX = 0f
+            var panPxY = 0f
+            if (relX > viewportWPx - edgeZonePx) {
+                val ratio = ((relX - (viewportWPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
+                panPxX = maxStepPx * (0.35f + ratio * 0.65f)
+            } else if (relX < edgeZonePx && hScroll.value > 0) {
+                val ratio = ((edgeZonePx - relX) / edgeZonePx).coerceIn(0f, 1.5f)
+                panPxX = -maxStepPx * (0.35f + ratio * 0.65f)
+            }
+            if (relY > viewportHPx - edgeZonePx) {
+                val ratio = ((relY - (viewportHPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
+                panPxY = maxStepPx * (0.35f + ratio * 0.65f)
+            } else if (relY < edgeZonePx && vScroll.value > 0) {
+                val ratio = ((edgeZonePx - relY) / edgeZonePx).coerceIn(0f, 1.5f)
+                panPxY = -maxStepPx * (0.35f + ratio * 0.65f)
+            }
+            if (panPxX != 0f || panPxY != 0f) {
+                val nextX = (liveX + panPxX / density.density).coerceAtLeast(0f)
+                val nextY = (liveY + panPxY / density.density).coerceAtLeast(0f)
+                liveX = nextX
+                liveY = nextY
+                currentOnDragProgress(nextX + currentW, nextY + currentH)
+                if (panPxX != 0f) hScroll.scrollBy(panPxX)
+                if (panPxY != 0f) vScroll.scrollBy(panPxY)
+            }
+            delay(16L)
+        }
+    }
+
+    val bitmap by produceState<ImageBitmap?>(null, im.source) {
+        value = im.source.takeIf { it.isNotBlank() }?.let { loadImageBitmap(it) }
+    }
+
     Box(
-        Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.size(im.width.dp, im.height.dp).rotate(im.rotation)
-            .background(w.surface).wikiBorder(if (selected) w.accent else w.border, if (selected) 1.5.dp else 0.5.dp)
-            .pointerInput(editable) { detectTapGestures(onTap = { if (editable) onSelect() }) }
-            .pointerInput(editable) { if (editable) detectDragGestures(onDragStart = { onSelect() }, onDragEnd = { onMove(x, y) }) { c, d -> c.consume(); x += d.x; y += d.y } },
+        Modifier
+            .offset { IntOffset(with(this) { liveX.dp.roundToPx() }, with(this) { liveY.dp.roundToPx() }) }
+            .size(im.width.dp, im.height.dp)
+            .rotate(im.rotation)
+            .onGloballyPositioned { itemCoords = it }
+            .background(if (bitmap != null) Color.Transparent else w.surface)
+            .wikiBorder(if (selected) w.accent else w.border, if (selected) 1.5.dp else 0.5.dp)
+            .pointerInput(im.id, editable) {
+                detectTapGestures(onTap = { if (editable) currentOnSelect() })
+            }
+            .pointerInput(im.id, editable) {
+                if (editable) {
+                    var prevFingerRoot = Offset.Zero
+                    detectDragGestures(
+                        onDragStart = { startOffset ->
+                            val coords = itemCoords
+                            if (coords != null && coords.isAttached) {
+                                prevFingerRoot = coords.localToRoot(startOffset)
+                                fingerRootPos = prevFingerRoot
+                            }
+                            isDragging = true
+                            currentOnSelect()
+                            currentOnDragProgress(liveX + currentW, liveY + currentH)
+                        },
+                        onDragEnd = {
+                            isDragging = false
+                            currentOnMove(liveX, liveY)
+                        },
+                        onDragCancel = {
+                            isDragging = false
+                            currentOnMove(liveX, liveY)
+                        },
+                    ) { change, _ ->
+                        change.consume()
+                        val coords = itemCoords
+                        if (coords != null && coords.isAttached) {
+                            val curRoot = coords.localToRoot(change.position)
+                            val deltaRoot = curRoot - prevFingerRoot
+                            prevFingerRoot = curRoot
+                            fingerRootPos = curRoot
+                            liveX = (liveX + deltaRoot.x / density.density).coerceAtLeast(0f)
+                            liveY = (liveY + deltaRoot.y / density.density).coerceAtLeast(0f)
+                            currentOnDragProgress(liveX + currentW, liveY + currentH)
+                        }
+                    }
+                }
+            },
         contentAlignment = Alignment.Center,
-    ) { Icon(Icons.Outlined.Image, null, tint = w.muted) /* TODO(StudioAI): real bitmap from im.source */ }
+    ) {
+        val loaded = bitmap
+        if (loaded != null) {
+            Image(
+                bitmap = loaded,
+                contentDescription = "Canvas image",
+                contentScale = ContentScale.FillBounds,
+                alpha = im.opacity,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(Icons.Outlined.Image, contentDescription = "Image placeholder", tint = w.muted, modifier = Modifier.alpha(im.opacity))
+        }
+    }
 }
 
-/** Opaque RED audio card #b32424. Play button before slider. Double-tap (edit mode) selects it for the control bar. */
+private class ByteArrayMediaDataSource(private val data: ByteArray) : MediaDataSource() {
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+        if (position < 0 || position >= data.size) return -1
+        val pos = position.toInt()
+        val remaining = data.size - pos
+        val count = minOf(size, remaining)
+        System.arraycopy(data, pos, buffer, offset, count)
+        return count
+    }
+
+    override fun getSize(): Long = data.size.toLong()
+
+    override fun close() {}
+}
+
+/** Opaque RED audio card #b32424. Play button before slider. Draggable infinitely right/bottom. */
 @Composable
-private fun AudioCard(a: CanvasAudio, selected: Boolean, editable: Boolean, onSelect: () -> Unit) {
+private fun AudioCard(
+    a: CanvasAudio,
+    selected: Boolean,
+    editable: Boolean,
+    hScroll: ScrollState,
+    vScroll: ScrollState,
+    viewportWPx: Float,
+    viewportHPx: Float,
+    viewportRootOrigin: Offset,
+    loadAudioBytes: suspend (String) -> ByteArray?,
+    onStatus: (String) -> Unit,
+    onSelect: () -> Unit,
+    onDragProgress: (Float, Float) -> Unit,
+    onMove: (Float, Float) -> Unit,
+) {
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    var liveX by remember(a.id) { mutableStateOf(a.x) }
+    var liveY by remember(a.id) { mutableStateOf(a.y) }
+    var isDragging by remember(a.id) { mutableStateOf(false) }
+    var fingerRootPos by remember(a.id) { mutableStateOf(Offset.Zero) }
+    var itemCoords by remember(a.id) { mutableStateOf<LayoutCoordinates?>(null) }
+
+    val currentW by rememberUpdatedState(a.width)
+    val currentH by rememberUpdatedState(a.height)
+    val currentViewportOrigin by rememberUpdatedState(viewportRootOrigin)
+    val currentOnSelect by rememberUpdatedState(onSelect)
+    val currentOnDragProgress by rememberUpdatedState(onDragProgress)
+    val currentOnMove by rememberUpdatedState(onMove)
+
+    LaunchedEffect(a.x, a.y) {
+        if (!isDragging) {
+            liveX = a.x
+            liveY = a.y
+        }
+    }
+
+    LaunchedEffect(isDragging) {
+        if (!isDragging) return@LaunchedEffect
+        val edgeZonePx = with(density) { 44.dp.toPx() }
+        val maxStepPx = with(density) { 12.dp.toPx() }
+        while (isDragging) {
+            val relX = fingerRootPos.x - currentViewportOrigin.x
+            val relY = fingerRootPos.y - currentViewportOrigin.y
+            var panPxX = 0f
+            var panPxY = 0f
+            if (relX > viewportWPx - edgeZonePx) {
+                val ratio = ((relX - (viewportWPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
+                panPxX = maxStepPx * (0.35f + ratio * 0.65f)
+            } else if (relX < edgeZonePx && hScroll.value > 0) {
+                val ratio = ((edgeZonePx - relX) / edgeZonePx).coerceIn(0f, 1.5f)
+                panPxX = -maxStepPx * (0.35f + ratio * 0.65f)
+            }
+            if (relY > viewportHPx - edgeZonePx) {
+                val ratio = ((relY - (viewportHPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
+                panPxY = maxStepPx * (0.35f + ratio * 0.65f)
+            } else if (relY < edgeZonePx && vScroll.value > 0) {
+                val ratio = ((edgeZonePx - relY) / edgeZonePx).coerceIn(0f, 1.5f)
+                panPxY = -maxStepPx * (0.35f + ratio * 0.65f)
+            }
+            if (panPxX != 0f || panPxY != 0f) {
+                val nextX = (liveX + panPxX / density.density).coerceAtLeast(0f)
+                val nextY = (liveY + panPxY / density.density).coerceAtLeast(0f)
+                liveX = nextX
+                liveY = nextY
+                currentOnDragProgress(nextX + currentW, nextY + currentH)
+                if (panPxX != 0f) hScroll.scrollBy(panPxX)
+                if (panPxY != 0f) vScroll.scrollBy(panPxY)
+            }
+            delay(16L)
+        }
+    }
+
     var playing by remember(a.id) { mutableStateOf(false) }
+    var loadingAudio by remember(a.id) { mutableStateOf(false) }
     var progress by remember(a.id) { mutableStateOf(0f) }
+    var durationMs by remember(a.id) { mutableStateOf((a.durationSec * 1000).coerceAtLeast(1000)) }
+    var mediaPlayer by remember(a.id) { mutableStateOf<MediaPlayer?>(null) }
+
+    DisposableEffect(a.id) {
+        onDispose {
+            runCatching { mediaPlayer?.release() }
+            mediaPlayer = null
+        }
+    }
+
+    LaunchedEffect(playing, a.playbackRate, mediaPlayer) {
+        val mp = mediaPlayer ?: return@LaunchedEffect
+        if (playing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            runCatching {
+                mp.playbackParams = mp.playbackParams.setSpeed(a.playbackRate)
+            }
+        }
+        while (playing) {
+            val cur = runCatching { mp.currentPosition }.getOrDefault(0)
+            val total = durationMs.coerceAtLeast(1)
+            progress = (cur.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+            delay(120L)
+        }
+    }
+
+    fun togglePlay() {
+        val existing = mediaPlayer
+        if (existing != null) {
+            if (playing) {
+                runCatching { existing.pause() }
+                playing = false
+            } else {
+                runCatching {
+                    existing.start()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        existing.playbackParams = existing.playbackParams.setSpeed(a.playbackRate)
+                    }
+                    playing = true
+                }.onFailure {
+                    playing = false
+                    onStatus("Unable to play audio.")
+                }
+            }
+            return
+        }
+        if (loadingAudio) return
+        loadingAudio = true
+        scope.launch {
+            val bytes = a.audioUri.takeIf { it.isNotBlank() }?.let { loadAudioBytes(it) }
+            if (bytes == null || bytes.isEmpty()) {
+                loadingAudio = false
+                onStatus("Audio data unavailable.")
+                return@launch
+            }
+            val preparedPlayer = withContext(Dispatchers.IO) {
+                runCatching {
+                    MediaPlayer().apply {
+                        setDataSource(ByteArrayMediaDataSource(bytes))
+                        prepare()
+                    }
+                }.getOrNull()
+            }
+            loadingAudio = false
+            if (preparedPlayer == null) {
+                onStatus("Unsupported audio format.")
+                return@launch
+            }
+            preparedPlayer.setOnCompletionListener {
+                playing = false
+                progress = 0f
+                runCatching { it.seekTo(0) }
+            }
+            durationMs = preparedPlayer.duration.takeIf { it > 0 } ?: (a.durationSec * 1000).coerceAtLeast(1000)
+            mediaPlayer = preparedPlayer
+            runCatching {
+                preparedPlayer.start()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    preparedPlayer.playbackParams = preparedPlayer.playbackParams.setSpeed(a.playbackRate)
+                }
+                playing = true
+            }.onFailure {
+                playing = false
+                onStatus("Unable to play audio.")
+            }
+        }
+    }
+
     Row(
-        Modifier.offset { IntOffset(a.x.roundToInt(), a.y.roundToInt()) }.size(a.width.dp, a.height.dp).rotate(a.rotation)
-            .background(Color(0xFFB32424)).wikiBorder(if (selected) wiki().accent else Color(0xFF7A1616), if (selected) 1.5.dp else 0.5.dp)
-            .pointerInput(editable) { detectTapGestures(onDoubleTap = { if (editable) onSelect() }) }.padding(horizontal = 12.dp),
+        Modifier
+            .offset { IntOffset(with(this) { liveX.dp.roundToPx() }, with(this) { liveY.dp.roundToPx() }) }
+            .size(a.width.dp, a.height.dp)
+            .rotate(a.rotation)
+            .onGloballyPositioned { itemCoords = it }
+            .background(Color(0xFFB32424))
+            .wikiBorder(if (selected) wiki().accent else Color(0xFF7A1616), if (selected) 1.5.dp else 0.5.dp)
+            .pointerInput(a.id, editable) {
+                detectTapGestures(
+                    onTap = { if (editable) currentOnSelect() },
+                    onDoubleTap = { if (editable) currentOnSelect() }
+                )
+            }
+            .pointerInput(a.id, editable) {
+                if (editable) {
+                    var prevFingerRoot = Offset.Zero
+                    detectDragGestures(
+                        onDragStart = { startOffset ->
+                            val coords = itemCoords
+                            if (coords != null && coords.isAttached) {
+                                prevFingerRoot = coords.localToRoot(startOffset)
+                                fingerRootPos = prevFingerRoot
+                            }
+                            isDragging = true
+                            currentOnSelect()
+                            currentOnDragProgress(liveX + currentW, liveY + currentH)
+                        },
+                        onDragEnd = {
+                            isDragging = false
+                            currentOnMove(liveX, liveY)
+                        },
+                        onDragCancel = {
+                            isDragging = false
+                            currentOnMove(liveX, liveY)
+                        },
+                    ) { change, _ ->
+                        change.consume()
+                        val coords = itemCoords
+                        if (coords != null && coords.isAttached) {
+                            val curRoot = coords.localToRoot(change.position)
+                            val deltaRoot = curRoot - prevFingerRoot
+                            prevFingerRoot = curRoot
+                            fingerRootPos = curRoot
+                            liveX = (liveX + deltaRoot.x / density.density).coerceAtLeast(0f)
+                            liveY = (liveY + deltaRoot.y / density.density).coerceAtLeast(0f)
+                            currentOnDragProgress(liveX + currentW, liveY + currentH)
+                        }
+                    }
+                }
+            }
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(32.dp).background(Color(0xFF8E1B1B)).wikiBorder(Color.White.copy(alpha = 0.4f)).clickable { playing = !playing /* TODO(StudioAI): real playback */ }, contentAlignment = Alignment.Center) {
-            Icon(if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, null, tint = Color.White, modifier = Modifier.size(18.dp))
+        Box(
+            Modifier
+                .size(32.dp)
+                .background(Color(0xFF8E1B1B))
+                .wikiBorder(Color.White.copy(alpha = 0.4f))
+                .clickable { togglePlay() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                contentDescription = if (playing) "Pause audio" else "Play audio",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp)
+            )
         }
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
             Text(a.name, style = sansStyle(10.sp, Color.White, FontWeight.Medium), maxLines = 1)
-            androidx.compose.material3.Slider(progress, { progress = it }, Modifier.height(20.dp), colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.3f)))
+            androidx.compose.material3.Slider(
+                value = progress,
+                onValueChange = { fraction ->
+                    progress = fraction
+                    val targetMs = (fraction * durationMs).toInt()
+                    runCatching { mediaPlayer?.seekTo(targetMs) }
+                },
+                modifier = Modifier.height(20.dp),
+                colors = androidx.compose.material3.SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color.White,
+                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+                )
+            )
         }
-        Text("${a.durationSec}s", style = monoStyle(10.sp, Color.White))
+        Text("${(durationMs / 1000).coerceAtLeast(1)}s", style = monoStyle(10.sp, Color.White))
     }
 }

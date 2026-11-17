@@ -2,11 +2,17 @@ package com.likkho.app
 
 import android.app.Application
 import android.content.Context
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.provider.OpenableColumns
+import android.util.LruCache
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.likkho.app.editor.FontRegistry
@@ -364,6 +370,134 @@ class AppViewModel @JvmOverloads constructor(
         return false
     }
 
+    private val imageBitmapCache = LruCache<String, ImageBitmap>(24)
+
+    suspend fun importImageUri(uri: Uri, x: Float = 24f, y: Float = 120f): CanvasImage? = withContext(Dispatchers.IO) {
+        if (!vaultManager.isUnlocked) return@withContext null
+        val app = getApplication<Application>()
+        val rawBytes = runCatching {
+            app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull() ?: return@withContext null
+        if (rawBytes.isEmpty()) return@withContext null
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+        val aspect = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+            bounds.outWidth.toFloat() / bounds.outHeight.toFloat()
+        } else {
+            4f / 3f
+        }
+        val initW = 180f
+        val initH = (initW / aspect).coerceIn(72f, 320f)
+        val mediaId = vaultManager.withActiveDek { dek ->
+            vaultManager.activeMediaRepository().importMediaBytes(
+                CryptoUtils.randomId("med_"),
+                rawBytes,
+                dek
+            )
+        }
+        decodeSampledBitmap(rawBytes)?.let { imageBitmapCache.put(mediaId, it) }
+        CanvasImage(
+            id = mediaId,
+            source = mediaId,
+            x = x.coerceAtLeast(0f),
+            y = y.coerceAtLeast(0f),
+            width = initW,
+            height = initH,
+            sizeBytes = rawBytes.size.toLong()
+        )
+    }
+
+    suspend fun importAudioUri(uri: Uri, x: Float = 24f, y: Float = 160f): CanvasAudio? = withContext(Dispatchers.IO) {
+        if (!vaultManager.isUnlocked) return@withContext null
+        val app = getApplication<Application>()
+        var displayName: String? = null
+        runCatching {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) displayName = c.getString(idx)
+                }
+            }
+        }
+        val durationSec = runCatching {
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(app, uri)
+                val ms = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                ((ms + 500L) / 1000L).toInt().coerceAtLeast(1)
+            } finally {
+                mmr.release()
+            }
+        }.getOrDefault(1)
+        val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
+        val mediaId = stream.use { s ->
+            vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().importMedia(s, dek)
+            }
+        }
+        val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Audio_${mediaId.take(6)}"
+        val ext = cleanName.substringAfterLast('.', "").lowercase().ifBlank { "audio" }
+        CanvasAudio(
+            id = mediaId,
+            name = cleanName,
+            format = ext,
+            audioUri = mediaId,
+            durationSec = durationSec,
+            x = x.coerceAtLeast(0f),
+            y = y.coerceAtLeast(0f)
+        )
+    }
+
+    suspend fun importMediaUri(uri: Uri): String? = withContext(Dispatchers.IO) {
+        if (!vaultManager.isUnlocked) return@withContext null
+        val app = getApplication<Application>()
+        val rawBytes = runCatching {
+            app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull() ?: return@withContext null
+        if (rawBytes.isEmpty()) return@withContext null
+        val mediaId = vaultManager.withActiveDek { dek ->
+            vaultManager.activeMediaRepository().importMediaBytes(
+                CryptoUtils.randomId("med_"),
+                rawBytes,
+                dek
+            )
+        }
+        decodeSampledBitmap(rawBytes)?.let { imageBitmapCache.put(mediaId, it) }
+        mediaId
+    }
+
+    suspend fun loadDecryptedMediaBytes(mediaId: String): ByteArray? = withContext(Dispatchers.IO) {
+        if (mediaId.isBlank() || !vaultManager.isUnlocked) return@withContext null
+        runCatching {
+            vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().readDecryptedBytes(mediaId, dek)
+            }
+        }.getOrNull()
+    }
+
+    suspend fun loadDecryptedImageBitmap(mediaId: String): ImageBitmap? {
+        if (mediaId.isBlank()) return null
+        imageBitmapCache.get(mediaId)?.let { return it }
+        val bytes = loadDecryptedMediaBytes(mediaId) ?: return null
+        val bmp = withContext(Dispatchers.Default) { decodeSampledBitmap(bytes) } ?: return null
+        imageBitmapCache.put(mediaId, bmp)
+        return bmp
+    }
+
+    private fun decodeSampledBitmap(bytes: ByteArray, maxDim: Int = 1600): ImageBitmap? {
+        if (bytes.isEmpty()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
+    }
+
     private fun fontStorageDir(): File =
         (hooks as? RealFeatureHooks)?.baseStorageDir ?: getApplication<Application>().filesDir
 
@@ -383,6 +517,7 @@ class AppViewModel @JvmOverloads constructor(
         viewModelScope.launch(Dispatchers.IO) {
             hooks.clearAllData()
             FontRegistry.clearAll(fontStorageDir())
+            imageBitmapCache.evictAll()
             withContext(Dispatchers.Main) {
                 logs.clear(); customFonts.clear()
                 micSettings = MicSettings(); savedPasscode = null; secondaryPasscode = null

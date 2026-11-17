@@ -18,7 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.CalendarToday
 import androidx.compose.material.icons.outlined.Close
@@ -283,7 +283,7 @@ fun BackedUpDiariesScreen(vm: AppViewModel, onClose: () -> Unit) {
         Column(Modifier.fillMaxWidth().background(w.surface)) {
             Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (searchOpen) {
-                    IconBtn(Icons.Outlined.ArrowBack, "Close Search", { searchOpen = false; query = "" }, size = 36.dp)
+                    IconBtn(Icons.AutoMirrored.Outlined.ArrowBack, "Close Search", { searchOpen = false; query = "" }, size = 48.dp, bordered = false, bg = Color.Transparent)
                     Spacer(Modifier.width(8.dp))
                     Icon(Icons.Outlined.Search, null, tint = w.accent, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
@@ -291,7 +291,7 @@ fun BackedUpDiariesScreen(vm: AppViewModel, onClose: () -> Unit) {
                     Spacer(Modifier.width(8.dp))
                     IconBtn(Icons.Outlined.Close, "Close", { searchOpen = false; query = "" }, size = 36.dp, tint = w.muted, iconSize = 16.dp)
                 } else {
-                    IconBtn(Icons.Outlined.ArrowBack, "Back to Settings", onClose)
+                    IconBtn(Icons.AutoMirrored.Outlined.ArrowBack, "Back to Settings", onClose, size = 48.dp, bordered = false, bg = Color.Transparent)
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Backed-up Diaries", style = serifStyle(20.sp, w.text))

@@ -39,7 +39,10 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -229,7 +232,20 @@ fun PfpAvatar(pfp: Pfp?, size: Dp, modifier: Modifier = Modifier) {
             contentAlignment = Alignment.Center,
         ) {
             if (pfp.source != null) {
-                Icon(Icons.Outlined.Image, null, tint = Color.White, modifier = Modifier.size(size / 2))
+                val loader = LocalImageBitmapLoader.current
+                val bmp by produceState<ImageBitmap?>(initialValue = null, key1 = pfp.source) {
+                    value = loader?.invoke(pfp.source)
+                }
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp!!,
+                        contentDescription = "Diary Photo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Icon(Icons.Outlined.Image, "Diary Photo", tint = Color.White, modifier = Modifier.size(size / 2))
+                }
             } else {
                 Text(
                     pfp.text.orEmpty(),

@@ -21,8 +21,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -461,18 +461,18 @@ private fun SavedWordsPage(vm: AppViewModel, onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize().background(w.bg)) {
         Column(Modifier.fillMaxWidth().background(w.surface)) {
-            Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().height(56.dp).padding(start = 4.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (searchOpen) {
-                    IconBtn(Icons.Outlined.ArrowBack, "Close Search", { searchOpen = false; query = "" }, size = 36.dp)
-                    Spacer(Modifier.width(8.dp))
+                    IconBtn(Icons.AutoMirrored.Outlined.ArrowBack, "Close Search", { searchOpen = false; query = "" }, size = 48.dp, bordered = false, bg = Color.Transparent)
+                    Spacer(Modifier.width(4.dp))
                     Icon(Icons.Outlined.Search, null, tint = w.accent, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
                     WikiTextField(query, { query = it }, Modifier.weight(1f), "Search saved words...", onDone = {})
                     Spacer(Modifier.width(8.dp))
                     IconBtn(Icons.Outlined.Close, "Close search", { searchOpen = false; query = "" }, size = 36.dp, tint = w.muted, iconSize = 16.dp)
                 } else {
-                    IconBtn(Icons.Outlined.ArrowBack, "Back to Settings", onBack)
-                    Spacer(Modifier.width(10.dp))
+                    IconBtn(Icons.AutoMirrored.Outlined.ArrowBack, "Back to Settings", onBack, size = 48.dp, bordered = false, bg = Color.Transparent)
+                    Spacer(Modifier.width(4.dp))
                     Text("Saved Word Analysis", style = serifStyle(20.sp, w.text), modifier = Modifier.weight(1f))
                     IconBtn(Icons.Outlined.Search, "Search saved words", { searchOpen = true })
                 }

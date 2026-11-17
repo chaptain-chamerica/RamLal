@@ -1,5 +1,10 @@
 package com.likkho.app
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -13,6 +18,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,7 +50,15 @@ private fun LabeledSlider(label: String, value: Float, range: ClosedFloatingPoin
 
 /** Image Studio (MediaImageStudioModal): tabs Compress | Filters (22) | Adjust & Opacity | Crop. Footer Cancel / Apply. */
 @Composable
-fun ImageStudioDialog(title: String, sizeBytes: Long, onClose: () -> Unit, onApply: () -> Unit) {
+fun ImageStudioDialog(
+    title: String,
+    sizeBytes: Long,
+    onClose: () -> Unit,
+    previewBitmap: ImageBitmap? = null,
+    initialOpacity: Float = 1f,
+    onApplyOpacity: ((Float) -> Unit)? = null,
+    onApply: () -> Unit,
+) {
     val w = wiki()
     var tab by remember { mutableStateOf(0) }
     var compress by remember { mutableStateOf(false) }
@@ -54,12 +69,22 @@ fun ImageStudioDialog(title: String, sizeBytes: Long, onClose: () -> Unit, onApp
     var exif by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf(0) }
     var bright by remember { mutableStateOf(100f) }; var contrast by remember { mutableStateOf(100f) }; var sat by remember { mutableStateOf(100f) }
-    var warm by remember { mutableStateOf(0f) }; var hue by remember { mutableStateOf(0f) }; var opacity by remember { mutableStateOf(100f) }
+    var warm by remember { mutableStateOf(0f) }; var hue by remember { mutableStateOf(0f) }; var opacity by remember(initialOpacity) { mutableStateOf((initialOpacity * 100f).coerceIn(5f, 100f)) }
     var aspect by remember { mutableStateOf("Free") }; var zoom by remember { mutableStateOf(100f) }
     WikiDialog(onDismiss = onClose, title = title, titleIcon = Icons.Outlined.Image, maxWidth = 440.dp, subtitle = "Size: ${formatBytes(sizeBytes)}") {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Box(Modifier.fillMaxWidth().height(150.dp).background(w.surface).wikiBorder(w.border), contentAlignment = Alignment.Center) {
-                Text("Live preview (TODO Studio AI)", style = sansStyle(11.sp, w.muted, FontWeight.Normal))
+                if (previewBitmap != null) {
+                    Image(
+                        bitmap = previewBitmap,
+                        contentDescription = title,
+                        contentScale = ContentScale.Fit,
+                        alpha = (opacity / 100f).coerceIn(0.05f, 1f),
+                        modifier = Modifier.fillMaxSize().padding(6.dp)
+                    )
+                } else {
+                    Text("No image preview available", style = sansStyle(11.sp, w.muted, FontWeight.Normal))
+                }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 listOf("Compress", "Filters (22+)", "Adjust", "Crop").forEachIndexed { i, t -> Chip(t, tab == i, Modifier.weight(1f)) { tab = i } }
@@ -106,7 +131,7 @@ fun ImageStudioDialog(title: String, sizeBytes: Long, onClose: () -> Unit, onApp
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 WikiButton("Cancel", onClose, height = 36.dp)
-                WikiButton("Apply", { onApply(); onClose() }, kind = BtnKind.PRIMARY, icon = Icons.Outlined.Check, height = 36.dp)
+                WikiButton("Apply", { onApplyOpacity?.invoke((opacity / 100f).coerceIn(0.05f, 1f)); onApply(); onClose() }, kind = BtnKind.PRIMARY, icon = Icons.Outlined.Check, height = 36.dp)
             }
         }
     }
@@ -139,15 +164,29 @@ fun AudioStudioDialog(name: String, onClose: () -> Unit, onApply: () -> Unit) {
 
 /** PFP Studio (ImageCropperModal): tab "Emoji / Text & BG" | "Photo / Image". Footer: Remove | Save PFP. */
 @Composable
-fun PfpStudioDialog(current: Pfp?, hooks: FeatureHooks, onClose: () -> Unit, onSave: (Pfp?) -> Unit) {
+fun PfpStudioDialog(
+    current: Pfp?,
+    hooks: FeatureHooks,
+    onClose: () -> Unit,
+    onImportPhotoUri: (suspend (Uri) -> String?)? = null,
+    onSave: (Pfp?) -> Unit,
+) {
     val w = wiki(); val scope = rememberCoroutineScope()
-    var tab by remember { mutableStateOf(0) }
+    var tab by remember { mutableStateOf(if (current?.source != null) 1 else 0) }
     var text by remember { mutableStateOf(current?.text.orEmpty()) }
     var bg by remember { mutableStateOf(current?.bgColor ?: 0xFF3366CCL) }
     var fg by remember { mutableStateOf(current?.textColor ?: 0xFFFFFFFFL) }
     var scale by remember { mutableStateOf(current?.textScale ?: 1f) }
     var photo by remember { mutableStateOf(current?.source) }
     var zoom by remember { mutableStateOf(100f) }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val mediaId = onImportPhotoUri?.invoke(uri) ?: hooks.pickPfpImage()
+                if (mediaId != null) photo = mediaId
+            }
+        }
+    }
     WikiDialog(onDismiss = onClose, title = "Diary PFP", titleIcon = Icons.Outlined.AddPhotoAlternate) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { Chip("Emoji / Text & BG", tab == 0, Modifier.weight(1f)) { tab = 0 }; Chip("Photo / Image", tab == 1, Modifier.weight(1f)) { tab = 1 } }
@@ -160,7 +199,18 @@ fun PfpStudioDialog(current: Pfp?, hooks: FeatureHooks, onClose: () -> Unit, onS
                 PFP_BG_PRESETS.chunked(8).forEach { r -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) { r.forEach { (n, b, t) -> Box(Modifier.weight(1f).height(30.dp).background(Color(b)).wikiBorder(if (bg == b) w.accent else w.border, if (bg == b) 2.dp else 1.dp).clickable { bg = b; fg = t }) } } }
             } else {
                 LabeledSlider("Zoom", zoom, 100f..400f, "%") { zoom = it }
-                WikiButton(if (photo == null) "Browse Image" else "Choose Another Photo", { scope.launch { hooks.pickPfpImage()?.let { photo = it } } }, Modifier.fillMaxWidth(), icon = Icons.Outlined.Image)
+                WikiButton(
+                    if (photo == null) "Browse Image" else "Choose Another Photo",
+                    {
+                        if (onImportPhotoUri != null) {
+                            photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        } else {
+                            scope.launch { hooks.pickPfpImage()?.let { photo = it } }
+                        }
+                    },
+                    Modifier.fillMaxWidth(),
+                    icon = Icons.Outlined.Image
+                )
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 WikiButton("Remove", { onSave(null); onClose() }, kind = BtnKind.OUTLINE, icon = Icons.Outlined.Delete, height = 36.dp)

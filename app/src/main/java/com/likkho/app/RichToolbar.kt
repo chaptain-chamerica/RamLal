@@ -204,9 +204,14 @@ fun RichToolbar(
                 )
             }
             Pop.MEDIA -> Pop1 {
+                Text(
+                    "Canvas Media Picker",
+                    style = sansStyle(11.sp, w.muted, FontWeight.SemiBold),
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WikiButton("Add Image", { pop = Pop.NONE; onAddImage() }, Modifier.weight(1f), icon = Icons.Outlined.AddPhotoAlternate)
-                    WikiButton("Attach Audio", { pop = Pop.NONE; onAddAudio() }, Modifier.weight(1f), icon = Icons.Outlined.AudioFile)
+                    WikiButton("Pick Image", { pop = Pop.NONE; onAddImage() }, Modifier.weight(1f), icon = Icons.Outlined.AddPhotoAlternate)
+                    WikiButton("Pick Audio", { pop = Pop.NONE; onAddAudio() }, Modifier.weight(1f), icon = Icons.Outlined.AudioFile)
                 }
             }
             Pop.LINK -> Pop1 {

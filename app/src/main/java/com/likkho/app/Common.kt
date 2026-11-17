@@ -27,13 +27,15 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -60,6 +62,8 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 // Building blocks reused by every screen. Everything is SQUARE (no rounded corners),
 // 1dp border, same as the React app. Only switches and passcode dots are round.
 // ============================================================================
+
+val LocalImageBitmapLoader = staticCompositionLocalOf<(suspend (String) -> ImageBitmap?)?> { null }
 
 fun Modifier.wikiBorder(color: Color, width: Dp = 0.5.dp): Modifier = this.border(width, color, RectangleShape)
 
@@ -342,12 +346,19 @@ fun ScreenHeader(
     val w = wiki()
     Column(modifier.fillMaxWidth().background(w.surface)) {
         Row(
-            Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 12.dp),
+            Modifier.fillMaxWidth().height(56.dp).padding(start = 4.dp, end = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (onBack != null) {
-                IconBtn(Icons.Outlined.ArrowBack, "Back", onBack)
-                Spacer(Modifier.width(10.dp))
+                IconBtn(
+                    icon = Icons.AutoMirrored.Outlined.ArrowBack,
+                    desc = "Back",
+                    onClick = onBack,
+                    size = 48.dp,
+                    bordered = false,
+                    bg = Color.Transparent,
+                )
+                Spacer(Modifier.width(4.dp))
             }
             Column(Modifier.weight(1f)) {
                 Text(title, style = serifStyle(20.sp, w.text), maxLines = 1, overflow = TextOverflow.Ellipsis)

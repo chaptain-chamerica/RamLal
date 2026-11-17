@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -131,6 +132,9 @@ fun Root(vm: AppViewModel) {
         activity?.applySystemBars(darkMode = vm.darkMode, fullScreen = vm.fullScreen)
     }
 
+    CompositionLocalProvider(
+        LocalImageBitmapLoader provides { mediaId -> vm.loadDecryptedImageBitmap(mediaId) }
+    ) {
     Box(Modifier.fillMaxSize().background(w.bg).statusBarsPadding()) {
         Crossfade(
             targetState = vm.route,
@@ -144,7 +148,9 @@ fun Root(vm: AppViewModel) {
                 Route.BACKUP -> BackupRestoreScreen(vm)
             }
         }
-        if (vm.route == Route.HOME) HomeFloatingBanners(vm, Modifier.align(Alignment.BottomCenter))
+        if (vm.route == Route.HOME || vm.route == Route.WORKSPACE) {
+            HomeFloatingBanners(vm, Modifier.align(Alignment.BottomCenter))
+        }
         RingingBanner(vm, Modifier.align(Alignment.TopCenter))
         UnlockDiaryDialog(vm)
         DeleteEntryDialog(vm)
@@ -161,5 +167,6 @@ fun Root(vm: AppViewModel) {
                 PasscodeScreen(vm)
             }
         }
+    }
     }
 }

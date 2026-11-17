@@ -201,4 +201,69 @@ class RealFeatureHooksTest {
         assertFalse(vaultManager.envelopeV1.exists())
         assertFalse(vaultManager.envelopeV2.exists())
     }
+
+    @Test
+    fun canvasMedia_infiniteCoordinatesAndEncryptedMediaRoundTrip() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+
+        val imagePayload = ByteArray(256) { (it * 7).toByte() }
+        val audioPayload = ByteArray(512) { (it * 13).toByte() }
+
+        val (imgId, audId) = vaultManager.withActiveDek { dek ->
+            val repo = vaultManager.activeMediaRepository()
+            val iId = repo.importMediaBytes("img_inf_test", imagePayload, dek)
+            val aId = repo.importMediaBytes("aud_inf_test", audioPayload, dek)
+            iId to aId
+        }
+
+        val log = DiaryLog(
+            id = "inf_log_1",
+            heading = "Infinite Media Canvas",
+            canvasBgSource = imgId,
+            canvasImages = listOf(
+                CanvasImage(
+                    id = imgId,
+                    source = imgId,
+                    x = 5400f,
+                    y = 3850f,
+                    width = 240f,
+                    height = 180f,
+                    opacity = 0.85f,
+                    sizeBytes = imagePayload.size.toLong()
+                )
+            ),
+            audioAttachments = listOf(
+                CanvasAudio(
+                    id = audId,
+                    name = "distant_note.m4a",
+                    format = "m4a",
+                    audioUri = audId,
+                    durationSec = 42,
+                    x = 7200f,
+                    y = 6100f
+                )
+            )
+        )
+
+        hooks.persistLogs(listOf(log))
+
+        val loaded = vaultManager.withActiveDek { dek ->
+            vaultManager.activeDiaryRepository().loadAllDiaries(dek).map { it.toDiaryLog() }
+        }
+        assertEquals(1, loaded.size)
+        val restored = loaded.first()
+        assertEquals(1, restored.canvasImages.size)
+        assertEquals(5400f, restored.canvasImages[0].x)
+        assertEquals(3850f, restored.canvasImages[0].y)
+        assertEquals(1, restored.audioAttachments.size)
+        assertEquals(7200f, restored.audioAttachments[0].x)
+        assertEquals(6100f, restored.audioAttachments[0].y)
+
+        val (readImg, readAud) = vaultManager.withActiveDek { dek ->
+            val repo = vaultManager.activeMediaRepository()
+            repo.readDecryptedBytes(imgId, dek) to repo.readDecryptedBytes(audId, dek)
+        }
+        assertTrue(imagePayload.contentEquals(readImg))
+        assertTrue(audioPayload.contentEquals(readAud))
+    }
 }
