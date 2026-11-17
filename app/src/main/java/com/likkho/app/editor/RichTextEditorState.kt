@@ -91,6 +91,11 @@ class RichTextEditorState(
     var isTodoActive by mutableStateOf(false)
         private set
 
+    var unlockedSpoilerIds by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    var onLockedSpoilerBlocked: ((SpanStyle.Spoiler) -> Unit)? = null
+
     val isH1Active: Boolean get() = activeHeadingLevel == 1
     val isH2Active: Boolean get() = activeHeadingLevel == 2
     val isH3Active: Boolean get() = activeHeadingLevel == 3
@@ -99,6 +104,7 @@ class RichTextEditorState(
     val currentIndentLevel: Int get() = maxOf(currentLineIndentLevel, activePendingIndent)
     val hasSelection: Boolean get() = selection.min < selection.max
     val hasLinkOnSelection: Boolean get() = selectedLinkUrl() != null
+    val hasSpoilerOnSelection: Boolean get() = spoilerInRange() != null
 
     val text: String get() = textFieldValue.text
     val selection: TextRange get() = textFieldValue.selection
@@ -321,6 +327,145 @@ class RichTextEditorState(
             text.length
         )
         return true
+    }
+
+    sealed interface SpoilerCopyResult {
+        data class AllowPlain(val text: String) : SpoilerCopyResult
+        data class Masked(val text: String) : SpoilerCopyResult
+        data class Blocked(val blockingSpoiler: SpanStyle.Spoiler) : SpoilerCopyResult
+    }
+
+    fun isSpoilerUnlocked(spoiler: SpanStyle.Spoiler): Boolean = spoiler.id in unlockedSpoilerIds
+
+    fun spoilerAtOffset(offset: Int): SpanStyle.Spoiler? {
+        if (offset < 0 || offset >= text.length) return null
+        return spans.firstOrNull {
+            it.style is SpanStyle.Spoiler && offset >= it.start && offset < it.end
+        }?.style as? SpanStyle.Spoiler
+    }
+
+    fun lockedSpoilerAtOffset(offset: Int): SpanStyle.Spoiler? =
+        spoilerAtOffset(offset)?.takeIf { !isSpoilerUnlocked(it) }
+
+    fun spoilerInRange(range: TextRange = selection): SpanStyle.Spoiler? {
+        if (range.min >= range.max) return null
+        val s = range.min.coerceIn(0, text.length)
+        val e = range.max.coerceIn(0, text.length)
+        if (s >= e) return null
+        return spans.firstOrNull {
+            it.style is SpanStyle.Spoiler && it.start < e && it.end > s
+        }?.style as? SpanStyle.Spoiler
+    }
+
+    fun applySpoilerToRange(passcode: String, range: TextRange = selection): Boolean {
+        val s = range.min.coerceIn(0, text.length)
+        val e = range.max.coerceIn(0, text.length)
+        if (s >= e) return false
+        val cleanPass = passcode.trim()
+        if (cleanPass.isEmpty()) return false
+        val lockedOverlap = spans.firstOrNull {
+            it.style is SpanStyle.Spoiler && !isSpoilerUnlocked(it.style) && it.start < e && it.end > s
+        }?.style as? SpanStyle.Spoiler
+        if (lockedOverlap != null) {
+            onLockedSpoilerBlocked?.invoke(lockedOverlap)
+            return false
+        }
+        val hash = hashSpoilerPasscode(cleanPass)
+        val spoilerStyle = SpanStyle.Spoiler(passcodeHash = hash)
+        removeStyleFromRange(s, e) { it is SpanStyle.Spoiler }
+        applyStyleToRange(s, e, spoilerStyle)
+        unlockedSpoilerIds = unlockedSpoilerIds - spoilerStyle.id
+        return true
+    }
+
+    fun unlockSpoiler(spoilerId: String, passcode: String): Boolean {
+        val sp = spans.firstOrNull {
+            it.style is SpanStyle.Spoiler && (it.style as SpanStyle.Spoiler).id == spoilerId
+        }?.style as? SpanStyle.Spoiler ?: return false
+        val cleanPass = passcode.trim()
+        if (cleanPass.isEmpty()) return false
+        if (hashSpoilerPasscode(cleanPass) == sp.passcodeHash) {
+            unlockedSpoilerIds = unlockedSpoilerIds + spoilerId
+            return true
+        }
+        return false
+    }
+
+    fun lockSpoiler(spoilerId: String) {
+        unlockedSpoilerIds = unlockedSpoilerIds - spoilerId
+    }
+
+    fun removeSpoilerFromRange(range: TextRange = selection): Boolean {
+        val s = range.min.coerceIn(0, text.length)
+        val e = range.max.coerceIn(0, text.length)
+        if (s >= e) return false
+        val overlapping = spans.filter { it.style is SpanStyle.Spoiler && it.start < e && it.end > s }
+        if (overlapping.isEmpty()) return false
+        val locked = overlapping.firstOrNull { !isSpoilerUnlocked(it.style as SpanStyle.Spoiler) }
+            ?.style as? SpanStyle.Spoiler
+        if (locked != null) {
+            onLockedSpoilerBlocked?.invoke(locked)
+            return false
+        }
+        spans = normalizeSpans(
+            spans.filterNot { it.style is SpanStyle.Spoiler && it.start < e && it.end > s },
+            text.length
+        )
+        return true
+    }
+
+    fun prepareClipboardCopy(range: TextRange = selection): SpoilerCopyResult {
+        val s = range.min.coerceIn(0, text.length)
+        val e = range.max.coerceIn(s, text.length)
+        if (s >= e) return SpoilerCopyResult.AllowPlain("")
+        val lockedSpans = spans.filter {
+            it.style is SpanStyle.Spoiler &&
+                !isSpoilerUnlocked(it.style) &&
+                it.start < e &&
+                it.end > s
+        }
+        if (lockedSpans.isEmpty()) {
+            return SpoilerCopyResult.AllowPlain(text.substring(s, e))
+        }
+        fun isIdxLocked(idx: Int): Boolean = lockedSpans.any { idx in it.start until it.end }
+        val hasVisibleNonWhitespace = (s until e).any { idx ->
+            !text[idx].isWhitespace() && !isIdxLocked(idx)
+        }
+        if (!hasVisibleNonWhitespace) {
+            return SpoilerCopyResult.Blocked(lockedSpans.first().style as SpanStyle.Spoiler)
+        }
+        val sb = StringBuilder(e - s)
+        for (idx in s until e) {
+            val ch = text[idx]
+            if (isIdxLocked(idx) && ch != '\n') {
+                sb.append(SPOILER_GARBAGE_CHARS[(idx * 7 + ch.code) % SPOILER_GARBAGE_CHARS.length])
+            } else {
+                sb.append(ch)
+            }
+        }
+        return SpoilerCopyResult.Masked(sb.toString())
+    }
+
+    fun maskedPlainPreview(maxLength: Int = 140): String {
+        if (text.isEmpty()) return ""
+        val lockedSpans = spans.filter {
+            it.style is SpanStyle.Spoiler
+        }
+        val raw = if (lockedSpans.isEmpty()) {
+            text
+        } else {
+            buildString(text.length) {
+                for (i in text.indices) {
+                    val ch = text[i]
+                    if (ch != '\n' && ch != DIVIDER_MARKER[0] && lockedSpans.any { i in it.start until it.end }) {
+                        append('▓')
+                    } else {
+                        append(ch)
+                    }
+                }
+            }
+        }
+        return raw.replace(DIVIDER_MARKER, " ").replace("\n", " ").trim().take(maxLength)
     }
 
     fun toggleHeading(level: Int) {
@@ -617,6 +762,15 @@ class RichTextEditorState(
         val oldText = text
         val pos = sel.min.coerceIn(0, oldText.length)
         val selEnd = sel.max.coerceIn(pos, oldText.length)
+        if (pos < selEnd) {
+            val blocked = spans.firstOrNull {
+                it.style is SpanStyle.Spoiler && !isSpoilerUnlocked(it.style) && it.start < selEnd && it.end > pos
+            }?.style as? SpanStyle.Spoiler
+            if (blocked != null) {
+                onLockedSpoilerBlocked?.invoke(blocked)
+                return
+            }
+        }
 
         val needLeadingNewline = pos > 0 && oldText[pos - 1] != '\n'
         val needTrailingNewline = selEnd >= oldText.length || oldText[selEnd] != '\n'
@@ -963,6 +1117,31 @@ class RichTextEditorState(
         val firstNewlineRel = insertedText.indexOf('\n')
         val hasNewlineInInsert = firstNewlineRel != -1
 
+        // Protect locked spoilers from deletion, replacement, or blind editing without passcode
+        if (deletedCount > 0) {
+            val blockedSpoiler = spans.firstOrNull {
+                it.style is SpanStyle.Spoiler &&
+                    !isSpoilerUnlocked(it.style) &&
+                    it.start < deletedEnd &&
+                    it.end > deletedStart
+            }?.style as? SpanStyle.Spoiler
+            if (blockedSpoiler != null) {
+                onLockedSpoilerBlocked?.invoke(blockedSpoiler)
+                return
+            }
+        } else if (insertedCount > 0) {
+            val blockedSpoiler = spans.firstOrNull {
+                it.style is SpanStyle.Spoiler &&
+                    !isSpoilerUnlocked(it.style) &&
+                    insertedStart > it.start &&
+                    insertedStart < it.end
+            }?.style as? SpanStyle.Spoiler
+            if (blockedSpoiler != null) {
+                onLockedSpoilerBlocked?.invoke(blockedSpoiler)
+                return
+            }
+        }
+
         // Special Case 2a: Backspace inside a list prefix ("• ", "1. ", "☐ ") cleanly removes the entire list item prefix
         if (deletedCount in 1..2 && insertedCount == 0) {
             val touchedPrefix = spans.firstOrNull { sp ->
@@ -1092,6 +1271,7 @@ class RichTextEditorState(
                                 is SpanStyle.Code -> isCodeActive
                                 is SpanStyle.Heading -> !hasNewlineInInsert && activeHeadingLevel == style.level
                                 is SpanStyle.Link -> !hasNewlineInInsert
+                                is SpanStyle.Spoiler -> !hasNewlineInInsert && isSpoilerUnlocked(style)
                                 else -> false
                             }
 
@@ -1277,6 +1457,13 @@ class RichTextEditorState(
         const val TODO_UNCHECKED_PREFIX = "\u2610 "
         const val TODO_CHECKED_PREFIX = "\u2611 "
         const val MAX_INDENT = 6
+        const val SPOILER_GARBAGE_CHARS = "▓▒░#@$%&*?~"
+
+        fun hashSpoilerPasscode(passcode: String): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest("likkho:spoiler:$passcode".toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }
+        }
 
         fun fromHtml(html: String): RichTextEditorState {
             val decoded = HtmlSpanCodec.fromHtmlWithMeta(html)

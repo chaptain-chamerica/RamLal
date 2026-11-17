@@ -68,6 +68,7 @@ class RichTextVisualTransformation(
     private val numberedColor: Color = Color.Unspecified,
     private val todoCheckedTextColor: Color = Color.Unspecified,
     private val linkColor: Color = Color(0xFF3366CC),
+    private val unlockedSpoilerIds: Set<String> = emptySet(),
     private val defaultAlignment: TextAlignment = TextAlignment.LEFT,
     private val fontResolver: (String) -> FontFamily? = { FontRegistry.resolveFontFamily(it) }
 ) : VisualTransformation {
@@ -156,10 +157,11 @@ class RichTextVisualTransformation(
                 is SpanStyle.Color -> 5
                 is SpanStyle.Superscript,
                 is SpanStyle.Subscript -> 6
-                is SpanStyle.Todo -> 7
+                is SpanStyle.Spoiler -> 7
+                is SpanStyle.Todo -> 8
                 is SpanStyle.Bullet,
-                is SpanStyle.Numbered -> 8
-                else -> 9
+                is SpanStyle.Numbered -> 9
+                else -> 10
             }
         }
 
@@ -314,6 +316,15 @@ class RichTextVisualTransformation(
                 }
                 is SpanStyle.Highlight -> {
                     // Handled by HighlightRenderer to bound highlight strictly from ascender to descender
+                }
+                is SpanStyle.Spoiler -> {
+                    if (style.id !in unlockedSpoilerIds) {
+                        builder.addStyle(
+                            androidx.compose.ui.text.SpanStyle(color = Color.Transparent),
+                            s,
+                            e
+                        )
+                    }
                 }
                 is SpanStyle.Divider -> {
                     builder.addStyle(androidx.compose.ui.text.SpanStyle(color = Color.Transparent), s, e)

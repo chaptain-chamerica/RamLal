@@ -236,6 +236,7 @@ object HtmlSpanCodec {
                     is SpanStyle.FontId -> "<span data-font=\"${escapeHtml(s.fontId)}\">$escaped</span>"
                     is SpanStyle.SizePx -> "<span style=\"font-size:${s.sizePx.toInt()}px\">$escaped</span>"
                     is SpanStyle.Link -> "<a href=\"${escapeHtml(s.url)}\">$escaped</a>"
+                    is SpanStyle.Spoiler -> "<span data-spoiler=\"${escapeHtml(s.passcodeHash)}\" data-spoiler-id=\"${escapeHtml(s.id)}\">$escaped</span>"
                     is SpanStyle.Code -> "<code>$escaped</code>"
                     is SpanStyle.Quote -> "<blockquote>$escaped</blockquote>"
                     is SpanStyle.Heading -> "<h${s.level}>$escaped</h${s.level}>"
@@ -457,6 +458,7 @@ object HtmlSpanCodec {
                             is SpanStyle.FontId -> tagName == "span" || tagName == "font"
                             is SpanStyle.SizePx -> tagName == "span"
                             is SpanStyle.Link -> tagName == "a"
+                            is SpanStyle.Spoiler -> tagName == "span"
                             is SpanStyle.Quote -> tagName == "blockquote"
                             is SpanStyle.Code -> tagName == "code"
                             is SpanStyle.Heading -> tagName == "h${it.style.level}"
@@ -567,6 +569,8 @@ object HtmlSpanCodec {
                 SpanStyle.Highlight(hex)
             }
             "span" -> {
+                val spoilerHash = extractAttr(rawTag, "data-spoiler")
+                val spoilerId = extractAttr(rawTag, "data-spoiler-id")
                 val dataFont = extractAttr(rawTag, "data-font")
                 val colorHex = extractColorFromStyle(rawTag, "color")
                 val fontSizeCss = extractColorFromStyle(rawTag, "font-size")
@@ -579,6 +583,10 @@ object HtmlSpanCodec {
                     ?: extractColorFromStyle(rawTag, "background")
                 val fontFamily = extractColorFromStyle(rawTag, "font-family")
                 when {
+                    spoilerHash != null -> SpanStyle.Spoiler(
+                        passcodeHash = unescapeHtml(spoilerHash),
+                        id = spoilerId?.let { unescapeHtml(it) } ?: com.likkho.app.editor.model.generateBlockId()
+                    )
                     dataFont != null -> SpanStyle.FontId(unescapeHtml(dataFont))
                     colorHex != null -> SpanStyle.Color(colorHex)
                     parsedPx != null -> SpanStyle.SizePx(parsedPx)

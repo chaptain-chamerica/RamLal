@@ -31,11 +31,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.ClipboardManager
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
@@ -53,6 +56,7 @@ import com.likkho.app.editor.RichTextEditorState
 import com.likkho.app.editor.RichTextVisualTransformation
 import com.likkho.app.editor.drawBlockDecorations
 import com.likkho.app.editor.drawTextHighlights
+import com.likkho.app.editor.drawTextSpoilers
 import com.likkho.app.editor.model.SpanStyle
 import com.likkho.app.editor.toComposeTextAlign
 import kotlinx.coroutines.delay
@@ -87,14 +91,24 @@ fun WorkspaceScreen(vm: AppViewModel) {
     var imgStudio by remember { mutableStateOf<String?>(null) }
     var audStudio by remember { mutableStateOf<CanvasAudio?>(null) }
     var bgStudio by remember { mutableStateOf(false) }
-    var spoilerAsk by remember { mutableStateOf(false) }
+    var spoilerUnlockPrompt by remember { mutableStateOf<SpanStyle.Spoiler?>(null) }
     var recording by remember { mutableStateOf(false) }
+
+    DisposableEffect(editorState) {
+        editorState.onLockedSpoilerBlocked = { blocked ->
+            vm.showStatus("Enter spoiler passcode to edit, delete, or copy.")
+            spoilerUnlockPrompt = blocked
+        }
+        onDispose {
+            editorState.onLockedSpoilerBlocked = null
+        }
+    }
 
     fun save(showFeedback: Boolean = true) {
         val now = System.currentTimeMillis()
         val base = initial ?: DiaryLog(id = "log_$now", heading = "", createdAt = now)
         val htmlContent = editorState.toHtml()
-        val plain = editorState.text.replace(RichTextEditorState.DIVIDER_MARKER, " ").replace("\n", " ").trim().take(140)
+        val plain = editorState.maskedPlainPreview(140)
         val log = base.copy(
             heading = heading.ifBlank { "Untitled" },
             contentHtml = htmlContent,
@@ -257,6 +271,90 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     )
                 }
                 val context = androidx.compose.ui.platform.LocalContext.current
+                val systemClipboard = LocalClipboardManager.current
+                val spoilerClipboardManager = remember(systemClipboard, editorState) {
+                    object : ClipboardManager by systemClipboard {
+                        override fun setText(annotatedString: AnnotatedString) {
+                            when (val copyResult = editorState.prepareClipboardCopy()) {
+                                is RichTextEditorState.SpoilerCopyResult.AllowPlain -> {
+                                    systemClipboard.setText(annotatedString)
+                                }
+                                is RichTextEditorState.SpoilerCopyResult.Masked -> {
+                                    systemClipboard.setText(AnnotatedString(copyResult.text))
+                                    vm.showStatus("Copied with hidden spoiler text masked.")
+                                }
+                                is RichTextEditorState.SpoilerCopyResult.Blocked -> {
+                                    vm.showStatus("Enter spoiler passcode to copy hidden text.")
+                                    spoilerUnlockPrompt = copyResult.blockingSpoiler
+                                }
+                            }
+                        }
+                    }
+                }
+                val segmentLineMetrics: (Int, Int) -> Pair<Float, Float> = { segStart, segEnd ->
+                    var bestLevel: Int? = null
+                    var activeFont: String? = null
+                    var customSizePx: Float? = null
+                    var hasQuote = false
+                    var hasCode = false
+                    var isScript = false
+                    for (sp in editorState.spans) {
+                        if (sp.start < segEnd && sp.end > segStart) {
+                            when (val st = sp.style) {
+                                is SpanStyle.Heading -> {
+                                    if (bestLevel == null || st.level < bestLevel) bestLevel = st.level
+                                }
+                                is SpanStyle.FontId -> activeFont = st.fontId
+                                is SpanStyle.SizePx -> customSizePx = st.sizePx
+                                is SpanStyle.Quote -> hasQuote = true
+                                is SpanStyle.Code -> hasCode = true
+                                is SpanStyle.Superscript, is SpanStyle.Subscript -> isScript = true
+                                else -> {}
+                            }
+                        }
+                    }
+                    val effectiveFontId = activeFont ?: when {
+                        hasCode -> com.likkho.app.editor.FontRegistry.BUILTIN_MONO
+                        hasQuote -> com.likkho.app.editor.FontRegistry.BUILTIN_SERIF
+                        else -> null
+                    }
+                    val baseSp = customSizePx?.coerceIn(10f, 48f)?.sp
+                        ?: bestLevel?.let { HeadingTypographySpec.fontSize(it) }
+                        ?: if (hasCode && activeFont == null) 14.5.sp else editorTextStyle.fontSize
+                    val effectiveSp = if (isScript) (baseSp.value * 0.72f).coerceAtLeast(8f).sp else baseSp
+                    val pxSize = with(density) { effectiveSp.toPx() }
+                    val resolvedTf = effectiveFontId?.let {
+                        com.likkho.app.editor.FontRegistry.resolveTypeface(context, it)
+                    }
+                    val fm = when {
+                        resolvedTf != null -> {
+                            android.graphics.Paint().apply {
+                                typeface = resolvedTf
+                                textSize = pxSize
+                            }.fontMetrics
+                        }
+                        bestLevel != null && !isScript -> headingFontMetrics[bestLevel] ?: fontMetrics
+                        isScript -> {
+                            android.graphics.Paint().apply {
+                                typeface = resolvedTypefaceState.value as? android.graphics.Typeface
+                                textSize = pxSize
+                            }.fontMetrics
+                        }
+                        else -> fontMetrics
+                    }
+                    val hasDevanagari = (segStart until segEnd.coerceAtMost(editorState.text.length)).any { idx ->
+                        editorState.text[idx] in '\u0900'..'\u097F'
+                    }
+                    if (hasDevanagari) {
+                        val devFm = android.graphics.Paint().apply {
+                            typeface = android.graphics.Typeface.DEFAULT
+                            textSize = pxSize
+                        }.fontMetrics
+                        minOf(fm.ascent, devFm.ascent) to maxOf(fm.descent, devFm.descent)
+                    } else {
+                        fm.ascent to fm.descent
+                    }
+                }
                 var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
                 var isEditorFocused by remember { mutableStateOf(false) }
                 var cursorVisible by remember { mutableStateOf(true) }
@@ -270,7 +368,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     editorState.canvasAlignment,
                     editorState.currentIndentLevel,
                     editorState.isSuperscriptActive,
-                    editorState.isSubscriptActive
+                    editorState.isSubscriptActive,
+                    editorState.unlockedSpoilerIds
                 ) {
                     if (isEditorFocused && !reading) {
                         cursorVisible = true
@@ -283,6 +382,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     }
                 }
 
+                CompositionLocalProvider(LocalClipboardManager provides spoilerClipboardManager) {
                 BasicTextField(
                     value = editorState.textFieldValue,
                     onValueChange = { editorState.onTextFieldValueChange(it) },
@@ -290,7 +390,13 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     textStyle = editorTextStyle,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     cursorBrush = SolidColor(if (textLayoutResult == null) w.accent else Color.Transparent),
-                    visualTransformation = remember(editorState.spans, editorState.canvasAlignment, vm.customFonts.size, w.isDark) {
+                    visualTransformation = remember(
+                        editorState.spans,
+                        editorState.canvasAlignment,
+                        editorState.unlockedSpoilerIds,
+                        vm.customFonts.size,
+                        w.isDark
+                    ) {
                         RichTextVisualTransformation(
                             spans = editorState.spans,
                             defaultTextColor = w.text,
@@ -299,7 +405,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
                             numberedColor = w.accent,
                             todoCheckedTextColor = w.muted,
                             linkColor = w.link,
-                            defaultAlignment = editorState.canvasAlignment
+                            defaultAlignment = editorState.canvasAlignment,
+                            unlockedSpoilerIds = editorState.unlockedSpoilerIds
                         )
                     },
                     onTextLayout = { textLayoutResult = it },
@@ -332,6 +439,19 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                             val candidateOffsets = buildList {
                                                 if (rawOffset in 0 until textLen) add(rawOffset)
                                                 if (rawOffset - 1 in 0 until textLen) add(rawOffset - 1)
+                                            }
+                                            val tappedSpoiler = candidateOffsets.firstNotNullOfOrNull { idx ->
+                                                val box = layout.getBoundingBox(idx)
+                                                if (change.position.x in (box.left - 8f)..(box.right + 8f) &&
+                                                    change.position.y in (box.top - 8f)..(box.bottom + 8f)
+                                                ) {
+                                                    editorState.lockedSpoilerAtOffset(idx)
+                                                } else null
+                                            }
+                                            if (tappedSpoiler != null) {
+                                                change.consume()
+                                                spoilerUnlockPrompt = tappedSpoiler
+                                                break
                                             }
                                             val hitOffset = candidateOffsets.firstOrNull { idx ->
                                                 val box = layout.getBoundingBox(idx)
@@ -376,75 +496,22 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                         spans = editorState.spans,
                                         ascentPx = fontMetrics.ascent,
                                         descentPx = fontMetrics.descent,
-                                        lineMetrics = { segStart, segEnd ->
-                                        var bestLevel: Int? = null
-                                        var activeFont: String? = null
-                                        var customSizePx: Float? = null
-                                        var hasQuote = false
-                                        var hasCode = false
-                                        var isScript = false
-                                        for (sp in editorState.spans) {
-                                            if (sp.start < segEnd && sp.end > segStart) {
-                                                when (val st = sp.style) {
-                                                    is SpanStyle.Heading -> {
-                                                        if (bestLevel == null || st.level < bestLevel) bestLevel = st.level
-                                                    }
-                                                    is SpanStyle.FontId -> activeFont = st.fontId
-                                                    is SpanStyle.SizePx -> customSizePx = st.sizePx
-                                                    is SpanStyle.Quote -> hasQuote = true
-                                                    is SpanStyle.Code -> hasCode = true
-                                                    is SpanStyle.Superscript, is SpanStyle.Subscript -> isScript = true
-                                                    else -> {}
-                                                }
-                                            }
-                                        }
-                                        val effectiveFontId = activeFont ?: when {
-                                            hasCode -> com.likkho.app.editor.FontRegistry.BUILTIN_MONO
-                                            hasQuote -> com.likkho.app.editor.FontRegistry.BUILTIN_SERIF
-                                            else -> null
-                                        }
-                                        val baseSp = customSizePx?.coerceIn(10f, 48f)?.sp
-                                            ?: bestLevel?.let { HeadingTypographySpec.fontSize(it) }
-                                            ?: if (hasCode && activeFont == null) 14.5.sp else editorTextStyle.fontSize
-                                        val effectiveSp = if (isScript) (baseSp.value * 0.72f).coerceAtLeast(8f).sp else baseSp
-                                        val pxSize = with(density) { effectiveSp.toPx() }
-                                        val resolvedTf = effectiveFontId?.let {
-                                            com.likkho.app.editor.FontRegistry.resolveTypeface(context, it)
-                                        }
-                                        val fm = when {
-                                            resolvedTf != null -> {
-                                                android.graphics.Paint().apply {
-                                                    typeface = resolvedTf
-                                                    textSize = pxSize
-                                                }.fontMetrics
-                                            }
-                                            bestLevel != null && !isScript -> headingFontMetrics[bestLevel] ?: fontMetrics
-                                            isScript -> {
-                                                android.graphics.Paint().apply {
-                                                    typeface = resolvedTypefaceState.value as? android.graphics.Typeface
-                                                    textSize = pxSize
-                                                }.fontMetrics
-                                            }
-                                            else -> fontMetrics
-                                        }
-                                        val hasDevanagari = (segStart until segEnd.coerceAtMost(editorState.text.length)).any { idx ->
-                                            editorState.text[idx] in '\u0900'..'\u097F'
-                                        }
-                                        if (hasDevanagari) {
-                                            val devFm = android.graphics.Paint().apply {
-                                                typeface = android.graphics.Typeface.DEFAULT
-                                                textSize = pxSize
-                                            }.fontMetrics
-                                            minOf(fm.ascent, devFm.ascent) to maxOf(fm.descent, devFm.descent)
-                                        } else {
-                                            fm.ascent to fm.descent
-                                        }
-                                    }
-                                )
-                            }
+                                        lineMetrics = segmentLineMetrics
+                                    )
+                                }
                                 .drawWithContent {
                                     drawContent()
                                     val layout = textLayoutResult ?: return@drawWithContent
+                                    if (layout.layoutInput.text.text == editorState.text) {
+                                        drawTextSpoilers(
+                                            layoutResult = layout,
+                                            spans = editorState.spans,
+                                            unlockedSpoilerIds = editorState.unlockedSpoilerIds,
+                                            ascentPx = fontMetrics.ascent,
+                                            descentPx = fontMetrics.descent,
+                                            lineMetrics = segmentLineMetrics
+                                        )
+                                    }
                                     if (!isEditorFocused || reading || !cursorVisible) return@drawWithContent
                                     if (layout.lineCount <= 0) return@drawWithContent
                                     val sel = editorState.textFieldValue.selection
@@ -541,6 +608,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         }
                     }
                 )
+                }
             }
             images.filter { !it.behindText }.forEach { DraggableImage(it, selImg == it.id, !reading, { selImg = it.id; selAud = null }) { x, y -> images = images.map { m -> if (m.id == it.id) m.copy(x = x, y = y) else m } } }
             audios.filter { !it.behindText }.forEach { AudioCard(it, selAud == it.id, !reading) { selAud = it.id; selImg = null } }
@@ -585,6 +653,51 @@ fun WorkspaceScreen(vm: AppViewModel) {
     imgStudio?.let { id -> ImageStudioDialog("Image Studio", images.find { it.id == id }?.sizeBytes ?: 0, { imgStudio = null }) { /* TODO(StudioAI): apply edits */ } }
     if (bgStudio) ImageStudioDialog("Background Image Studio", 0, { bgStudio = false }) { }
     audStudio?.let { AudioStudioDialog(it.name, { audStudio = null }) { } }
+    spoilerUnlockPrompt?.let { sp ->
+        var passcodeInput by remember(sp.id) { mutableStateOf("") }
+        var passcodeError by remember(sp.id) { mutableStateOf<String?>(null) }
+        fun submitSpoilerUnlock() {
+            if (editorState.unlockSpoiler(sp.id, passcodeInput)) {
+                spoilerUnlockPrompt = null
+                vm.showStatus("Spoiler unlocked. You can now read, copy, or remove it.")
+            } else {
+                passcodeError = "Incorrect spoiler passcode."
+            }
+        }
+        WikiDialog(
+            onDismiss = { spoilerUnlockPrompt = null },
+            title = "Unlock Spoiler Text",
+            titleIcon = Icons.Outlined.VisibilityOff,
+            titleIconTint = w.accent,
+            maxWidth = 320.dp,
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Enter the spoiler passcode to reveal, copy, edit, or delete this hidden text.",
+                    style = sansStyle(12.sp, w.muted, FontWeight.Normal)
+                )
+                passcodeError?.let { err ->
+                    Text(err, style = sansStyle(12.sp, w.danger, FontWeight.Medium))
+                }
+                Column {
+                    FieldLabel("Spoiler Passcode")
+                    WikiTextField(
+                        value = passcodeInput,
+                        onValueChange = { passcodeInput = it; passcodeError = null },
+                        modifier = Modifier.fillMaxWidth().testTag("spoiler_unlock_input"),
+                        placeholder = "Enter passcode...",
+                        password = true,
+                        onDone = { submitSpoilerUnlock() }
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    WikiButton("Cancel", { spoilerUnlockPrompt = null }, height = 36.dp)
+                    Spacer(Modifier.width(8.dp))
+                    WikiButton("Unlock", { submitSpoilerUnlock() }, kind = BtnKind.PRIMARY, height = 36.dp)
+                }
+            }
+        }
+    }
 }
 
 @Composable

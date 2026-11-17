@@ -128,6 +128,78 @@ object HighlightLayoutCalculator {
             lineMetrics = lineMetrics
         )
     }
+    fun computeSpoilerRects(
+        layoutResult: TextLayoutResult,
+        spans: List<Span>,
+        unlockedSpoilerIds: Set<String>,
+        ascentPx: Float,
+        descentPx: Float,
+        lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
+    ): List<HighlightRect> {
+        val text = layoutResult.layoutInput.text.text
+        if (text.isEmpty() || layoutResult.lineCount <= 0 || spans.isEmpty()) return emptyList()
+        val lockedSpoilers = spans.filter {
+            val st = it.style
+            st is SpanStyle.Spoiler && st.id !in unlockedSpoilerIds
+        }
+        if (lockedSpoilers.isEmpty()) return emptyList()
+
+        val rects = mutableListOf<HighlightRect>()
+        for (span in lockedSpoilers) {
+            val s = span.start.coerceIn(0, text.length)
+            val e = span.end.coerceIn(0, text.length)
+            if (s >= e) continue
+
+            val firstLine = layoutResult.getLineForOffset(s).coerceIn(0, layoutResult.lineCount - 1)
+            val lastLine = layoutResult.getLineForOffset((e - 1).coerceAtLeast(s)).coerceIn(firstLine, layoutResult.lineCount - 1)
+
+            for (line in firstLine..lastLine) {
+                val lineStart = layoutResult.getLineStart(line)
+                val lineEnd = layoutResult.getLineEnd(line, visibleEnd = false)
+                val segStart = maxOf(s, lineStart)
+                var segEnd = minOf(e, lineEnd)
+
+                while (segEnd > segStart && segEnd <= text.length && text[segEnd - 1] == '\n') {
+                    segEnd--
+                }
+                if (segStart >= segEnd) continue
+
+                var minLeft = Float.POSITIVE_INFINITY
+                var maxRight = Float.NEGATIVE_INFINITY
+
+                for (idx in segStart until segEnd) {
+                    val cLeft = layoutResult.getBoundingBox(idx).left
+                    val cRight = layoutResult.getBoundingBox(idx).right
+                    val boxLeft = minOf(cLeft, cRight)
+                    val boxRight = maxOf(cLeft, cRight)
+                    if (boxLeft < minLeft) minLeft = boxLeft
+                    if (boxRight > maxRight) maxRight = boxRight
+                }
+
+                if (!minLeft.isFinite() || !maxRight.isFinite() || maxRight <= minLeft) continue
+
+                val baseline = layoutResult.getLineBaseline(line)
+                val lineTop = layoutResult.getLineTop(line)
+                val lineBottom = layoutResult.getLineBottom(line)
+                val (lineAscent, lineDescent) = lineMetrics?.invoke(segStart, segEnd) ?: (ascentPx to descentPx)
+
+                val top = (baseline + lineAscent).coerceIn(lineTop, lineBottom)
+                val bottom = (baseline + lineDescent).coerceIn(top, lineBottom)
+                if (bottom <= top) continue
+
+                rects.add(
+                    HighlightRect(
+                        left = minLeft,
+                        top = top,
+                        right = maxRight,
+                        bottom = bottom,
+                        colorHex = "#000000"
+                    )
+                )
+            }
+        }
+        return rects
+    }
 }
 
 private fun parseHighlightHex(hex: String): Color? = try {
@@ -155,6 +227,31 @@ fun DrawScope.drawTextHighlights(
         val color = parseHighlightHex(r.colorHex) ?: continue
         drawRect(
             color = color,
+            topLeft = androidx.compose.ui.geometry.Offset(r.left, r.top),
+            size = androidx.compose.ui.geometry.Size(r.right - r.left, r.bottom - r.top)
+        )
+    }
+}
+
+fun DrawScope.drawTextSpoilers(
+    layoutResult: TextLayoutResult,
+    spans: List<Span>,
+    unlockedSpoilerIds: Set<String>,
+    ascentPx: Float,
+    descentPx: Float,
+    lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
+) {
+    val rects = HighlightLayoutCalculator.computeSpoilerRects(
+        layoutResult = layoutResult,
+        spans = spans,
+        unlockedSpoilerIds = unlockedSpoilerIds,
+        ascentPx = ascentPx,
+        descentPx = descentPx,
+        lineMetrics = lineMetrics
+    )
+    for (r in rects) {
+        drawRect(
+            color = Color.Black,
             topLeft = androidx.compose.ui.geometry.Offset(r.left, r.top),
             size = androidx.compose.ui.geometry.Size(r.right - r.left, r.bottom - r.top)
         )

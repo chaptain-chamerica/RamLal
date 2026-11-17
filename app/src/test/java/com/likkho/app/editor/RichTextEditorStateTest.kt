@@ -953,5 +953,111 @@ class RichTextEditorStateTest {
         assertTrue(reimported.spans.isEmpty())
         assertNull(reimported.selectedLinkUrl())
     }
+
+    @Test
+    fun textSpoiler_selectionOnly_locksDeleteAndCopy_garbageOnParagraphCopy_unlockAndHtmlRoundTrip() {
+        val editor = RichTextEditorState("Secret pin is 4321 ok")
+        val blockedCallbacks = mutableListOf<SpanStyle.Spoiler>()
+        editor.onLockedSpoilerBlocked = { blockedCallbacks.add(it) }
+
+        // 1. Collapsed cursor or blank passcode MUST NOT create a spoiler
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(14)))
+        assertFalse(editor.hasSelection)
+        assertFalse(editor.applySpoilerToRange("1234"))
+        assertTrue(editor.spans.isEmpty())
+
+        // 2. Select "4321" [14, 18) and apply spoiler with blank -> rejected; valid passcode -> applied & locked
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(14, 18)))
+        assertFalse(editor.applySpoilerToRange("   "))
+        assertTrue(editor.applySpoilerToRange("pass99"))
+        assertEquals(1, editor.spans.size)
+        val spoilerStyle = editor.spans.first().style as SpanStyle.Spoiler
+        assertFalse(editor.isSpoilerUnlocked(spoilerStyle))
+        assertEquals(spoilerStyle, editor.lockedSpoilerAtOffset(15))
+        assertNull(editor.lockedSpoilerAtOffset(10))
+
+        // 3. VisualTransformation hides locked spoiler text with Color.Transparent
+        val lockedVisual = RichTextVisualTransformation(
+            spans = editor.spans,
+            unlockedSpoilerIds = editor.unlockedSpoilerIds
+        ).filter(androidx.compose.ui.text.AnnotatedString(editor.text)).text
+        assertTrue(
+            lockedVisual.spanStyles.any {
+                it.start == 14 && it.end == 18 && it.item.color == androidx.compose.ui.graphics.Color.Transparent
+            }
+        )
+
+        // 4. Locked spoiler CANNOT be deleted (backspace, selection delete, blind middle edit, or divider replace)
+        editor.onTextFieldValueChange(TextFieldValue("Secret pin is 432 ok", TextRange(17)))
+        assertEquals("Secret pin is 4321 ok", editor.text)
+        assertEquals(1, blockedCallbacks.size)
+
+        editor.onTextFieldValueChange(TextFieldValue("Secret pin is  ok", TextRange(14)))
+        assertEquals("Secret pin is 4321 ok", editor.text)
+        assertEquals(2, blockedCallbacks.size)
+
+        editor.onTextFieldValueChange(TextFieldValue("Secret pin is 43X21 ok", TextRange(17)))
+        assertEquals("Secret pin is 4321 ok", editor.text)
+        assertEquals(3, blockedCallbacks.size)
+
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(12, 19)))
+        editor.insertDivider()
+        assertEquals("Secret pin is 4321 ok", editor.text)
+        assertEquals(4, blockedCallbacks.size)
+
+        // 5. Clipboard Copy:
+        //    - Only spoiler selected -> Blocked
+        val onlyCopy = editor.prepareClipboardCopy(TextRange(14, 18))
+        assertTrue(onlyCopy is RichTextEditorState.SpoilerCopyResult.Blocked)
+
+        //    - Full paragraph selected -> Masked with normal text intact and garbage chars replacing "4321"
+        val paraCopy = editor.prepareClipboardCopy(TextRange(0, editor.text.length))
+        assertTrue(paraCopy is RichTextEditorState.SpoilerCopyResult.Masked)
+        val maskedText = (paraCopy as RichTextEditorState.SpoilerCopyResult.Masked).text
+        assertTrue(maskedText.startsWith("Secret pin is "))
+        assertTrue(maskedText.endsWith(" ok"))
+        assertFalse(maskedText.contains("4321"))
+        val replacedPart = maskedText.substring(14, 18)
+        assertEquals(4, replacedPart.length)
+        assertTrue(replacedPart.all { it in RichTextEditorState.SPOILER_GARBAGE_CHARS })
+
+        // Preview also masks the secret
+        val preview = editor.maskedPlainPreview(140)
+        assertFalse(preview.contains("4321"))
+
+        // 6. HTML round-trip preserves locked Spoiler span
+        val html = editor.toHtml()
+        assertTrue(html.contains("data-spoiler="))
+        val reimported = RichTextEditorState.fromHtml(html)
+        assertEquals(editor.text, reimported.text)
+        assertEquals(editor.spans, reimported.spans)
+
+        // 7. Wrong passcode fails; correct passcode unlocks -> reveals text, allows plain copy, deletion & removal
+        assertFalse(reimported.unlockSpoiler(spoilerStyle.id, "wrong"))
+        assertFalse(reimported.isSpoilerUnlocked(spoilerStyle))
+        assertTrue(reimported.unlockSpoiler(spoilerStyle.id, "pass99"))
+        assertTrue(reimported.isSpoilerUnlocked(spoilerStyle))
+
+        val unlockedVisual = RichTextVisualTransformation(
+            spans = reimported.spans,
+            unlockedSpoilerIds = reimported.unlockedSpoilerIds
+        ).filter(androidx.compose.ui.text.AnnotatedString(reimported.text)).text
+        assertFalse(
+            unlockedVisual.spanStyles.any {
+                it.start == 14 && it.end == 18 && it.item.color == androidx.compose.ui.graphics.Color.Transparent
+            }
+        )
+
+        val unlockedCopy = reimported.prepareClipboardCopy(TextRange(14, 18))
+        assertEquals(RichTextEditorState.SpoilerCopyResult.AllowPlain("4321"), unlockedCopy)
+
+        // Re-lock works, then unlock again and remove spoiler cleanly
+        reimported.lockSpoiler(spoilerStyle.id)
+        assertFalse(reimported.isSpoilerUnlocked(spoilerStyle))
+        assertFalse(reimported.removeSpoilerFromRange(TextRange(14, 18)))
+        assertTrue(reimported.unlockSpoiler(spoilerStyle.id, "pass99"))
+        assertTrue(reimported.removeSpoilerFromRange(TextRange(14, 18)))
+        assertTrue(reimported.spans.isEmpty())
+    }
 }
 

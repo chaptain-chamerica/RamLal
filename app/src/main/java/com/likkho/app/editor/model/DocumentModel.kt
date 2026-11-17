@@ -118,6 +118,16 @@ sealed interface SpanStyle {
     }
 
     @Serializable
+    @SerialName("spoiler")
+    data class Spoiler(
+        val passcodeHash: String,
+        val id: String = generateBlockId()
+    ) : SpanStyle {
+        override val styleKey: String = "spoiler"
+        override val valueString: String get() = "$id:$passcodeHash"
+    }
+
+    @Serializable
     @SerialName("heading")
     data class Heading(val level: Int) : SpanStyle {
         init {
@@ -199,6 +209,15 @@ sealed interface SpanStyle {
             "sizepx" -> SizePx(record.value?.toFloatOrNull() ?: 16f)
             "fontid" -> FontId(record.value ?: "default")
             "link" -> Link(record.value ?: "")
+            "spoiler" -> {
+                val raw = record.value.orEmpty()
+                val sep = raw.indexOf(':')
+                if (sep > 0) {
+                    Spoiler(passcodeHash = raw.substring(sep + 1), id = raw.substring(0, sep))
+                } else {
+                    Spoiler(passcodeHash = raw)
+                }
+            }
             "heading" -> Heading(record.value?.toIntOrNull()?.coerceIn(1, 3) ?: 1)
             "quote" -> Quote
             "code" -> Code

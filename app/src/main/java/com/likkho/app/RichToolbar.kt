@@ -50,8 +50,14 @@ fun RichToolbar(
     var pop by remember { mutableStateOf(Pop.NONE) }
     var link by remember { mutableStateOf("") }
     var pendingLinkRange by remember { mutableStateOf<androidx.compose.ui.text.TextRange?>(null) }
+    var pendingSpoilerRange by remember { mutableStateOf<androidx.compose.ui.text.TextRange?>(null) }
+    var spoilerError by remember { mutableStateOf<String?>(null) }
     fun toggle(p: Pop) {
         if (p != Pop.LINK) pendingLinkRange = null
+        if (p != Pop.SPOILER) {
+            pendingSpoilerRange = null
+            spoilerError = null
+        }
         pop = if (pop == p) Pop.NONE else p
     }
     val active = remember { mutableStateMapOf<FormatAction, Boolean>() }
@@ -260,7 +266,123 @@ fun RichToolbar(
                     )
                 }
             }
-            Pop.SPOILER -> Pop1 { PopInput(spoiler, { spoiler = it }, "Set Spoiler Passcode...", "Blur", KeyboardType.Text, pw = true) { onSpoiler(spoiler); spoiler = ""; pop = Pop.NONE } }
+            Pop.SPOILER -> Pop1 {
+                val targetRange = pendingSpoilerRange ?: editorState?.selection
+                val existingSpoiler = if (targetRange != null) editorState?.spoilerInRange(targetRange) else null
+                val isUnlocked = existingSpoiler != null && editorState?.isSpoilerUnlocked(existingSpoiler) == true
+                val selectedSnippet = if (editorState != null && targetRange != null && targetRange.min < targetRange.max) {
+                    val s = targetRange.min.coerceIn(0, editorState.text.length)
+                    val e = targetRange.max.coerceIn(s, editorState.text.length)
+                    editorState.text.substring(s, e).replace('\n', ' ').trim().take(32)
+                } else {
+                    ""
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when {
+                            existingSpoiler != null && !isUnlocked -> "Locked Spoiler"
+                            existingSpoiler != null && isUnlocked -> "Spoiler Unlocked"
+                            else -> "Add Text Spoiler"
+                        },
+                        style = sansStyle(11.sp, w.muted, FontWeight.SemiBold),
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (selectedSnippet.isNotEmpty() && (existingSpoiler == null || isUnlocked)) {
+                        Text("\"$selectedSnippet\"", style = monoStyle(10.sp, w.accent), maxLines = 1)
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                when {
+                    existingSpoiler != null && !isUnlocked -> {
+                        fun attemptUnlock() {
+                            val ok = editorState?.unlockSpoiler(existingSpoiler.id, spoiler) == true
+                            if (ok) {
+                                spoiler = ""
+                                spoilerError = null
+                            } else {
+                                spoilerError = "Incorrect spoiler passcode."
+                            }
+                        }
+                        PopInput(
+                            spoiler,
+                            { spoiler = it; spoilerError = null },
+                            "Enter Spoiler Passcode to Reveal...",
+                            "Unlock",
+                            KeyboardType.Text,
+                            pw = true
+                        ) { attemptUnlock() }
+                    }
+                    existingSpoiler != null && isUnlocked && targetRange != null -> {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            WikiButton(
+                                "Re-lock",
+                                {
+                                    editorState?.lockSpoiler(existingSpoiler.id)
+                                    spoiler = ""
+                                    spoilerError = null
+                                    pendingSpoilerRange = null
+                                    pop = Pop.NONE
+                                },
+                                Modifier.weight(1f),
+                                icon = Icons.Outlined.VisibilityOff,
+                                height = 32.dp,
+                                fontSize = 11
+                            )
+                            WikiButton(
+                                "Remove Spoiler",
+                                {
+                                    editorState?.removeSpoilerFromRange(targetRange)
+                                    spoiler = ""
+                                    spoilerError = null
+                                    pendingSpoilerRange = null
+                                    pop = Pop.NONE
+                                },
+                                Modifier.weight(1f),
+                                kind = BtnKind.DANGER,
+                                icon = Icons.Outlined.Delete,
+                                height = 32.dp,
+                                fontSize = 11
+                            )
+                        }
+                    }
+                    else -> {
+                        fun submitSpoiler() {
+                            val trimmed = spoiler.trim()
+                            if (trimmed.isEmpty()) {
+                                spoilerError = "Enter a passcode to hide this text."
+                                return
+                            }
+                            if (editorState != null && targetRange != null) {
+                                if (editorState.applySpoilerToRange(trimmed, targetRange)) {
+                                    hooks.applySpoiler(trimmed)
+                                    spoiler = ""
+                                    spoilerError = null
+                                    pendingSpoilerRange = null
+                                    pop = Pop.NONE
+                                } else {
+                                    spoilerError = "Could not apply spoiler."
+                                }
+                            } else {
+                                onSpoiler(trimmed)
+                                spoiler = ""
+                                spoilerError = null
+                                pop = Pop.NONE
+                            }
+                        }
+                        PopInput(
+                            spoiler,
+                            { spoiler = it; spoilerError = null },
+                            "Set Spoiler Passcode...",
+                            "Hide",
+                            KeyboardType.Text,
+                            pw = true
+                        ) { submitSpoiler() }
+                    }
+                }
+                spoilerError?.let { err ->
+                    Text(err, style = sansStyle(11.sp, w.danger, FontWeight.Medium), modifier = Modifier.padding(top = 6.dp))
+                }
+            }
             Pop.LOCK -> Pop1 {
                 PopInput(lock, { lock = it }, if (lockPin != null) "Change Diary Lock Passcode..." else "Set Diary Lock Passcode...", if (lockPin != null) "Update" else "Lock Diary", KeyboardType.Text, pw = true) { if (lock.isNotBlank()) { onLock(lock.trim()); lock = ""; pop = Pop.NONE } }
                 if (lockPin != null) WikiButton("Remove Lock", { onLock(null); pop = Pop.NONE }, Modifier.padding(top = 6.dp), icon = Icons.Outlined.LockOpen, height = 32.dp, fontSize = 11)
@@ -460,6 +582,8 @@ fun RichToolbar(
             // Group 8: Research, Security & Tools
             val linkToolOn = pop == Pop.LINK || editorState?.hasLinkOnSelection == true
             ToolGlyph(Icons.Outlined.Link, "WebLink (Selected Text)", on = linkToolOn) {
+                pendingSpoilerRange = null
+                spoilerError = null
                 if (editorState == null) {
                     toggle(Pop.LINK)
                 } else if (pop == Pop.LINK) {
@@ -479,7 +603,30 @@ fun RichToolbar(
                     pop = Pop.LINK
                 }
             }
-            ToolGlyph(Icons.Outlined.VisibilityOff, "Spoiler", on = pop == Pop.SPOILER) { toggle(Pop.SPOILER) }
+            val spoilerToolOn = pop == Pop.SPOILER || editorState?.hasSpoilerOnSelection == true
+            ToolGlyph(Icons.Outlined.VisibilityOff, "Text Spoiler (Selected Text)", on = spoilerToolOn) {
+                pendingLinkRange = null
+                if (editorState == null) {
+                    toggle(Pop.SPOILER)
+                } else if (pop == Pop.SPOILER) {
+                    pendingSpoilerRange = null
+                    spoilerError = null
+                    pop = Pop.NONE
+                } else if (!editorState.hasSelection) {
+                    scope.launch {
+                        hint = "Select text first to add a spoiler."
+                        kotlinx.coroutines.delay(2200)
+                        hint = null
+                    }
+                } else {
+                    val sel = editorState.selection
+                    val range = androidx.compose.ui.text.TextRange(sel.min, sel.max)
+                    pendingSpoilerRange = range
+                    spoiler = ""
+                    spoilerError = null
+                    pop = Pop.SPOILER
+                }
+            }
             ToolGlyph(if (lockPin != null) Icons.Outlined.Lock else Icons.Outlined.LockOpen, if (lockPin != null) "Diary Locked" else "Lock This Diary Entry", on = pop == Pop.LOCK || lockPin != null) { toggle(Pop.LOCK) }
             ToolGlyph(Icons.Outlined.Public, "Wikipedia (English & Hindi)", on = pop == Pop.WIKI) { toggle(Pop.WIKI) }
             ToolGlyph(Icons.Outlined.Spellcheck, "Word Analysis", on = pop == Pop.WORD) { toggle(Pop.WORD) }
