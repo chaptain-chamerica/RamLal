@@ -191,7 +191,9 @@ class BackupEngine(
                         val existingDecoded = diaryRepo.loadDiary(restoredRecord.id, vaultDek)
                         val existingRecord = existingDecoded.record
 
-                        if (restoredRecord.updatedAt > existingRecord.updatedAt) {
+                        if (restoredRecord == existingRecord) {
+                            // Identical record already present locally
+                        } else if (restoredRecord.updatedAt > existingRecord.updatedAt) {
                             val copyId = "${existingRecord.id}_copy_${existingRecord.updatedAt}"
                             val localCopy = existingRecord.copy(
                                 id = copyId,
@@ -199,6 +201,7 @@ class BackupEngine(
                             )
                             diaryRepo.saveDiary(localCopy, vaultDek)
                             diaryRepo.saveDiary(restoredRecord, vaultDek)
+                            conflictCopies++
                         } else {
                             val copyId = "${restoredRecord.id}_copy_${restoredRecord.updatedAt}"
                             val restoredCopy = restoredRecord.copy(
@@ -206,8 +209,8 @@ class BackupEngine(
                                 heading = "${restoredRecord.heading} (Restored Copy)"
                             )
                             diaryRepo.saveDiary(restoredCopy, vaultDek)
+                            conflictCopies++
                         }
-                        conflictCopies++
                     } catch (e: Exception) {
                         diaryRepo.saveDiary(restoredRecord, vaultDek)
                         restoredDiaries++
@@ -240,6 +243,8 @@ class BackupEngine(
             )
         } catch (e: Exception) {
             if (snapshotDir.exists() && snapshotDir.listFiles()?.isNotEmpty() == true) {
+                diaryRepo.vaultDir.deleteRecursively()
+                diaryRepo.vaultDir.mkdirs()
                 snapshotDir.copyRecursively(diaryRepo.vaultDir, overwrite = true)
             }
             throw e
@@ -267,6 +272,7 @@ class BackupEngine(
         targetDiary.background?.mediaId?.let { deletedMediaIds.add(it) }
         targetDiary.images.forEach { deletedMediaIds.add(it.mediaId) }
         targetDiary.audios.forEach { deletedMediaIds.add(it.mediaId) }
+        targetDiary.videos.forEach { deletedMediaIds.add(it.mediaId) }
 
         val remainingDiaries = bundle.diaries.filter { it.id != diaryIdToDelete }
         val remainingMediaIds = mutableSetOf<String>()
@@ -275,6 +281,7 @@ class BackupEngine(
             d.background?.mediaId?.let { remainingMediaIds.add(it) }
             d.images.forEach { remainingMediaIds.add(it.mediaId) }
             d.audios.forEach { remainingMediaIds.add(it.mediaId) }
+            d.videos.forEach { remainingMediaIds.add(it.mediaId) }
         }
 
         val remainingMediaList = bundle.mediaList.filter { (mId, _) ->

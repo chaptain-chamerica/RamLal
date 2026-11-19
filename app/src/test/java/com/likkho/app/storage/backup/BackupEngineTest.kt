@@ -293,4 +293,29 @@ class BackupEngineTest {
         assertTrue(mediaRepo2.exists(shareMediaId))
         assertArrayEquals(mediaBytes, mediaRepo2.readDecryptedBytes(shareMediaId, targetVaultDek))
     }
+
+    @Test
+    fun restoreBackup_mergesWithExistingLocalDiariesInsteadOfReplacing() {
+        val backupDiaryOnly = DiaryRecord(id = "d_from_backup", heading = "From Backup", updatedAt = 1000L)
+        val sharedOld = DiaryRecord(id = "d_shared", heading = "Backup Shared", updatedAt = 1500L)
+        diaryRepo.saveDiary(backupDiaryOnly, vaultDek)
+        diaryRepo.saveDiary(sharedOld, vaultDek)
+
+        val backupFile = File(baseDir, "merge_test.lkb")
+        backupEngine.createBackup(backupFile, testPassphrase, diaryRepo, mediaRepo, vaultDek, fastIterations)
+
+        // Mutate live vault: remove d_from_backup, update d_shared to newer timestamp, add local-only diary
+        diaryRepo.deleteDiary("d_from_backup", vaultDek)
+        diaryRepo.saveDiary(sharedOld.copy(heading = "Local Newer Shared", updatedAt = 3000L), vaultDek)
+        diaryRepo.saveDiary(DiaryRecord(id = "d_local_only", heading = "Local Only", updatedAt = 2500L), vaultDek)
+
+        backupEngine.restoreBackup(backupFile, testPassphrase, diaryRepo, mediaRepo, vaultDek)
+
+        val ids = diaryRepo.listDiaries(vaultDek).map { it.id }.toSet()
+        assertTrue("Local-only diary must NOT be replaced during restore", ids.contains("d_local_only"))
+        assertTrue("Backup-only diary must be added", ids.contains("d_from_backup"))
+        assertTrue("Newer local shared diary must keep original id", ids.contains("d_shared"))
+        assertTrue("Older backup shared diary must be kept as conflict copy", ids.any { it.startsWith("d_shared_copy_") })
+        assertEquals("Local Newer Shared", diaryRepo.loadDiary("d_shared", vaultDek).record.heading)
+    }
 }

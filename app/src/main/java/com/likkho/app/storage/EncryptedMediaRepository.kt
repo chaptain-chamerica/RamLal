@@ -7,6 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.FilterOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -73,6 +74,15 @@ class EncryptedMediaRepository(
         inputStream: InputStream,
         dek: ByteArray,
         estimatedSizeBytes: Long = 0L
+    ): String = importMediaInternal(mediaId, inputStream, dek, estimatedSizeBytes, afterEncryptHook = null)
+
+    @Synchronized
+    internal fun importMediaInternal(
+        mediaId: String,
+        inputStream: InputStream,
+        dek: ByteArray,
+        estimatedSizeBytes: Long = 0L,
+        afterEncryptHook: ((File) -> Unit)? = null
     ): String {
         ensureDirs()
 
@@ -94,35 +104,51 @@ class EncryptedMediaRepository(
         val streamingAead = createStreamingAead(dek)
         val aad = buildAad(mediaId, vaultId)
 
-        // 2. Encrypt stream directly to .tmp file
-        FileOutputStream(tmpFile).use { fos ->
-            val encryptingStream: OutputStream = streamingAead.newEncryptingStream(fos, aad)
-            try {
+        // 2. Encrypt stream directly to .tmp file; on failure delete .tmp and do NOT finalize stream
+        try {
+            FileOutputStream(tmpFile).use { fos ->
+                val nonClosingOut = object : FilterOutputStream(fos) {
+                    override fun write(b: Int) = fos.write(b)
+                    override fun write(b: ByteArray, off: Int, len: Int) = fos.write(b, off, len)
+                    override fun flush() = fos.flush()
+                    override fun close() = fos.flush()
+                }
+                val encryptingStream: OutputStream = streamingAead.newEncryptingStream(nonClosingOut, aad)
                 val buffer = ByteArray(8192)
                 var bytesRead: Int
                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                     encryptingStream.write(buffer, 0, bytesRead)
                 }
-            } finally {
-                encryptingStream.flush()
+                // Fsync open FileChannel before closing encrypting stream, then finalize & fsync FD before fos closes
+                fos.flush()
+                if (fos.channel.isOpen) {
+                    fos.channel.force(true)
+                }
                 encryptingStream.close()
-            }
-            try {
+                fos.flush()
+                if (fos.channel.isOpen) {
+                    fos.channel.force(true)
+                }
                 if (fos.fd.valid()) {
                     fos.fd.sync()
                 }
-            } catch (e: Exception) {
-                // Already closed by encryptingStream or virtual FS
             }
+        } catch (e: Exception) {
+            tmpFile.delete()
+            throw e
         }
 
-        // 3. Verify read-back by opening decrypting stream and reading first chunk
+        afterEncryptHook?.invoke(tmpFile)
+
+        // 3. Verify read-back by draining the ENTIRE decrypting stream to EOF
         try {
             FileInputStream(tmpFile).use { fis ->
-                val decryptingStream = streamingAead.newDecryptingStream(fis, aad)
-                val testBuffer = ByteArray(1024)
-                decryptingStream.read(testBuffer)
-                decryptingStream.close()
+                streamingAead.newDecryptingStream(fis, aad).use { decryptingStream ->
+                    val verifyBuffer = ByteArray(8192)
+                    while (decryptingStream.read(verifyBuffer) != -1) {
+                        // Drain all segments and verify every GCM tag to EOF
+                    }
+                }
             }
         } catch (e: Exception) {
             tmpFile.delete()
@@ -138,6 +164,7 @@ class EncryptedMediaRepository(
             tmpFile.delete()
             throw IOException("Failed to rename temporary media file to ${targetFile.name}")
         }
+        SafeStorageWriter.fsyncDirectory(mediaDir)
 
         return mediaId
     }
@@ -277,13 +304,25 @@ class EncryptedMediaRepository(
      * Cleans up orphaned media per STORAGE_SPEC Section 6:
      * - Media files not referenced in any diary AND older than 24 hours are removed.
      * - Newly imported media (< 24 hours old) are kept to prevent race conditions during import.
+     * - If undecodable or quarantined diaries exist, media deletion is skipped to preserve their attachments.
      */
     @Synchronized
     fun cleanupOrphans(
         referencedMediaIds: Set<String>,
+        hasUndecodableOrQuarantined: Boolean = false,
         olderThanMs: Long = ORPHAN_AGE_THRESHOLD_MS
     ): Int {
         if (!mediaDir.exists()) return 0
+
+        // Always clean abandoned .tmp files
+        val tmpFiles = mediaDir.listFiles { f -> f.name.endsWith(".tmp") } ?: emptyArray()
+        for (tmp in tmpFiles) {
+            tmp.delete()
+        }
+
+        if (hasUndecodableOrQuarantined) {
+            return 0
+        }
 
         val files = mediaDir.listFiles { f -> f.name.endsWith(".$MEDIA_EXTENSION") } ?: emptyArray()
         val now = clockProvider.wallClockMs()
@@ -299,12 +338,6 @@ class EncryptedMediaRepository(
                     }
                 }
             }
-        }
-
-        // Also clean any abandoned .tmp files
-        val tmpFiles = mediaDir.listFiles { f -> f.name.endsWith(".tmp") } ?: emptyArray()
-        for (tmp in tmpFiles) {
-            tmp.delete()
         }
 
         return deletedCount

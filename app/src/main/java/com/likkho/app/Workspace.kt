@@ -122,6 +122,12 @@ fun WorkspaceScreen(vm: AppViewModel) {
     var spoilerUnlockPrompt by remember { mutableStateOf<SpanStyle.Spoiler?>(null) }
     var recording by remember { mutableStateOf(false) }
 
+    val initialMediaIds = remember(initial?.id) {
+        collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
+    }
+    var lastSavedMediaIds by remember(initial?.id) { mutableStateOf(initialMediaIds) }
+    val sessionImportedMediaIds = remember(initial?.id) { mutableStateListOf<String>() }
+
     DisposableEffect(editorState) {
         editorState.onLockedSpoilerBlocked = { blocked ->
             vm.showStatus("Enter spoiler passcode to edit, delete, or copy.")
@@ -148,6 +154,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 val (sx, sy) = currentSpawnCoords()
                 val imported = vm.importImageUri(uri, sx, sy)
                 if (imported != null) {
+                    sessionImportedMediaIds.add(imported.id)
                     images = images + imported
                     selImg = imported.id
                     selAud = null
@@ -164,6 +171,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 val (sx, sy) = currentSpawnCoords()
                 val imported = vm.importVideoUri(uri, sx, sy)
                 if (imported != null) {
+                    sessionImportedMediaIds.add(imported.id)
                     videos = videos + imported
                     selVid = imported.id
                     selImg = null
@@ -180,6 +188,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 val (sx, sy) = currentSpawnCoords()
                 val imported = vm.importAudioUri(uri, sx, sy)
                 if (imported != null) {
+                    sessionImportedMediaIds.add(imported.audioUri ?: imported.id)
                     audios = audios + imported
                     selAud = imported.id
                     selImg = null
@@ -195,6 +204,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
             scope.launch {
                 val mediaId = vm.importMediaUri(uri)
                 if (mediaId != null) {
+                    sessionImportedMediaIds.add(mediaId)
                     bgSrc = mediaId
                 } else {
                     vm.showStatus("Could not import background image.")
@@ -222,14 +232,39 @@ fun WorkspaceScreen(vm: AppViewModel) {
             audioAttachments = audios,
             videoAttachments = videos
         )
-        vm.upsertLog(log, false)
-        hooks.scheduleReminder(log, reminderAt)
-        if (showFeedback) {
-            saved = true
-            scope.launch { delay(1500); saved = false }
+        val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
+        val obsoleteMediaIds = (lastSavedMediaIds + sessionImportedMediaIds) - currentMediaIds
+        vm.upsertLog(log, false, obsoleteMediaIds) { persistResult ->
+            persistResult.onSuccess {
+                lastSavedMediaIds = currentMediaIds
+                sessionImportedMediaIds.clear()
+                hooks.scheduleReminder(log, reminderAt) { remRes ->
+                    remRes.onFailure { err ->
+                        scope.launch {
+                            vm.showStatus("Reminder update failed: ${err.message ?: "Storage error"}", 4000)
+                        }
+                    }
+                }
+                if (showFeedback) {
+                    saved = true
+                    scope.launch { delay(1500); saved = false }
+                }
+            }.onFailure {
+                saved = false
+            }
         }
     }
-    BackHandler { if (selImg != null || selAud != null || selVid != null) { selImg = null; selAud = null; selVid = null } else vm.navigateTo(Route.HOME) }
+
+    fun exitWorkspace() {
+        val discardedMediaIds = sessionImportedMediaIds.toSet() - lastSavedMediaIds
+        if (discardedMediaIds.isNotEmpty()) {
+            vm.cleanupUnusedSessionMedia(discardedMediaIds)
+        }
+        sessionImportedMediaIds.clear()
+        vm.navigateTo(Route.HOME)
+    }
+
+    BackHandler { if (selImg != null || selAud != null || selVid != null) { selImg = null; selAud = null; selVid = null } else exitWorkspace() }
 
     Column(
         Modifier
@@ -243,7 +278,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 IconBtn(
                     Icons.AutoMirrored.Outlined.ArrowBack,
                     "Back to Homepage",
-                    { vm.navigateTo(Route.HOME) },
+                    { exitWorkspace() },
                     size = 48.dp,
                     bordered = false,
                     bg = Color.Transparent
@@ -1001,7 +1036,14 @@ fun WorkspaceScreen(vm: AppViewModel) {
             vm = vm, lockPin = lockPin, bgSrc = bgSrc, bgOpacity = bgOpacity, recording = recording,
             onRecordToggle = {
                 if (!recording) { hooks.startVoiceRecording(); recording = true }
-                else { recording = false; hooks.stopVoiceRecording()?.let { audios = audios + it; vm.showStatus("Voice recording saved to diary.") } }
+                else {
+                    recording = false
+                    hooks.stopVoiceRecording()?.let {
+                        sessionImportedMediaIds.add(it.audioUri ?: it.id)
+                        audios = audios + it
+                        vm.showStatus("Voice recording saved to diary.")
+                    }
+                }
             },
             onAddImage = { imagePickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
             onAddVideo = { videoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) },
@@ -1037,7 +1079,14 @@ fun WorkspaceScreen(vm: AppViewModel) {
         current = pfp,
         hooks = hooks,
         onClose = { showPfp = false },
-        onImportPhotoUri = { uri -> vm.importMediaUri(uri) },
+        onImportPhotoUri = { uri ->
+            importPfpForSession(
+                uri = uri,
+                importPhoto = { vm.importMediaUri(it) },
+                sessionImportedMediaIds = sessionImportedMediaIds,
+                onFailure = { vm.showStatus("Could not import PFP image.") }
+            )
+        },
         onSave = { pfp = it }
     )
     imgStudio?.let { id ->
@@ -1116,6 +1165,43 @@ fun WorkspaceScreen(vm: AppViewModel) {
             }
         }
     }
+}
+
+internal fun collectCanvasMediaIds(
+    pfp: Pfp?,
+    bgSrc: String?,
+    images: List<CanvasImage>,
+    audios: List<CanvasAudio>,
+    videos: List<CanvasVideo>
+): Set<String> {
+    val ids = mutableSetOf<String>()
+    pfp?.source?.takeIf { it.isNotBlank() }?.let { ids.add(it) }
+    bgSrc?.takeIf { it.isNotBlank() }?.let { ids.add(it) }
+    images.forEach { im ->
+        (im.source.takeIf { it.isNotBlank() } ?: im.id.takeIf { it.isNotBlank() })?.let { ids.add(it) }
+    }
+    audios.forEach { a ->
+        (a.audioUri?.takeIf { it.isNotBlank() } ?: a.id.takeIf { it.isNotBlank() })?.let { ids.add(it) }
+    }
+    videos.forEach { v ->
+        (v.source.takeIf { it.isNotBlank() } ?: v.id.takeIf { it.isNotBlank() })?.let { ids.add(it) }
+    }
+    return ids
+}
+
+internal suspend fun <T> importPfpForSession(
+    uri: T,
+    importPhoto: suspend (T) -> String?,
+    sessionImportedMediaIds: MutableCollection<String>,
+    onFailure: () -> Unit = {}
+): String? {
+    val imported = importPhoto(uri)
+    if (imported != null) {
+        sessionImportedMediaIds.add(imported)
+    } else {
+        onFailure()
+    }
+    return imported
 }
 
 @Composable

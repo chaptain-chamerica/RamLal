@@ -26,7 +26,7 @@ class VaultManagerTest {
     private val testDispatcher = UnconfinedTestDispatcher()
     private val fakeClock = object : ClockProvider {
         var elapsed: Long = 10_000L
-        var wall: Long = 1_000_000L
+        var wall: Long = 100_000_000_000L
         override fun elapsedRealtimeMs(): Long = elapsed
         override fun wallClockMs(): Long = wall
     }
@@ -178,5 +178,67 @@ class VaultManagerTest {
         assertFalse(File(baseDir, "v2").exists())
         assertFalse(File(baseDir, WrongPinCounter.FILE_NAME).exists())
         assertFalse(File(baseDir, PinLengthsRegistry.FILE_NAME).exists())
+    }
+
+    @Test
+    fun startupAndAllUnlockPaths_runScanAndRecover_andOrphanCleanup() = runTest(testDispatcher) {
+        // 1. Initialize Primary vault cleanly and add a stale .tmp + old unreferenced orphan media
+        vaultManager.ensurePrimaryVaultInitialized()
+        assertNotNull(vaultManager.lastRecoveryReport)
+        vaultManager.withActiveDek { dek ->
+            val mediaRepo = vaultManager.primaryMediaRepo
+            mediaRepo.importMediaBytes("orphan_old_1", "old orphan".toByteArray(), dek)
+            mediaRepo.getMediaFile("orphan_old_1").setLastModified(fakeClock.wall - (25L * 60 * 60 * 1000))
+        }
+        vaultManager.lock()
+
+        // Create dangling .tmp before unlockNoPasscode
+        vaultManager.primaryDiaryRepo.ensureDirs()
+        val tmp1 = File(vaultManager.primaryDiaryRepo.diariesDir, "stale1.lkd.tmp")
+        tmp1.writeBytes(byteArrayOf(1, 2, 3))
+
+        // 2. unlockNoPasscode runs scanAndRecover + cleanupOrphanMedia
+        val resNoPin = vaultManager.unlockNoPasscode()
+        assertTrue(resNoPin is UnlockResult.Success)
+        assertFalse("unlockNoPasscode must clean .tmp", tmp1.exists())
+        assertFalse("unlockNoPasscode must clean old orphan media after recovery", vaultManager.primaryMediaRepo.exists("orphan_old_1"))
+        assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
+
+        // 3. Set PIN, lock, create .tmp, and verify unlockWithPin (Primary) runs scanAndRecover
+        val pin = "1234".toCharArray()
+        vaultManager.setPrimaryPasscode(pin)
+        vaultManager.lock()
+        val tmp2 = File(vaultManager.primaryDiaryRepo.diariesDir, "stale2.lkd.tmp")
+        tmp2.writeBytes(byteArrayOf(4, 5, 6))
+
+        val resPin = vaultManager.unlockWithPin(pin)
+        assertTrue(resPin is UnlockResult.Success)
+        assertFalse("unlockWithPin (Primary) must clean .tmp", tmp2.exists())
+        assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
+        vaultManager.lock()
+
+        // 4. Enable biometric, create .tmp, verify unlockWithBiometric runs scanAndRecover
+        vaultManager.enableBiometric(pin)
+        val tmp3 = File(vaultManager.primaryDiaryRepo.diariesDir, "stale3.lkd.tmp")
+        tmp3.writeBytes(byteArrayOf(7, 8, 9))
+
+        val resBio = vaultManager.unlockWithBiometric()
+        assertTrue(resBio is UnlockResult.Success)
+        assertFalse("unlockWithBiometric must clean .tmp", tmp3.exists())
+        assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
+        vaultManager.lock()
+
+        // 5. Setup Decoy vault, create .tmp in decoy dir, verify unlockWithPin (Decoy) runs scanAndRecover
+        val decoyPin = "5678".toCharArray()
+        vaultManager.setDecoyPasscode(decoyPin, pin)
+        vaultManager.decoyDiaryRepo.ensureDirs()
+        val tmpDecoy = File(vaultManager.decoyDiaryRepo.diariesDir, "stale_decoy.lkd.tmp")
+        tmpDecoy.writeBytes(byteArrayOf(10, 11))
+
+        val resDecoy = vaultManager.unlockWithPin(decoyPin)
+        assertTrue(resDecoy is UnlockResult.Success)
+        assertEquals(VaultId.DECOY, (resDecoy as UnlockResult.Success).vaultId)
+        assertFalse("unlockWithPin (Decoy) must clean .tmp", tmpDecoy.exists())
+        assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
     }
 }

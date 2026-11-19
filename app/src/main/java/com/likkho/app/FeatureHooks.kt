@@ -24,7 +24,11 @@ sealed class UpdateCheck {
 }
 
 data class BackupResult(val failedMediaCount: Int = 0)
-data class RestoreResult(val logs: List<DiaryLog>, val skippedMediaCount: Int = 0)
+data class RestoreResult(
+    val logs: List<DiaryLog>,
+    val skippedMediaCount: Int = 0,
+    val failedDiaries: List<com.likkho.app.storage.FailedDiaryEntry> = emptyList()
+)
 
 interface FeatureHooks {
     // ---- App update (GitHub releases) ----
@@ -54,8 +58,14 @@ interface FeatureHooks {
     suspend fun deleteFromBackup(log: DiaryLog)
 
     // ---- Workspace / canvas ----
-    fun persistLogs(logs: List<DiaryLog>)
-    fun scheduleReminder(log: DiaryLog, at: Long?)
+    fun persistLogs(
+        logs: List<DiaryLog>,
+        obsoleteMediaIds: Set<String> = emptySet(),
+        onResult: (Result<Unit>) -> Unit = {}
+    )
+    fun deleteDiary(id: String, onResult: (Result<Unit>) -> Unit = {})
+    fun deleteUnreferencedMedia(candidateIds: Set<String>, onResult: (Result<Unit>) -> Unit = {})
+    fun scheduleReminder(log: DiaryLog, at: Long?, onResult: (Result<Unit>) -> Unit = {})
     suspend fun pickImage(): CanvasImage?                      // media picker "Add Image"
     suspend fun pickAudio(): CanvasAudio?                      // media picker "Attach Audio"
     suspend fun pickPfpImage(): String?                        // "Browse Image" in PFP studio

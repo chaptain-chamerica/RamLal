@@ -59,7 +59,7 @@ class RealFeatureHooksTest {
     }
 
     @Test
-    fun persistLogs_savesAndDeletesGranularly() = runTest(testDispatcher) {
+    fun persistLogs_neverImplicitlyDeletes_andExplicitDeleteDiaryDeletes() = runTest(testDispatcher) {
         vaultManager.ensurePrimaryVaultInitialized()
         assertTrue(vaultManager.isUnlocked)
 
@@ -80,20 +80,64 @@ class RealFeatureHooksTest {
         hooks.persistLogs(listOf(log1, log2))
 
         val loaded = vaultManager.withActiveDek { dek ->
-            vaultManager.activeDiaryRepository().loadAllDiaries(dek).map { it.toDiaryLog() }
+            vaultManager.activeDiaryRepository().loadAllDiaries(dek).diaries.map { it.toDiaryLog() }
         }
         assertEquals(2, loaded.size)
         assertTrue(loaded.any { it.id == "d1" && it.heading == "My First Diary" && it.pinned })
         assertTrue(loaded.any { it.id == "d2" && it.heading == "Second Diary" })
 
-        // Delete log2 by persisting only log1
+        // Calling persistLogs with only log1 must NOT implicitly delete log2
         hooks.persistLogs(listOf(log1))
 
+        val afterSubsetPersist = vaultManager.withActiveDek { dek ->
+            vaultManager.activeDiaryRepository().loadAllDiaries(dek).diaries.map { it.toDiaryLog() }
+        }
+        assertEquals("persistLogs must never delete omitted diaries", 2, afterSubsetPersist.size)
+
+        // Explicit deleteDiary(id) removes d2
+        hooks.deleteDiary("d2")
+
         val afterDelete = vaultManager.withActiveDek { dek ->
-            vaultManager.activeDiaryRepository().loadAllDiaries(dek).map { it.toDiaryLog() }
+            vaultManager.activeDiaryRepository().loadAllDiaries(dek).diaries.map { it.toDiaryLog() }
         }
         assertEquals(1, afterDelete.size)
         assertEquals("d1", afterDelete[0].id)
+    }
+
+    @Test
+    fun persistLogs_bindsVaultIdAtCallTime_preventsCrossVaultWrite() = runTest(testDispatcher) {
+        // Setup controlled dispatcher hooks to hold coroutine until after vault switch
+        val queued = kotlinx.coroutines.test.StandardTestDispatcher(testScheduler)
+        val delayedHooks = RealFeatureHooks(
+            context = null,
+            vaultManager = vaultManager,
+            dispatcher = queued,
+            scope = kotlinx.coroutines.CoroutineScope(queued),
+            baseStorageDir = filesDir
+        )
+
+        val primaryPin = "1111".toCharArray()
+        val decoyPin = "2222".toCharArray()
+        vaultManager.ensurePrimaryVaultInitialized()
+        vaultManager.setPrimaryPasscode(primaryPin)
+        vaultManager.setDecoyPasscode(decoyPin, primaryPin)
+
+        // Call persistLogs while PRIMARY vault is active (before queued coroutine runs)
+        assertEquals(VaultId.PRIMARY, vaultManager.currentVault)
+        delayedHooks.persistLogs(listOf(DiaryLog(id = "p_only", heading = "Primary Secret")))
+
+        // Switch active vault to DECOY before coroutine executes
+        vaultManager.lock()
+        vaultManager.unlockWithPin(decoyPin)
+        assertEquals(VaultId.DECOY, vaultManager.currentVault)
+
+        testScheduler.advanceUntilIdle()
+
+        // Primary log must NEVER leak into DECOY vault
+        val decoyDiaries = vaultManager.withActiveDek { dek ->
+            vaultManager.decoyDiaryRepo.loadAllDiaries(dek).diaries
+        }
+        assertTrue("Primary persist must never write into Decoy vault", decoyDiaries.none { it.id == "p_only" })
     }
 
     @Test
@@ -147,10 +191,10 @@ class RealFeatureHooksTest {
         assertEquals("b1", contents[0].id)
         assertEquals("Backed Up Entry", contents[0].heading)
 
-        // Delete log to simulate restoring on clean state
-        hooks.persistLogs(emptyList())
+        // Explicitly delete log to simulate restoring on clean state
+        hooks.deleteDiary("b1")
         val emptyLogs = vaultManager.withActiveDek { dek ->
-            vaultManager.activeDiaryRepository().loadAllDiaries(dek)
+            vaultManager.activeDiaryRepository().loadAllDiaries(dek).diaries
         }
         assertTrue(emptyLogs.isEmpty())
 
@@ -265,7 +309,7 @@ class RealFeatureHooksTest {
         hooks.persistLogs(listOf(log))
 
         val loaded = vaultManager.withActiveDek { dek ->
-            vaultManager.activeDiaryRepository().loadAllDiaries(dek).map { it.toDiaryLog() }
+            vaultManager.activeDiaryRepository().loadAllDiaries(dek).diaries.map { it.toDiaryLog() }
         }
         assertEquals(1, loaded.size)
         val restored = loaded.first()
@@ -292,5 +336,179 @@ class RealFeatureHooksTest {
         assertTrue(imagePayload.contentEquals(readImg))
         assertTrue(audioPayload.contentEquals(readAud))
         assertTrue(videoPayload.contentEquals(readVid))
+    }
+
+    @Test
+    fun mergeRestoredLogs_mergesWithoutReplacingLocalLogs() {
+        val localOnly = DiaryLog(id = "local_1", heading = "Local Only", updatedAt = 1000L)
+        val localNewer = DiaryLog(id = "shared", heading = "Local Newer", updatedAt = 3000L)
+        val backupOnly = DiaryLog(id = "backup_1", heading = "Backup Only", updatedAt = 2000L)
+        val backupOlder = DiaryLog(id = "shared", heading = "Backup Older", updatedAt = 1500L)
+
+        val merged = mergeRestoredLogs(listOf(localOnly, localNewer), listOf(backupOnly, backupOlder))
+        val byId = merged.associateBy { it.id }
+
+        assertTrue(byId.containsKey("local_1"))
+        assertTrue(byId.containsKey("backup_1"))
+        assertEquals("Local Newer", byId["shared"]?.heading)
+        assertTrue(byId.keys.any { it.startsWith("shared_copy_") })
+    }
+
+    @Test
+    fun canvasMediaCleanup_deletesRemovedOnSave_andDeletesUnsavedOnDiscard() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+
+        val (imgKeep, imgRemove, audUnsaved, sharedImg) = vaultManager.withActiveDek { dek ->
+            val m = vaultManager.activeMediaRepository()
+            val k = m.importMediaBytes("med_keep", "k".toByteArray(), dek)
+            val r = m.importMediaBytes("med_remove", "r".toByteArray(), dek)
+            val u = m.importMediaBytes("med_unsaved", "u".toByteArray(), dek)
+            val s = m.importMediaBytes("med_shared", "s".toByteArray(), dek)
+            listOf(k, r, u, s)
+        }
+
+        // Another diary shares sharedImg
+        val otherLog = DiaryLog(
+            id = "other_diary",
+            heading = "Other",
+            updatedAt = 1000L,
+            canvasImages = listOf(CanvasImage(id = sharedImg, source = sharedImg, x = 0f, y = 0f, width = 100f, height = 100f))
+        )
+        // Initial saved diary has imgKeep, imgRemove, and sharedImg
+        val diaryV1 = DiaryLog(
+            id = "main_diary",
+            heading = "Main",
+            updatedAt = 1000L,
+            canvasImages = listOf(
+                CanvasImage(id = imgKeep, source = imgKeep, x = 0f, y = 0f, width = 100f, height = 100f),
+                CanvasImage(id = imgRemove, source = imgRemove, x = 0f, y = 0f, width = 100f, height = 100f),
+                CanvasImage(id = sharedImg, source = sharedImg, x = 0f, y = 0f, width = 100f, height = 100f)
+            )
+        )
+        hooks.persistLogs(listOf(otherLog, diaryV1))
+
+        // User removes imgRemove & sharedImg from main_diary on canvas and clicks Save
+        val diaryV2 = diaryV1.copy(
+            updatedAt = 2000L,
+            canvasImages = listOf(CanvasImage(id = imgKeep, source = imgKeep, x = 0f, y = 0f, width = 100f, height = 100f))
+        )
+        val oldIds = collectCanvasMediaIds(diaryV1.pfp, diaryV1.canvasBgSource, diaryV1.canvasImages, diaryV1.audioAttachments, diaryV1.videoAttachments)
+        val newIds = collectCanvasMediaIds(diaryV2.pfp, diaryV2.canvasBgSource, diaryV2.canvasImages, diaryV2.audioAttachments, diaryV2.videoAttachments)
+        hooks.persistLogs(listOf(otherLog, diaryV2), obsoleteMediaIds = oldIds - newIds)
+
+        val mediaRepo = vaultManager.activeMediaRepository()
+        assertTrue("Kept media must remain", mediaRepo.exists(imgKeep))
+        assertFalse("Removed unreferenced media must be deleted after save", mediaRepo.exists(imgRemove))
+        assertTrue("Removed media still used by other_diary must remain", mediaRepo.exists(sharedImg))
+
+        // User imports audUnsaved in an unsaved session and exits without saving
+        assertTrue(mediaRepo.exists(audUnsaved))
+        hooks.deleteUnreferencedMedia(setOf(audUnsaved, imgKeep))
+        assertFalse("Unsaved session media must be deleted on discard", mediaRepo.exists(audUnsaved))
+        assertTrue("Saved media in diary must NOT be deleted when discarding session", mediaRepo.exists(imgKeep))
+    }
+
+    @Test
+    fun writeHooks_reportResultOnSuccess_andFailOnLockOrSwitchOrWriteError() = runTest(testDispatcher) {
+        // 1. When vault is locked, all 4 write hooks must invoke onResult with failure (never silent return)
+        val persistLocked = arrayOfNulls<Result<Unit>>(1)
+        val deleteLocked = arrayOfNulls<Result<Unit>>(1)
+        val mediaLocked = arrayOfNulls<Result<Unit>>(1)
+        val reminderLocked = arrayOfNulls<Result<Unit>>(1)
+
+        hooks.persistLogs(listOf(DiaryLog(id = "d_lock", heading = "Locked"))) { persistLocked[0] = it }
+        hooks.deleteDiary("d_lock") { deleteLocked[0] = it }
+        hooks.deleteUnreferencedMedia(setOf("med_1")) { mediaLocked[0] = it }
+        hooks.scheduleReminder(DiaryLog(id = "d_lock", heading = "Locked"), 12345L) { reminderLocked[0] = it }
+
+        assertTrue("Locked persistLogs must fail", persistLocked[0]?.isFailure == true)
+        assertTrue("Locked deleteDiary must fail", deleteLocked[0]?.isFailure == true)
+        assertTrue("Locked deleteUnreferencedMedia must fail", mediaLocked[0]?.isFailure == true)
+        assertTrue("Locked scheduleReminder must fail", reminderLocked[0]?.isFailure == true)
+
+        // 2. When unlocked, normal writes invoke onResult with success
+        vaultManager.ensurePrimaryVaultInitialized()
+        val persistOk = arrayOfNulls<Result<Unit>>(1)
+        val log = DiaryLog(id = "d_ok", heading = "Saved OK", updatedAt = 1000L)
+        hooks.persistLogs(listOf(log)) { persistOk[0] = it }
+        assertTrue("Valid persistLogs must succeed", persistOk[0]?.isSuccess == true)
+
+        // Write error case: corrupt existing diary file and call scheduleReminder -> must report failure
+        val corruptFile = File(vaultManager.primaryDiaryRepo.diariesDir, "d_ok.lkd")
+        corruptFile.writeBytes(byteArrayOf(0x01, 0x02, 0x03))
+        val reminderErr = arrayOfNulls<Result<Unit>>(1)
+        hooks.scheduleReminder(log, 99999L) { reminderErr[0] = it }
+        assertTrue("scheduleReminder on corrupt file must fail", reminderErr[0]?.isFailure == true)
+
+        // 3. If vault switches before queued task executes, all 4 write hooks must report failure
+        val queued = kotlinx.coroutines.test.StandardTestDispatcher(testScheduler)
+        val delayedHooks = RealFeatureHooks(
+            context = null,
+            vaultManager = vaultManager,
+            dispatcher = queued,
+            scope = kotlinx.coroutines.CoroutineScope(queued),
+            baseStorageDir = filesDir
+        )
+        val pPin = "1111".toCharArray()
+        val dPin = "2222".toCharArray()
+        vaultManager.setPrimaryPasscode(pPin)
+        vaultManager.setDecoyPasscode(dPin, pPin)
+
+        val persistSwitch = arrayOfNulls<Result<Unit>>(1)
+        val deleteSwitch = arrayOfNulls<Result<Unit>>(1)
+        val mediaSwitch = arrayOfNulls<Result<Unit>>(1)
+        val reminderSwitch = arrayOfNulls<Result<Unit>>(1)
+
+        delayedHooks.persistLogs(listOf(DiaryLog(id = "d_sw", heading = "Sw"))) { persistSwitch[0] = it }
+        delayedHooks.deleteDiary("d_sw") { deleteSwitch[0] = it }
+        delayedHooks.deleteUnreferencedMedia(setOf("med_sw")) { mediaSwitch[0] = it }
+        delayedHooks.scheduleReminder(DiaryLog(id = "d_sw", heading = "Sw"), 5555L) { reminderSwitch[0] = it }
+
+        vaultManager.lock()
+        vaultManager.unlockWithPin(dPin)
+        testScheduler.advanceUntilIdle()
+
+        assertTrue("Vault-switched persistLogs must report failure", persistSwitch[0]?.isFailure == true)
+        assertTrue("Vault-switched deleteDiary must report failure", deleteSwitch[0]?.isFailure == true)
+        assertTrue("Vault-switched deleteUnreferencedMedia must report failure", mediaSwitch[0]?.isFailure == true)
+        assertTrue("Vault-switched scheduleReminder must report failure", reminderSwitch[0]?.isFailure == true)
+    }
+
+    @Test
+    fun pfpPicker_neverUsesFakeSample_andTracksRealImportsInSession() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+
+        // Fake hook pickPfpImage must return null and import nothing into media repo
+        val fakePick = hooks.pickPfpImage()
+        assertEquals(null, fakePick)
+        assertEquals(0, vaultManager.primaryMediaRepo.mediaDir.listFiles()?.size ?: 0)
+
+        // importPickedPfpPhoto with failing onImportPhotoUri must return null (no fake fallback)
+        val failedImport = importPickedPfpPhoto("content://test/missing") { null }
+        assertEquals(null, failedImport)
+
+        // Real importPfpForSession tracks imported ID in sessionImportedMediaIds and notifies on failure
+        val sessionMedia = mutableSetOf<String>()
+        var failNotified = false
+        val failedSessionRes = importPfpForSession(
+            uri = "content://test/bad",
+            importPhoto = { null },
+            sessionImportedMediaIds = sessionMedia,
+            onFailure = { failNotified = true }
+        )
+        assertEquals(null, failedSessionRes)
+        assertTrue(failNotified)
+        assertTrue(sessionMedia.isEmpty())
+
+        val importedId = vaultManager.withActiveDek { dek ->
+            vaultManager.primaryMediaRepo.importMediaBytes("pfp_real_1", byteArrayOf(1, 2, 3), dek)
+        }
+        val successRes = importPfpForSession(
+            uri = "content://test/good",
+            importPhoto = { importedId },
+            sessionImportedMediaIds = sessionMedia
+        )
+        assertEquals(importedId, successRes)
+        assertTrue(sessionMedia.contains(importedId))
     }
 }

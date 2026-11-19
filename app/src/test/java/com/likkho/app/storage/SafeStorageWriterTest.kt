@@ -73,4 +73,38 @@ class SafeStorageWriterTest {
         // Stale tmp file must be cleaned up
         assertFalse(File(targetDir, "important_vault.dat.tmp").exists())
     }
+
+    @Test
+    fun safeWrite_fsyncsParentDirectoryAfterRename() {
+        val targetFile = File(targetDir, "durable.dat")
+        val payload = "Durable Payload".toByteArray(Charsets.UTF_8)
+        var syncedDir: File? = null
+        var targetExistedAtSync = false
+
+        SafeStorageWriter.safeWriteInternal(
+            targetFile = targetFile,
+            data = payload,
+            onDirectorySync = { dir ->
+                syncedDir = dir
+                targetExistedAtSync = targetFile.exists() && targetFile.readBytes().contentEquals(payload)
+            }
+        )
+
+        assertEquals(targetDir, syncedDir)
+        assertTrue("Target file must already be renamed when parent directory is fsynced", targetExistedAtSync)
+    }
+
+    @Test
+    fun fsyncDirectory_bestEffortHandlesValidAndInvalidDirs() {
+        assertTrue("Valid directory fsync via FileChannel should succeed", SafeStorageWriter.fsyncDirectory(targetDir))
+        assertFalse(
+            "Non-existent directory should return false without throwing",
+            SafeStorageWriter.fsyncDirectory(File(targetDir, "does_not_exist"))
+        )
+        val regularFile = File(targetDir, "plain.txt").apply { writeText("hi") }
+        assertFalse(
+            "Regular file passed to fsyncDirectory should return false without throwing",
+            SafeStorageWriter.fsyncDirectory(regularFile)
+        )
+    }
 }

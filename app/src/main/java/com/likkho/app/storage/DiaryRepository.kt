@@ -2,7 +2,11 @@ package com.likkho.app.storage
 
 import com.likkho.app.storage.model.DiaryRecord
 import com.likkho.app.storage.model.IndexEntryRecord
+import com.likkho.app.storage.model.VaultIndexRecord
+import kotlinx.serialization.SerializationException
+import java.io.EOFException
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import javax.crypto.AEADBadTagException
 
@@ -10,14 +14,31 @@ data class RecoveryReport(
     val restoredFromBackup: List<String> = emptyList(),
     val quarantinedFiles: List<String> = emptyList(),
     val cleanedTempFiles: Int = 0,
-    val indexRebuilt: Boolean = false
+    val indexRebuilt: Boolean = false,
+    val ioErrors: List<String> = emptyList()
+)
+
+data class FailedDiaryEntry(
+    val diaryId: String,
+    val error: String,
+    val quarantinedPath: String? = null
+)
+
+data class LoadDiariesResult(
+    val diaries: List<DiaryRecord>,
+    val failed: List<FailedDiaryEntry> = emptyList()
+)
+
+data class MediaReferenceScan(
+    val referencedIds: Set<String>,
+    val hasUndecodableOrQuarantined: Boolean
 )
 
 class CorruptedDiaryException(
     val diaryId: String,
     val quarantinedPath: String?,
     cause: Throwable
-) : IOException("Diary $diaryId is corrupted and was moved to quarantine", cause)
+) : IOException("Diary $diaryId is corrupted and was copied to quarantine", cause)
 
 class ReadOnlyDiaryException(val diaryId: String, val version: Int) :
     IOException("Diary $diaryId has schemaVersion $version which is newer than supported version (read-only)")
@@ -28,26 +49,162 @@ class ReadOnlyDiaryException(val diaryId: String, val version: Int) :
  */
 class DiaryRepository(
     val vaultId: VaultId,
-    val vaultDir: File
+    val vaultDir: File,
+    private val fileReader: (File) -> ByteArray = { it.readBytes() }
 ) {
     val diariesDir = File(vaultDir, "diaries")
     val quarantineDir = File(vaultDir, "quarantine")
     val indexManager = VaultIndexManager(vaultId, vaultDir)
+
+    companion object {
+        const val MAX_IO_RETRIES = 3
+    }
 
     fun ensureDirs() {
         diariesDir.mkdirs()
         quarantineDir.mkdirs()
     }
 
+    private fun isTransientIoError(t: Throwable): Boolean {
+        return t is IOException &&
+            t !is EOFException &&
+            t !is CorruptedDiaryException &&
+            t !is ReadOnlyDiaryException
+    }
+
+    private fun isCryptoOrFormatError(t: Throwable): Boolean {
+        return t is AEADBadTagException ||
+            t is SerializationException ||
+            t is IllegalArgumentException ||
+            t is EOFException
+    }
+
+    private fun readBytesWithRetry(file: File, maxAttempts: Int = MAX_IO_RETRIES): ByteArray {
+        var lastError: IOException? = null
+        for (attempt in 1..maxAttempts) {
+            try {
+                return fileReader(file)
+            } catch (e: IOException) {
+                lastError = e
+                if (e is EOFException || attempt == maxAttempts) throw e
+            }
+        }
+        throw lastError ?: IOException("Failed to read ${file.name}")
+    }
+
     /**
-     * Executes recovery scan on vault unlock per STORAGE_SPEC Section 5:
+     * Verifies whether [dek] matches this vault before quarantining any file.
+     * Prevents mass-quarantining healthy files when a wrong DEK is supplied.
+     */
+    private fun isDekValidForVault(
+        dek: ByteArray,
+        excludeFile: File?,
+        dekVerified: Boolean?
+    ): Boolean {
+        if (dekVerified == false) return false
+        if (dek.size != CryptoUtils.AES_KEY_SIZE_BYTES) return false
+        if (dekVerified == true) return true
+
+        if (indexManager.indexFile.exists()) {
+            when (indexManager.readIndexStatus(dek)) {
+                is IndexReadResult.Loaded -> return true
+                is IndexReadResult.Corrupt, is IndexReadResult.Missing -> {}
+            }
+        }
+
+        val otherLkdFiles = diariesDir.listFiles { f ->
+            f.isFile && f.name.endsWith(".lkd") && f.absolutePath != excludeFile?.absolutePath
+        } ?: emptyArray()
+
+        var anyOtherDecoded = false
+        var anyOtherAuthFailed = false
+        for (other in otherLkdFiles) {
+            val otherId = other.name.removeSuffix(".lkd")
+            try {
+                val bytes = readBytesWithRetry(other, maxAttempts = 1)
+                DiaryFileCodec.decode(bytes, dek, otherId)
+                anyOtherDecoded = true
+                break
+            } catch (e: AEADBadTagException) {
+                anyOtherAuthFailed = true
+            } catch (_: Exception) {
+            }
+        }
+        if (anyOtherDecoded) return true
+
+        // If encrypted index OR another diary failed auth with this DEK and zero succeeded,
+        // treat DEK as potentially wrong and do not quarantine.
+        if (indexManager.indexFile.exists() || anyOtherAuthFailed) {
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Copies a corrupt diary file to quarantine/ (never moves or deletes original).
+     * Idempotent when an identical copy for [diaryId] already exists in quarantine/.
+     */
+    private fun quarantineCopy(sourceFile: File, diaryId: String): File {
+        quarantineDir.mkdirs()
+        val rawBytes = try {
+            readBytesWithRetry(sourceFile, maxAttempts = 1)
+        } catch (_: Exception) {
+            sourceFile.readBytes()
+        }
+        val hash = CryptoUtils.sha256Hex(rawBytes)
+        val existing = quarantineDir.listFiles { f -> f.isFile && f.name.startsWith("${diaryId}_") }
+            ?.firstOrNull { candidate ->
+                runCatching { CryptoUtils.sha256Hex(candidate.readBytes()) == hash }.getOrDefault(false)
+            }
+        if (existing != null) return existing
+
+        val qFile = File(quarantineDir, "${diaryId}_${System.currentTimeMillis()}.lkd")
+        FileOutputStream(qFile).use { fos ->
+            fos.write(rawBytes)
+            fos.flush()
+            runCatching { if (fos.fd.valid()) fos.fd.sync() }
+        }
+        return qFile
+    }
+
+    private fun listDiskDiaryIds(): Set<String> {
+        if (!diariesDir.exists()) return emptySet()
+        return (diariesDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray())
+            .map { it.name.removeSuffix(".lkd") }
+            .toSet()
+    }
+
+    private fun canDecodeDiary(id: String, dek: ByteArray): Boolean {
+        val file = File(diariesDir, "$id.lkd")
+        if (!file.exists()) return false
+        return try {
+            val bytes = readBytesWithRetry(file)
+            DiaryFileCodec.decode(bytes, dek, id)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun indexMatchesDisk(index: VaultIndexRecord, dek: ByteArray): Boolean {
+        val diskIds = listDiskDiaryIds()
+        val indexIds = index.entries.map { it.id }.toSet()
+        if ((indexIds - diskIds).isNotEmpty()) return false
+        val missingFromIndex = diskIds - indexIds
+        if (missingFromIndex.any { canDecodeDiary(it, dek) }) return false
+        return true
+    }
+
+    /**
+     * Executes recovery scan on app start / vault unlock per STORAGE_SPEC Section 5:
      * - Cleans up dangling .tmp files from crashed writes.
      * - Recovers from .bak if main .lkd is missing or corrupt.
-     * - Moves tampered / corrupt .lkd files to quarantine/ (never deletes).
-     * - Self-heals the encrypted index if missing or corrupt.
+     * - Copies tampered / corrupt .lkd files to quarantine/ ONLY when DEK is valid and error is AEADBadTag/format.
+     * - Retries transient IO errors without moving/quarantining files.
+     * - Self-heals & reconciles the encrypted index against disk .lkd files.
      */
     @Synchronized
-    fun scanAndRecover(dek: ByteArray): RecoveryReport {
+    fun scanAndRecover(dek: ByteArray, dekVerified: Boolean? = null): RecoveryReport {
         diariesDir.mkdirs()
         quarantineDir.mkdirs()
 
@@ -55,6 +212,7 @@ class DiaryRepository(
         var cleanedTmp = 0
         val restoredBaks = mutableListOf<String>()
         val quarantined = mutableListOf<String>()
+        val ioErrors = mutableListOf<String>()
 
         // 1. Clean dangling .tmp files
         for (f in files) {
@@ -71,49 +229,72 @@ class DiaryRepository(
             val diaryId = mainFileName.removeSuffix(".lkd")
 
             var mainHealthy = false
+            var mainIoError = false
             if (mainFile.exists() && mainFile.length() > DiaryFileCodec.HEADER_SIZE) {
                 try {
-                    DiaryFileCodec.decode(mainFile.readBytes(), dek, diaryId)
+                    val bytes = readBytesWithRetry(mainFile)
+                    DiaryFileCodec.decode(bytes, dek, diaryId)
                     mainHealthy = true
                 } catch (e: Exception) {
-                    mainHealthy = false
+                    if (isTransientIoError(e)) {
+                        mainIoError = true
+                        ioErrors.add("$diaryId: ${e.message ?: "IO error"}")
+                    } else {
+                        mainHealthy = false
+                    }
                 }
             }
 
+            if (mainIoError) {
+                continue
+            }
+
             if (!mainHealthy) {
-                // Restore from .bak
-                if (mainFile.exists()) mainFile.delete()
-                bak.renameTo(mainFile)
-                restoredBaks.add(diaryId)
+                // Verify .bak before restoring
+                val bakHealthy = try {
+                    val bakBytes = readBytesWithRetry(bak)
+                    DiaryFileCodec.decode(bakBytes, dek, diaryId)
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+                if (bakHealthy) {
+                    if (mainFile.exists()) mainFile.delete()
+                    bak.renameTo(mainFile)
+                    restoredBaks.add(diaryId)
+                }
             } else {
                 // Main file is healthy, discard .bak
                 bak.delete()
             }
         }
 
-        // 3. Scan .lkd files for corruption / tampering
-        val lkdFiles = diariesDir.listFiles { f -> f.name.endsWith(".lkd") } ?: emptyArray()
+        // 3. Scan .lkd files for crypto/format corruption (copy to quarantine, never move; retry IO errors)
+        val lkdFiles = diariesDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray()
         for (lkd in lkdFiles) {
             val diaryId = lkd.name.removeSuffix(".lkd")
             try {
-                DiaryFileCodec.decode(lkd.readBytes(), dek, diaryId)
-            } catch (e: AEADBadTagException) {
-                // GCM authentication failed (tampered / wrong key / swapped) -> Quarantine
-                val qFile = File(quarantineDir, "${diaryId}_${System.currentTimeMillis()}.lkd")
-                lkd.renameTo(qFile)
-                quarantined.add(qFile.absolutePath)
+                val bytes = readBytesWithRetry(lkd)
+                DiaryFileCodec.decode(bytes, dek, diaryId)
             } catch (e: Exception) {
-                // Corrupted structure -> Quarantine
-                val qFile = File(quarantineDir, "${diaryId}_${System.currentTimeMillis()}.lkd")
-                lkd.renameTo(qFile)
-                quarantined.add(qFile.absolutePath)
+                if (isTransientIoError(e)) {
+                    // Retry already attempted; never move/quarantine on transient IO failure
+                    ioErrors.add("$diaryId: ${e.message ?: "IO error"}")
+                } else if (isCryptoOrFormatError(e) && isDekValidForVault(dek, lkd, dekVerified)) {
+                    val qFile = quarantineCopy(lkd, diaryId)
+                    quarantined.add(qFile.absolutePath)
+                }
             }
         }
 
-        // 4. Verify index or self-heal
+        // 4. Verify index exists, decrypts, and matches disk diary IDs; otherwise rebuild
         var indexRebuilt = false
-        val index = indexManager.readIndex(dek)
-        if (index == null) {
+        val indexStatus = indexManager.readIndexStatus(dek)
+        val needsRebuild = when (indexStatus) {
+            is IndexReadResult.Loaded -> !indexMatchesDisk(indexStatus.index, dek)
+            is IndexReadResult.Missing, is IndexReadResult.Corrupt -> true
+        }
+        if (needsRebuild) {
             indexManager.rebuildFromDiaries(diariesDir, dek)
             indexRebuilt = true
         }
@@ -122,7 +303,8 @@ class DiaryRepository(
             restoredFromBackup = restoredBaks,
             quarantinedFiles = quarantined,
             cleanedTempFiles = cleanedTmp,
-            indexRebuilt = indexRebuilt
+            indexRebuilt = indexRebuilt,
+            ioErrors = ioErrors
         )
     }
 
@@ -136,13 +318,13 @@ class DiaryRepository(
         // Check if existing file has a newer schemaVersion than supported (read-only rule)
         if (targetFile.exists()) {
             try {
-                val existing = DiaryFileCodec.decode(targetFile.readBytes(), dek, record.id)
+                val existing = DiaryFileCodec.decode(readBytesWithRetry(targetFile), dek, record.id)
                 if (existing.isReadOnly) {
                     throw ReadOnlyDiaryException(record.id, existing.schemaVersion)
                 }
             } catch (e: ReadOnlyDiaryException) {
                 throw e
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Corrupt file will be replaced by safe write
             }
         }
@@ -151,12 +333,11 @@ class DiaryRepository(
 
         // Safe write: free space check -> .tmp -> fsync -> verify read-back -> .bak -> atomic rename
         SafeStorageWriter.safeWrite(targetFile, encodedBytes) { tmpFile ->
-            // Verification lambda: guarantee file can be decrypted before committing
             val tmpBytes = tmpFile.readBytes()
             DiaryFileCodec.decode(tmpBytes, dek, record.id)
         }
 
-        // Update encrypted index
+        // Update encrypted index (rebuilds if index is missing/corrupt)
         val entry = IndexEntryRecord(
             id = record.id,
             createdAt = record.createdAt,
@@ -164,121 +345,215 @@ class DiaryRepository(
             pinned = record.pinned,
             flags = (if (record.diaryLock != null) 1 else 0) or
                     (if (record.audios.isNotEmpty()) 2 else 0) or
-                    (if (record.images.isNotEmpty()) 4 else 0),
+                    (if (record.images.isNotEmpty()) 4 else 0) or
+                    (if (record.videos.isNotEmpty()) 8 else 0),
             plainPreview = record.plainPreview,
             heading = record.heading
         )
-        indexManager.upsertEntry(entry, dek)
+        indexManager.upsertEntry(entry, dek, diariesDir)
     }
 
     /**
      * Loads and decrypts a diary file.
-     * If corrupted / tampered, moves to quarantine/ and throws [CorruptedDiaryException].
+     * Retries transient IO errors without moving the file.
+     * Copies corrupt files to quarantine/ ONLY when DEK is valid and error is AEADBadTag/format, then throws [CorruptedDiaryException].
      */
     @Synchronized
-    fun loadDiary(id: String, dek: ByteArray): DecodedDiary {
+    fun loadDiary(id: String, dek: ByteArray, dekVerified: Boolean? = null): DecodedDiary {
         val file = File(diariesDir, "$id.lkd")
         if (!file.exists()) {
             throw IOException("Diary file not found: $id.lkd")
         }
 
-        val rawBytes = file.readBytes()
+        val rawBytes = readBytesWithRetry(file)
         return try {
             DiaryFileCodec.decode(rawBytes, dek, id)
         } catch (e: Exception) {
-            // Quarantine corrupted file
-            quarantineDir.mkdirs()
-            val qFile = File(quarantineDir, "${id}_${System.currentTimeMillis()}.lkd")
-            file.renameTo(qFile)
-            indexManager.removeEntry(id, dek)
-            throw CorruptedDiaryException(id, qFile.absolutePath, e)
+            if (isCryptoOrFormatError(e) && isDekValidForVault(dek, file, dekVerified)) {
+                quarantineDir.mkdirs()
+                val qFile = quarantineCopy(file, id)
+                throw CorruptedDiaryException(id, qFile.absolutePath, e)
+            }
+            throw e
         }
     }
 
+    private fun extractRecordMediaIds(record: DiaryRecord): Set<String> {
+        val ids = mutableSetOf<String>()
+        record.pfp?.sourceMediaId?.let { ids.add(it) }
+        record.background?.mediaId?.let { ids.add(it) }
+        record.images.forEach { ids.add(it.mediaId) }
+        record.audios.forEach { ids.add(it.mediaId) }
+        record.videos.forEach { ids.add(it.mediaId) }
+        return ids
+    }
+
     /**
-     * Collects all media IDs referenced across healthy diaries in this vault,
-     * optionally excluding a specific diary ID (useful during diary deletion).
+     * Scans all referenced media IDs across diaries and reports whether any undecodable or
+     * quarantined diary exists (in which case its media cannot be safely enumerated and must be preserved).
      */
-    fun collectAllReferencedMediaIds(dek: ByteArray, excludeDiaryId: String? = null): Set<String> {
+    fun scanReferencedMediaIds(dek: ByteArray, excludeDiaryId: String? = null): MediaReferenceScan {
         val mediaIds = mutableSetOf<String>()
-        val lkdFiles = diariesDir.listFiles { f -> f.name.endsWith(".lkd") } ?: emptyArray()
+        var hasUndecodable = false
+
+        val lkdFiles = diariesDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray()
         for (f in lkdFiles) {
             val diaryId = f.name.removeSuffix(".lkd")
             if (diaryId == excludeDiaryId) continue
             try {
-                val decoded = DiaryFileCodec.decode(f.readBytes(), dek, diaryId)
-                decoded.record.pfp?.sourceMediaId?.let { mediaIds.add(it) }
-                decoded.record.background?.mediaId?.let { mediaIds.add(it) }
-                decoded.record.images.forEach { mediaIds.add(it.mediaId) }
-                decoded.record.audios.forEach { mediaIds.add(it.mediaId) }
-                decoded.record.videos.forEach { mediaIds.add(it.mediaId) }
-            } catch (e: Exception) {
-                // Ignore unreadable/corrupt files during collection
+                val decoded = DiaryFileCodec.decode(readBytesWithRetry(f), dek, diaryId)
+                mediaIds.addAll(extractRecordMediaIds(decoded.record))
+            } catch (_: Exception) {
+                hasUndecodable = true
             }
         }
-        return mediaIds
+
+        val quarantinedFiles = quarantineDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray()
+        for (qf in quarantinedFiles) {
+            val baseId = qf.name.substringBeforeLast('_')
+            if (baseId == excludeDiaryId) continue
+            try {
+                val decoded = DiaryFileCodec.decode(readBytesWithRetry(qf), dek, baseId)
+                mediaIds.addAll(extractRecordMediaIds(decoded.record))
+            } catch (_: Exception) {
+                hasUndecodable = true
+            }
+        }
+
+        return MediaReferenceScan(
+            referencedIds = mediaIds,
+            hasUndecodableOrQuarantined = hasUndecodable
+        )
     }
 
     /**
-     * Deletes a diary file, cleans up its unreferenced media, and removes it from the index.
-     * Per STORAGE_SPEC Section 5 & 6: "Delete: diary file + uski unreferenced media hatao + index update, ek transaction ki tarah."
+     * Collects all media IDs referenced across readable diaries in this vault,
+     * optionally excluding a specific diary ID.
+     */
+    fun collectAllReferencedMediaIds(dek: ByteArray, excludeDiaryId: String? = null): Set<String> {
+        return scanReferencedMediaIds(dek, excludeDiaryId).referencedIds
+    }
+
+    /**
+     * Runs orphan media cleanup while protecting any media when undecodable/quarantined diaries exist.
      */
     @Synchronized
-    fun deleteDiary(id: String, dek: ByteArray, mediaRepo: EncryptedMediaRepository? = null) {
+    fun cleanupOrphanMedia(
+        dek: ByteArray,
+        mediaRepo: EncryptedMediaRepository,
+        olderThanMs: Long = EncryptedMediaRepository.ORPHAN_AGE_THRESHOLD_MS
+    ): Int {
+        val scan = scanReferencedMediaIds(dek)
+        return mediaRepo.cleanupOrphans(
+            referencedMediaIds = scan.referencedIds,
+            hasUndecodableOrQuarantined = scan.hasUndecodableOrQuarantined,
+            olderThanMs = olderThanMs
+        )
+    }
+
+    /**
+     * Deletes a diary in strict order:
+     * 1. Remove diary files (.lkd / .bak / .tmp)
+     * 2. Update encrypted index
+     * 3. Delete unreferenced media (only if no undecodable/quarantined diaries could reference them)
+     */
+    @Synchronized
+    fun deleteDiary(
+        id: String,
+        dek: ByteArray,
+        mediaRepo: EncryptedMediaRepository? = null,
+        onDeleteStep: ((String) -> Unit)? = null
+    ) {
         val file = File(diariesDir, "$id.lkd")
         val bakFile = File(diariesDir, "$id.lkd.bak")
         val tmpFile = File(diariesDir, "$id.lkd.tmp")
 
+        val diaryMediaIds = mutableSetOf<String>()
         if (mediaRepo != null && file.exists()) {
             try {
-                val decoded = DiaryFileCodec.decode(file.readBytes(), dek, id)
-                val diaryMediaIds = mutableSetOf<String>()
-                decoded.record.pfp?.sourceMediaId?.let { diaryMediaIds.add(it) }
-                decoded.record.background?.mediaId?.let { diaryMediaIds.add(it) }
-                decoded.record.images.forEach { diaryMediaIds.add(it.mediaId) }
-                decoded.record.audios.forEach { diaryMediaIds.add(it.mediaId) }
-                decoded.record.videos.forEach { diaryMediaIds.add(it.mediaId) }
-
-                if (diaryMediaIds.isNotEmpty()) {
-                    val remainingReferenced = collectAllReferencedMediaIds(dek, excludeDiaryId = id)
-                    mediaRepo.deleteUnreferencedMediaForDiary(diaryMediaIds, remainingReferenced)
-                }
-            } catch (e: Exception) {
+                val decoded = DiaryFileCodec.decode(readBytesWithRetry(file), dek, id)
+                diaryMediaIds.addAll(extractRecordMediaIds(decoded.record))
+            } catch (_: Exception) {
                 // Proceed with file deletion even if record decode fails
             }
         }
 
-        if (file.exists()) file.delete()
+        // Step 1: Delete diary files
+        if (file.exists() && !file.delete()) {
+            throw IOException("Failed to delete diary file: ${file.name}")
+        }
         if (bakFile.exists()) bakFile.delete()
         if (tmpFile.exists()) tmpFile.delete()
+        onDeleteStep?.invoke("diary_file_deleted")
 
-        indexManager.removeEntry(id, dek)
+        // Step 2: Update encrypted index
+        indexManager.removeEntry(id, dek, diariesDir)
+        onDeleteStep?.invoke("index_updated")
+
+        // Step 3: Delete unreferenced media
+        if (mediaRepo != null && diaryMediaIds.isNotEmpty()) {
+            val remainingScan = scanReferencedMediaIds(dek, excludeDiaryId = id)
+            if (!remainingScan.hasUndecodableOrQuarantined) {
+                mediaRepo.deleteUnreferencedMediaForDiary(diaryMediaIds, remainingScan.referencedIds)
+            }
+        }
+        onDeleteStep?.invoke("media_deleted")
     }
 
     /**
      * Lists all diary summaries from the encrypted index.
-     * Self-heals if the index is missing or corrupted.
+     * Self-heals if the index is missing, corrupted, or out of sync with disk .lkd IDs.
      */
     @Synchronized
     fun listDiaries(dek: ByteArray): List<IndexEntryRecord> {
-        val index = indexManager.readIndex(dek) ?: indexManager.rebuildFromDiaries(diariesDir, dek)
+        val index = loadIndex(dek)
         return index.entries.sortedWith(
             compareByDescending<IndexEntryRecord> { it.pinned }.thenByDescending { it.createdAt }
         )
     }
 
     @Synchronized
-    fun loadIndex(dek: ByteArray) = indexManager.readIndex(dek) ?: indexManager.rebuildFromDiaries(diariesDir, dek)
+    fun loadIndex(dek: ByteArray): VaultIndexRecord {
+        val status = indexManager.readIndexStatus(dek)
+        if (status is IndexReadResult.Loaded && indexMatchesDisk(status.index, dek)) {
+            return status.index
+        }
+        return indexManager.rebuildFromDiaries(diariesDir, dek)
+    }
 
+    /**
+     * Loads all diaries and returns both successfully decoded records and any failed/corrupt entries.
+     */
     @Synchronized
-    fun loadAllDiaries(dek: ByteArray): List<DiaryRecord> {
+    fun loadAllDiaries(dek: ByteArray): LoadDiariesResult {
+        val diskIds = listDiskDiaryIds()
         val entries = listDiaries(dek)
-        return entries.mapNotNull { entry ->
+        val orderedIds = LinkedHashSet<String>()
+        entries.forEach { orderedIds.add(it.id) }
+        diskIds.sorted().forEach { orderedIds.add(it) }
+
+        val loaded = mutableListOf<DiaryRecord>()
+        val failed = mutableListOf<FailedDiaryEntry>()
+        for (id in orderedIds) {
             try {
-                loadDiary(entry.id, dek).record
+                loaded.add(loadDiary(id, dek).record)
+            } catch (e: CorruptedDiaryException) {
+                failed.add(
+                    FailedDiaryEntry(
+                        diaryId = id,
+                        error = e.message ?: "Corrupted diary",
+                        quarantinedPath = e.quarantinedPath
+                    )
+                )
             } catch (e: Exception) {
-                null
+                failed.add(
+                    FailedDiaryEntry(
+                        diaryId = id,
+                        error = e.message ?: "Failed to load diary"
+                    )
+                )
             }
         }
+        return LoadDiariesResult(diaries = loaded, failed = failed)
     }
 }

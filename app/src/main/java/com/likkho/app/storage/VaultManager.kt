@@ -99,8 +99,22 @@ class VaultManager(
     @Volatile
     private var activeSession: VaultSession? = null
 
+    @Volatile
+    var lastRecoveryReport: RecoveryReport? = null
+        private set
+
     val currentVault: VaultId? get() = activeSession?.vaultId
     val isUnlocked: Boolean get() = activeSession?.isOpen == true
+
+    private fun runUnlockMaintenance(vaultId: VaultId, session: VaultSession) {
+        session.useDek { dek ->
+            val diaryRepo = getDiaryRepository(vaultId)
+            val mediaRepo = getMediaRepository(vaultId)
+            val report = diaryRepo.scanAndRecover(dek, dekVerified = true)
+            lastRecoveryReport = report
+            diaryRepo.cleanupOrphanMedia(dek, mediaRepo)
+        }
+    }
 
     /**
      * Executes an operation with the active DEK in memory.
@@ -117,19 +131,18 @@ class VaultManager(
      */
     suspend fun ensurePrimaryVaultInitialized(): VaultSession = withContext(dispatcher) {
         mutexV1.withLock {
-            if (!envelopeV1.exists()) {
+            val session = if (!envelopeV1.exists()) {
                 val dek = envelopeV1.createVault(pin = null)
-                val session = VaultSession(VaultId.PRIMARY, dek)
-                activeSession = session
-                session
+                VaultSession(VaultId.PRIMARY, dek)
             } else if (!envelopeV1.hasPasscode()) {
                 val dek = envelopeV1.unwrapNoPasscode()
-                val session = VaultSession(VaultId.PRIMARY, dek)
-                activeSession = session
-                session
+                VaultSession(VaultId.PRIMARY, dek)
             } else {
                 throw IllegalStateException("Primary vault requires passcode unlock")
             }
+            activeSession = session
+            runUnlockMaintenance(VaultId.PRIMARY, session)
+            session
         }
     }
 
@@ -164,6 +177,7 @@ class VaultManager(
                 lock()
                 val session = VaultSession(VaultId.PRIMARY, v1Success!!)
                 activeSession = session
+                runUnlockMaintenance(VaultId.PRIMARY, session)
                 return@withContext UnlockResult.Success(VaultId.PRIMARY, session)
             }
 
@@ -186,6 +200,7 @@ class VaultManager(
                 lock()
                 val session = VaultSession(VaultId.DECOY, v2Success!!)
                 activeSession = session
+                runUnlockMaintenance(VaultId.DECOY, session)
                 return@withContext UnlockResult.Success(VaultId.DECOY, session)
             }
 
@@ -221,6 +236,7 @@ class VaultManager(
                     lock()
                     val session = VaultSession(vaultId, dek)
                     activeSession = session
+                    runUnlockMaintenance(vaultId, session)
                     UnlockResult.Success(vaultId, session)
                 } catch (e: Exception) {
                     UnlockResult.Error(e.message ?: "Failed to unwrap Keystore key")
@@ -248,6 +264,7 @@ class VaultManager(
                 lock()
                 val session = VaultSession(VaultId.PRIMARY, dek)
                 activeSession = session
+                runUnlockMaintenance(VaultId.PRIMARY, session)
                 UnlockResult.Success(VaultId.PRIMARY, session)
             } catch (e: Exception) {
                 // Biometric key invalid or failed -> fallback to PIN without crash

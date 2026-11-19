@@ -10,16 +10,25 @@ import java.io.DataOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 
+sealed class IndexReadResult {
+    data class Loaded(val index: VaultIndexRecord) : IndexReadResult()
+    object Missing : IndexReadResult()
+    data class Corrupt(val error: Throwable) : IndexReadResult()
+}
+
 /**
  * Manages encrypted vault index file (index.lki) per STORAGE_SPEC Section 4:
  * - Har vault me ek encrypted index file (id, createdAt, updatedAt, pinned, flags, plainPreview, heading).
  * - Index kharab/missing ho to diary files se rebuild ho (self-healing). Source of truth hamesha diary files hain.
  * - Search unlock ke baad memory me.
  */
-class VaultIndexManager(
+class VaultIndexManager internal constructor(
     val vaultId: VaultId,
-    val vaultDir: File
+    val vaultDir: File,
+    private val customEntryScanner: ((File, ByteArray) -> List<IndexEntryRecord>)? = null
 ) {
+    constructor(vaultId: VaultId, vaultDir: File) : this(vaultId, vaultDir, null)
+
     val indexFile = File(vaultDir, INDEX_FILE_NAME)
 
     companion object {
@@ -44,19 +53,27 @@ class VaultIndexManager(
     }
 
     /**
-     * Reads and decrypts the index file using [dek].
-     * If the file is missing or corrupted, returns null (caller will self-heal from diary files).
+     * Reads and decrypts the index file using [dek], explicitly distinguishing Missing vs Corrupt vs Loaded.
      */
-    fun readIndex(dek: ByteArray): VaultIndexRecord? {
-        if (!indexFile.exists() || indexFile.length() < HEADER_SIZE + 16) {
-            return null
+    fun readIndexStatus(dek: ByteArray): IndexReadResult {
+        if (!indexFile.exists()) {
+            return IndexReadResult.Missing
+        }
+        if (indexFile.length() < HEADER_SIZE + 16) {
+            return IndexReadResult.Corrupt(
+                IllegalArgumentException("Index file too small (${indexFile.length()} bytes)")
+            )
         }
 
         return try {
             val rawBytes = indexFile.readBytes()
             DataInputStream(ByteArrayInputStream(rawBytes)).use { dis ->
                 val magic = dis.readInt()
-                if (magic != MAGIC) return null
+                if (magic != MAGIC) {
+                    return IndexReadResult.Corrupt(
+                        IllegalArgumentException("Invalid index magic: ${Integer.toHexString(magic)}")
+                    )
+                }
                 val version = dis.readInt()
                 val iv = ByteArray(CryptoUtils.GCM_IV_SIZE_BYTES)
                 dis.readFully(iv)
@@ -71,10 +88,22 @@ class VaultIndexManager(
                 val aad = buildAad(version, vaultId)
                 val decrypted = CryptoUtils.aesGcmDecrypt(dek, ivAndCiphertext, aad)
                 val jsonString = String(decrypted, Charsets.UTF_8)
-                json.decodeFromString(VaultIndexRecord.serializer(), jsonString)
+                val parsed = json.decodeFromString(VaultIndexRecord.serializer(), jsonString)
+                IndexReadResult.Loaded(parsed)
             }
         } catch (e: Exception) {
-            null
+            IndexReadResult.Corrupt(e)
+        }
+    }
+
+    /**
+     * Reads and decrypts the index file using [dek].
+     * Returns null when missing or corrupted; use [readIndexStatus] to distinguish causes.
+     */
+    fun readIndex(dek: ByteArray): VaultIndexRecord? {
+        return when (val status = readIndexStatus(dek)) {
+            is IndexReadResult.Loaded -> status.index
+            is IndexReadResult.Missing, is IndexReadResult.Corrupt -> null
         }
     }
 
@@ -106,9 +135,19 @@ class VaultIndexManager(
 
     /**
      * Updates an entry in the index or adds it if not present.
+     * If index is missing, rebuilds from disk diary files first.
+     * If index is corrupt, only writes rebuilt index if rebuilt entry count >= decodable .lkd files; otherwise throws.
      */
-    fun upsertEntry(entry: IndexEntryRecord, dek: ByteArray) {
-        val current = readIndex(dek) ?: VaultIndexRecord(entries = emptyList())
+    fun upsertEntry(
+        entry: IndexEntryRecord,
+        dek: ByteArray,
+        diariesDir: File = File(vaultDir, "diaries")
+    ) {
+        val current = when (val status = readIndexStatus(dek)) {
+            is IndexReadResult.Loaded -> status.index
+            is IndexReadResult.Missing -> rebuildFromDiaries(diariesDir, dek)
+            is IndexReadResult.Corrupt -> rebuildFromDiariesVerified(diariesDir, dek)
+        }
         val entries = current.entries.filter { it.id != entry.id }.toMutableList()
         entries.add(entry)
         val updated = current.copy(updatedAt = System.currentTimeMillis(), entries = entries)
@@ -117,44 +156,85 @@ class VaultIndexManager(
 
     /**
      * Removes an entry from the index.
+     * If index is missing, rebuilds from disk diary files first.
+     * If index is corrupt, only writes rebuilt index if rebuilt entry count >= decodable .lkd files; otherwise throws.
      */
-    fun removeEntry(id: String, dek: ByteArray) {
-        val current = readIndex(dek) ?: return
+    fun removeEntry(
+        id: String,
+        dek: ByteArray,
+        diariesDir: File = File(vaultDir, "diaries")
+    ) {
+        val current = when (val status = readIndexStatus(dek)) {
+            is IndexReadResult.Loaded -> status.index
+            is IndexReadResult.Missing -> rebuildFromDiaries(diariesDir, dek)
+            is IndexReadResult.Corrupt -> rebuildFromDiariesVerified(diariesDir, dek)
+        }
         val filtered = current.entries.filter { it.id != id }
         val updated = current.copy(updatedAt = System.currentTimeMillis(), entries = filtered)
         writeIndex(updated, dek)
+    }
+
+    private fun scanDecodableDiaries(diariesDir: File, dek: ByteArray): Pair<Int, List<IndexEntryRecord>> {
+        val entries = mutableListOf<IndexEntryRecord>()
+        if (!diariesDir.exists()) return 0 to entries
+        val lkdFiles = diariesDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray()
+        for (file in lkdFiles) {
+            val diaryId = file.name.removeSuffix(".lkd")
+            try {
+                val decoded = DiaryFileCodec.decode(file.readBytes(), dek, diaryId)
+                val r = decoded.record
+                entries.add(
+                    IndexEntryRecord(
+                        id = r.id,
+                        createdAt = r.createdAt,
+                        updatedAt = r.updatedAt,
+                        pinned = r.pinned,
+                        flags = (if (r.diaryLock != null) 1 else 0) or
+                                (if (r.audios.isNotEmpty()) 2 else 0) or
+                                (if (r.images.isNotEmpty()) 4 else 0) or
+                                (if (r.videos.isNotEmpty()) 8 else 0),
+                        plainPreview = r.plainPreview,
+                        heading = r.heading
+                    )
+                )
+            } catch (_: Exception) {
+                // Unreadable/corrupt file stays omitted from index; quarantine & error surfacing handled in recovery/load
+            }
+        }
+        return lkdFiles.size to entries
+    }
+
+    private fun rebuildFromDiariesVerified(diariesDir: File, dek: ByteArray): VaultIndexRecord {
+        val (totalLkdFiles, decodableEntries) = scanDecodableDiaries(diariesDir, dek)
+        val decodableCount = decodableEntries.size
+        val entries = customEntryScanner?.invoke(diariesDir, dek) ?: decodableEntries
+
+        if (totalLkdFiles > 0 && entries.isEmpty()) {
+            throw StorageVerificationException(
+                "Refusing to overwrite corrupt index: $totalLkdFiles .lkd files exist on disk but 0 entries decoded."
+            )
+        }
+        if (entries.size < decodableCount) {
+            throw StorageVerificationException(
+                "Refusing to overwrite corrupt index: rebuilt ${entries.size} entries, fewer than $decodableCount decodable .lkd files."
+            )
+        }
+
+        val rebuilt = VaultIndexRecord(
+            version = CURRENT_VERSION,
+            updatedAt = System.currentTimeMillis(),
+            entries = entries
+        )
+        writeIndex(rebuilt, dek)
+        return rebuilt
     }
 
     /**
      * Self-heals the index by scanning all .lkd files in [diariesDir] and rebuilding index.lki.
      */
     fun rebuildFromDiaries(diariesDir: File, dek: ByteArray): VaultIndexRecord {
-        val entries = mutableListOf<IndexEntryRecord>()
-        if (diariesDir.exists()) {
-            val lkdFiles = diariesDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray()
-            for (file in lkdFiles) {
-                val diaryId = file.name.removeSuffix(".lkd")
-                try {
-                    val decoded = DiaryFileCodec.decode(file.readBytes(), dek, diaryId)
-                    val r = decoded.record
-                    entries.add(
-                        IndexEntryRecord(
-                            id = r.id,
-                            createdAt = r.createdAt,
-                            updatedAt = r.updatedAt,
-                            pinned = r.pinned,
-                            flags = (if (r.diaryLock != null) 1 else 0) or
-                                    (if (r.audios.isNotEmpty()) 2 else 0) or
-                                    (if (r.images.isNotEmpty()) 4 else 0),
-                            plainPreview = r.plainPreview,
-                            heading = r.heading
-                        )
-                    )
-                } catch (e: Exception) {
-                    // Quarantining of corrupt file handled in recovery scan
-                }
-            }
-        }
+        val (_, decodableEntries) = scanDecodableDiaries(diariesDir, dek)
+        val entries = customEntryScanner?.invoke(diariesDir, dek) ?: decodableEntries
 
         val rebuilt = VaultIndexRecord(
             version = CURRENT_VERSION,

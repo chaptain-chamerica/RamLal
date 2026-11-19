@@ -1,9 +1,15 @@
 package com.likkho.app.storage
 
+import android.annotation.SuppressLint
+import android.os.Build
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption
 
 class InsufficientStorageException(msg: String) : IOException(msg)
 class StorageVerificationException(msg: String, cause: Throwable? = null) : IOException(msg, cause)
@@ -11,7 +17,7 @@ class StorageVerificationException(msg: String, cause: Throwable? = null) : IOEx
 /**
  * Implements atomic, fail-safe disk writes per STORAGE_SPEC Section 5:
  * - Free space check before write (ensures disk full never corrupts existing data).
- * - Write to .tmp -> flush + fsync -> verify read-back -> backup to .bak -> atomic rename -> remove .bak.
+ * - Write to .tmp -> flush + fsync -> verify read-back -> backup to .bak -> atomic rename -> parent dir fsync -> remove .bak.
  */
 object SafeStorageWriter {
 
@@ -26,6 +32,16 @@ object SafeStorageWriter {
         targetFile: File,
         data: ByteArray,
         verifier: ((File) -> Unit)? = null
+    ) {
+        safeWriteInternal(targetFile, data, verifier, onDirectorySync = null)
+    }
+
+    @Synchronized
+    internal fun safeWriteInternal(
+        targetFile: File,
+        data: ByteArray,
+        verifier: ((File) -> Unit)? = null,
+        onDirectorySync: ((File) -> Unit)? = null
     ) {
         val parentDir = targetFile.parentFile ?: throw IOException("Target file has no parent directory")
         parentDir.mkdirs()
@@ -86,15 +102,50 @@ object SafeStorageWriter {
         if (!renamed) {
             // Atomic rename failed: attempt recovery from .bak
             if (bakFile.exists() && !targetFile.exists()) {
-                bakFile.renameTo(targetFile)
+                if (bakFile.renameTo(targetFile)) {
+                    fsyncDirectory(parentDir)
+                }
             }
             tmpFile.delete()
             throw IOException("Failed to rename temporary file to ${targetFile.name}")
         }
 
+        // Fsync parent directory so the renamed directory entry is durable (best-effort)
+        onDirectorySync?.invoke(parentDir)
+        fsyncDirectory(parentDir)
+
         // 6. Delete .bak after successful atomic rename
         if (bakFile.exists()) {
             bakFile.delete()
+        }
+    }
+
+    /**
+     * Best-effort fsync of [dir] via FileChannel (API 26+ / JVM) or Os.fsync (API 24-25).
+     */
+    @SuppressLint("NewApi")
+    internal fun fsyncDirectory(dir: File): Boolean {
+        if (!dir.exists() || !dir.isDirectory) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O || Build.VERSION.SDK_INT == 0) {
+            try {
+                FileChannel.open(dir.toPath(), StandardOpenOption.READ).use { channel ->
+                    channel.force(true)
+                }
+                return true
+            } catch (_: Throwable) {
+                // Best-effort fallback below
+            }
+        }
+        return try {
+            val fd = Os.open(dir.absolutePath, OsConstants.O_RDONLY, 0)
+            try {
+                Os.fsync(fd)
+                true
+            } finally {
+                Os.close(fd)
+            }
+        } catch (_: Throwable) {
+            false
         }
     }
 

@@ -153,7 +153,7 @@ class RealFeatureHooks(
         val zipFile = File(exportDir, "Likkho_Export_${System.currentTimeMillis()}.zip")
         vaultManager.withActiveDek { dek ->
             val diaryRepo = vaultManager.activeDiaryRepository()
-            val diaries = diaryRepo.loadAllDiaries(dek)
+            val diaries = diaryRepo.loadAllDiaries(dek).diaries
             ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
                 for (diary in diaries) {
                     val entryName = "diaries/${diary.id}_${diary.heading.filter { it.isLetterOrDigit() }.take(20)}.txt"
@@ -263,8 +263,13 @@ class RealFeatureHooks(
                     mediaRepo = mediaRepo,
                     vaultDek = dek
                 )
-                val allLogs = diaryRepo.loadAllDiaries(dek).map { it.toDiaryLog() }
-                RestoreResult(logs = allLogs, skippedMediaCount = res.skippedMediaCount)
+                val loadRes = diaryRepo.loadAllDiaries(dek)
+                val allLogs = loadRes.diaries.map { it.toDiaryLog() }
+                RestoreResult(
+                    logs = allLogs,
+                    skippedMediaCount = res.skippedMediaCount,
+                    failedDiaries = loadRes.failed
+                )
             }
         } catch (e: Exception) {
             throw IncorrectKeyException()
@@ -308,52 +313,148 @@ class RealFeatureHooks(
     //  Workspace / Canvas Storage (Sections 3, 4, 5 Granular Ops)
     // =========================================================================
 
-    override fun persistLogs(logs: List<DiaryLog>) {
+    override fun persistLogs(
+        logs: List<DiaryLog>,
+        obsoleteMediaIds: Set<String>,
+        onResult: (Result<Unit>) -> Unit
+    ) {
+        val boundVaultId = vaultManager.currentVault
+        if (boundVaultId == null || !vaultManager.isUnlocked) {
+            onResult(Result.failure(IllegalStateException("Vault is locked. Cannot save diaries.")))
+            return
+        }
+        val snapshot = logs.toList()
+        val cleanupSnapshot = obsoleteMediaIds.toSet()
         scope.launch(dispatcher) {
-            writeMutex.withLock {
-                if (!vaultManager.isUnlocked) return@withLock
-                vaultManager.withActiveDek { dek ->
-                    val repo = vaultManager.activeDiaryRepository()
-                    val mediaRepo = vaultManager.activeMediaRepository()
-
-                    val currentIndex = repo.loadIndex(dek)
-                    val existingIds = currentIndex.entries.map { it.id }.toSet()
-                    val newIds = logs.map { it.id }.toSet()
-
-                    // Granular delete: entries removed from UI list
-                    for (toDelete in existingIds - newIds) {
-                        repo.deleteDiary(toDelete, dek, mediaRepo)
+            val result = runCatching {
+                writeMutex.withLock {
+                    if (!vaultManager.isUnlocked) {
+                        throw IllegalStateException("Vault is locked. Save aborted.")
                     }
+                    if (vaultManager.currentVault != boundVaultId) {
+                        throw IllegalStateException("Active vault changed before save completed.")
+                    }
+                    vaultManager.withActiveDek { dek ->
+                        val repo = vaultManager.getDiaryRepository(boundVaultId)
+                        val mediaRepo = vaultManager.getMediaRepository(boundVaultId)
 
-                    // Granular save: only new or modified entries
-                    val indexMap = currentIndex.entries.associateBy { it.id }
-                    for (log in logs) {
-                        val existing = indexMap[log.id]
-                        val changed = existing == null ||
-                            existing.updatedAt != log.updatedAt ||
-                            existing.pinned != log.pinned ||
-                            existing.heading != log.heading ||
-                            existing.plainPreview != log.plainPreview
-                        if (changed) {
-                            repo.saveDiary(log.toDiaryRecord(), dek)
+                        val currentIndex = repo.loadIndex(dek)
+                        val indexMap = currentIndex.entries.associateBy { it.id }
+                        for (log in snapshot) {
+                            val existing = indexMap[log.id]
+                            val expectedFlags = (if (log.diaryLockPin != null) 1 else 0) or
+                                (if (log.audioAttachments.isNotEmpty()) 2 else 0) or
+                                (if (log.canvasImages.isNotEmpty()) 4 else 0) or
+                                (if (log.videoAttachments.isNotEmpty()) 8 else 0)
+                            val changed = existing == null ||
+                                existing.updatedAt != log.updatedAt ||
+                                existing.pinned != log.pinned ||
+                                existing.flags != expectedFlags ||
+                                existing.heading != log.heading ||
+                                existing.plainPreview != log.plainPreview
+                            if (changed) {
+                                repo.saveDiary(log.toDiaryRecord(), dek)
+                            }
+                        }
+
+                        if (cleanupSnapshot.isNotEmpty()) {
+                            val scan = repo.scanReferencedMediaIds(dek)
+                            if (!scan.hasUndecodableOrQuarantined) {
+                                mediaRepo.deleteUnreferencedMediaForDiary(cleanupSnapshot, scan.referencedIds)
+                            }
                         }
                     }
                 }
             }
+            onResult(result)
         }
     }
 
-    override fun scheduleReminder(log: DiaryLog, at: Long?) {
+    override fun deleteDiary(id: String, onResult: (Result<Unit>) -> Unit) {
+        val boundVaultId = vaultManager.currentVault
+        if (boundVaultId == null || !vaultManager.isUnlocked) {
+            onResult(Result.failure(IllegalStateException("Vault is locked. Cannot delete diary.")))
+            return
+        }
         scope.launch(dispatcher) {
-            writeMutex.withLock {
-                if (!vaultManager.isUnlocked) return@withLock
-                vaultManager.withActiveDek { dek ->
-                    val repo = vaultManager.activeDiaryRepository()
-                    val existing = runCatching { repo.loadDiary(log.id, dek).record }.getOrNull()
-                    val record = (existing ?: log.toDiaryRecord()).copy(reminderAt = at)
-                    repo.saveDiary(record, dek)
+            val result = runCatching {
+                writeMutex.withLock {
+                    if (!vaultManager.isUnlocked) {
+                        throw IllegalStateException("Vault is locked. Delete aborted.")
+                    }
+                    if (vaultManager.currentVault != boundVaultId) {
+                        throw IllegalStateException("Active vault changed before delete completed.")
+                    }
+                    vaultManager.withActiveDek { dek ->
+                        val repo = vaultManager.getDiaryRepository(boundVaultId)
+                        val mediaRepo = vaultManager.getMediaRepository(boundVaultId)
+                        repo.deleteDiary(id, dek, mediaRepo)
+                    }
                 }
             }
+            onResult(result)
+        }
+    }
+
+    override fun deleteUnreferencedMedia(candidateIds: Set<String>, onResult: (Result<Unit>) -> Unit) {
+        if (candidateIds.isEmpty()) {
+            onResult(Result.success(Unit))
+            return
+        }
+        val boundVaultId = vaultManager.currentVault
+        if (boundVaultId == null || !vaultManager.isUnlocked) {
+            onResult(Result.failure(IllegalStateException("Vault is locked. Cannot clean up unused media.")))
+            return
+        }
+        val snapshot = candidateIds.toSet()
+        scope.launch(dispatcher) {
+            val result = runCatching {
+                writeMutex.withLock {
+                    if (!vaultManager.isUnlocked) {
+                        throw IllegalStateException("Vault is locked. Media cleanup aborted.")
+                    }
+                    if (vaultManager.currentVault != boundVaultId) {
+                        throw IllegalStateException("Active vault changed before media cleanup completed.")
+                    }
+                    vaultManager.withActiveDek { dek ->
+                        val repo = vaultManager.getDiaryRepository(boundVaultId)
+                        val mediaRepo = vaultManager.getMediaRepository(boundVaultId)
+                        val scan = repo.scanReferencedMediaIds(dek)
+                        if (!scan.hasUndecodableOrQuarantined) {
+                            mediaRepo.deleteUnreferencedMediaForDiary(snapshot, scan.referencedIds)
+                        }
+                    }
+                }
+            }
+            onResult(result)
+        }
+    }
+
+    override fun scheduleReminder(log: DiaryLog, at: Long?, onResult: (Result<Unit>) -> Unit) {
+        val boundVaultId = vaultManager.currentVault
+        if (boundVaultId == null || !vaultManager.isUnlocked) {
+            onResult(Result.failure(IllegalStateException("Vault is locked. Cannot update reminder.")))
+            return
+        }
+        scope.launch(dispatcher) {
+            val result = runCatching {
+                writeMutex.withLock {
+                    if (!vaultManager.isUnlocked) {
+                        throw IllegalStateException("Vault is locked. Reminder update aborted.")
+                    }
+                    if (vaultManager.currentVault != boundVaultId) {
+                        throw IllegalStateException("Active vault changed before reminder update completed.")
+                    }
+                    vaultManager.withActiveDek { dek ->
+                        val repo = vaultManager.getDiaryRepository(boundVaultId)
+                        val diaryFile = File(repo.diariesDir, "${log.id}.lkd")
+                        val existing = if (diaryFile.exists()) repo.loadDiary(log.id, dek).record else null
+                        val record = (existing ?: log.toDiaryRecord()).copy(reminderAt = at)
+                        repo.saveDiary(record, dek)
+                    }
+                }
+            }
+            onResult(result)
         }
     }
 
@@ -393,13 +494,7 @@ class RealFeatureHooks(
         )
     }
 
-    override suspend fun pickPfpImage(): String? = withContext(dispatcher) {
-        if (!vaultManager.isUnlocked) return@withContext null
-        val sample = "PFP_IMAGE".toByteArray(Charsets.UTF_8)
-        vaultManager.withActiveDek { dek ->
-            vaultManager.activeMediaRepository().importMedia(ByteArrayInputStream(sample), dek)
-        }
-    }
+    override suspend fun pickPfpImage(): String? = null
 
     override suspend fun pickBackgroundImage(): String? = withContext(dispatcher) {
         if (!vaultManager.isUnlocked) return@withContext null

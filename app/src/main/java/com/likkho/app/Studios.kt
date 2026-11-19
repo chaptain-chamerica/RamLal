@@ -182,8 +182,7 @@ fun PfpStudioDialog(
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
             scope.launch {
-                val mediaId = onImportPhotoUri?.invoke(uri) ?: hooks.pickPfpImage()
-                if (mediaId != null) photo = mediaId
+                importPickedPfpPhoto(uri, onImportPhotoUri)?.let { photo = it }
             }
         }
     }
@@ -204,8 +203,6 @@ fun PfpStudioDialog(
                     {
                         if (onImportPhotoUri != null) {
                             photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                        } else {
-                            scope.launch { hooks.pickPfpImage()?.let { photo = it } }
                         }
                     },
                     Modifier.fillMaxWidth(),
@@ -220,6 +217,11 @@ fun PfpStudioDialog(
         }
     }
 }
+
+internal suspend fun <T> importPickedPfpPhoto(
+    uri: T?,
+    onImportPhotoUri: (suspend (T) -> String?)?
+): String? = if (uri != null) onImportPhotoUri?.invoke(uri) else null
 
 /** Word analysis result: 6 categories (WordAnalysisModal). */
 @Composable

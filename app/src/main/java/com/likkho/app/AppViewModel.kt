@@ -21,6 +21,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.likkho.app.editor.FontRegistry
 import com.likkho.app.storage.CryptoUtils
+import com.likkho.app.storage.FailedDiaryEntry
 import com.likkho.app.storage.UnlockResult
 import com.likkho.app.storage.VaultId
 import com.likkho.app.storage.VaultManager
@@ -30,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.InputStream
 
 data class PendingUnlock(val log: DiaryLog, val action: UnlockAction)
 enum class UnlockAction { OPEN, EXPORT, DELETE }
@@ -76,6 +78,7 @@ class AppViewModel @JvmOverloads constructor(
     var exportStatusBanner by mutableStateOf<String?>(null)
     var ringingAlert by mutableStateOf<RingingAlert?>(null)
     var availableUpdate by mutableStateOf<AppUpdateInfo?>(null)
+    var failedDiaries by mutableStateOf<List<FailedDiaryEntry>>(emptyList())
 
     // ---------- passcode guard & wrong-PIN protection (Storage Spec Section 2) ----------
     fun remainingCooldownSeconds(): Int = vaultManager.wrongPinCounter.remainingCooldownSeconds()
@@ -100,14 +103,18 @@ class AppViewModel @JvmOverloads constructor(
                 val hasDecoy = vaultManager.decoyExists() && vaultManager.hasPasscode(VaultId.DECOY)
                 val bio = vaultManager.hasBiometric(VaultId.PRIMARY)
 
-                val initialLogs = if (!hasPrimary) {
-                    vaultManager.unlockNoPasscode()
+                val loadResult = if (!hasPrimary) {
+                    if (!vaultManager.isUnlocked) {
+                        vaultManager.unlockNoPasscode()
+                    }
                     if (vaultManager.isUnlocked) {
                         vaultManager.withActiveDek { dek ->
-                            vaultManager.activeDiaryRepository().loadAllDiaries(dek).map { it.toDiaryLog() }
+                            vaultManager.activeDiaryRepository().loadAllDiaries(dek)
                         }
-                    } else emptyList()
-                } else emptyList()
+                    } else null
+                } else null
+                val initialLogs = loadResult?.diaries?.map { it.toDiaryLog() } ?: emptyList()
+                val initialFailed = loadResult?.failed ?: emptyList()
 
                 val savedFonts = FontRegistry.loadSavedFonts(fontStorageDir())
 
@@ -125,6 +132,13 @@ class AppViewModel @JvmOverloads constructor(
                         isLocked = false
                         logs.clear()
                         logs.addAll(initialLogs)
+                        failedDiaries = initialFailed
+                        if (initialFailed.isNotEmpty()) {
+                            showStatus(
+                                "${initialFailed.size} diary ${if (initialFailed.size == 1) "file" else "files"} failed to open (${initialFailed.joinToString { it.diaryId }}).",
+                                8000
+                            )
+                        }
                     }
                     isStartupReady = true
                 }
@@ -204,31 +218,70 @@ class AppViewModel @JvmOverloads constructor(
     fun loadLogsFromActiveVault() {
         viewModelScope.launch(Dispatchers.IO) {
             if (!vaultManager.isUnlocked) return@launch
-            val list = vaultManager.withActiveDek { dek ->
+            val loadResult = vaultManager.withActiveDek { dek ->
                 val repo = vaultManager.activeDiaryRepository()
-                repo.loadAllDiaries(dek).map { it.toDiaryLog() }
+                repo.loadAllDiaries(dek)
             }
+            val list = loadResult.diaries.map { it.toDiaryLog() }
+            val failed = loadResult.failed
             withContext(Dispatchers.Main) {
                 logs.clear()
                 logs.addAll(list)
+                failedDiaries = failed
+                if (failed.isNotEmpty()) {
+                    showStatus(
+                        "${failed.size} diary ${if (failed.size == 1) "file" else "files"} failed to open (${failed.joinToString { it.diaryId }}).",
+                        8000
+                    )
+                }
             }
         }
     }
 
     // ---------- logs ----------
-    fun upsertLog(updated: DiaryLog, exitAfterSave: Boolean) {
+    fun upsertLog(
+        updated: DiaryLog,
+        exitAfterSave: Boolean,
+        obsoleteMediaIds: Set<String> = emptySet(),
+        onPersistResult: (Result<Unit>) -> Unit = {}
+    ) {
         val i = logs.indexOfFirst { it.id == updated.id }
         if (i >= 0) logs[i] = updated else logs.add(0, updated)
         editingLog = updated
-        hooks.persistLogs(logs.toList())
+        hooks.persistLogs(logs.toList(), obsoleteMediaIds) { result ->
+            viewModelScope.launch {
+                result.onFailure { err ->
+                    showStatus("Save failed: ${err.message ?: "Storage error"}", 5000)
+                }
+                onPersistResult(result)
+            }
+        }
         if (exitAfterSave) navigateTo(Route.HOME)
+    }
+
+    fun cleanupUnusedSessionMedia(candidateIds: Set<String>) {
+        if (candidateIds.isNotEmpty()) {
+            hooks.deleteUnreferencedMedia(candidateIds) { result ->
+                result.onFailure { err ->
+                    viewModelScope.launch {
+                        showStatus("Media cleanup failed: ${err.message ?: "Storage error"}", 4000)
+                    }
+                }
+            }
+        }
     }
 
     fun togglePin(id: String) {
         val i = logs.indexOfFirst { it.id == id }
         if (i >= 0) logs[i] = logs[i].copy(pinned = !logs[i].pinned)
         openMenuLogId = null
-        hooks.persistLogs(logs.toList())
+        hooks.persistLogs(logs.toList()) { result ->
+            result.onFailure { err ->
+                viewModelScope.launch {
+                    showStatus("Pin update failed: ${err.message ?: "Storage error"}", 4000)
+                }
+            }
+        }
     }
 
     fun requestDelete(id: String) {
@@ -240,10 +293,24 @@ class AppViewModel @JvmOverloads constructor(
 
     fun confirmDelete() {
         val t = pendingDeleteLog ?: return
-        hooks.scheduleReminder(t, null)
+        if (t.reminderAt != null) {
+            hooks.scheduleReminder(t, null) { remRes ->
+                remRes.onFailure { err ->
+                    viewModelScope.launch {
+                        showStatus("Reminder update failed: ${err.message ?: "Storage error"}", 4000)
+                    }
+                }
+            }
+        }
         logs.removeAll { it.id == t.id }
         pendingDeleteLog = null
-        hooks.persistLogs(logs.toList())
+        hooks.deleteDiary(t.id) { result ->
+            result.onFailure { err ->
+                viewModelScope.launch {
+                    showStatus("Delete failed: ${err.message ?: "Storage error"}", 5000)
+                }
+            }
+        }
         if (route != Route.HOME) navigateTo(Route.HOME)
     }
 
@@ -377,17 +444,62 @@ class AppViewModel @JvmOverloads constructor(
 
     private val imageBitmapCache = LruCache<String, ImageBitmap>(24)
 
+    private class CountingInputStream(private val delegate: InputStream) : InputStream() {
+        var bytesRead: Long = 0L
+            private set
+
+        override fun read(): Int {
+            val b = delegate.read()
+            if (b >= 0) bytesRead++
+            return b
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            val n = delegate.read(b, off, len)
+            if (n > 0) bytesRead += n
+            return n
+        }
+
+        override fun close() = delegate.close()
+    }
+
+    private fun queryUriSize(uri: Uri): Long {
+        val app = getApplication<Application>()
+        var reportedSize = 0L
+        runCatching {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx >= 0 && !c.isNull(sizeIdx)) reportedSize = c.getLong(sizeIdx)
+                }
+            }
+        }
+        if (reportedSize <= 0L) {
+            runCatching {
+                app.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                    if (afd.length > 0L) reportedSize = afd.length
+                }
+            }
+        }
+        return reportedSize.coerceAtLeast(0L)
+    }
+
     suspend fun importImageUri(uri: Uri, x: Float = 24f, y: Float = 120f): CanvasImage? = withContext(Dispatchers.IO) {
         if (!vaultManager.isUnlocked) return@withContext null
         val app = getApplication<Application>()
-        val rawBytes = runCatching {
-            app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull() ?: return@withContext null
-        if (rawBytes.isEmpty()) return@withContext null
+        val reportedSize = queryUriSize(uri)
+        val orientation = runCatching {
+            app.contentResolver.openInputStream(uri)?.use { stream ->
+                ExifInterface(stream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            }
+        }.getOrNull() ?: ExifInterface.ORIENTATION_NORMAL
 
-        val orientation = readExifOrientation(rawBytes)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+        runCatching {
+            app.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, bounds)
+            }
+        }
         val swapDims = isExifDimensionSwapped(orientation)
         val rawW = if (swapDims) bounds.outHeight else bounds.outWidth
         val rawH = if (swapDims) bounds.outWidth else bounds.outHeight
@@ -405,14 +517,21 @@ class AppViewModel @JvmOverloads constructor(
             initH = 240f
             initW = (initH * aspect).coerceIn(72f, 320f)
         }
-        val mediaId = vaultManager.withActiveDek { dek ->
-            vaultManager.activeMediaRepository().importMediaBytes(
-                CryptoUtils.randomId("med_"),
-                rawBytes,
-                dek
-            )
+
+        val mediaId = CryptoUtils.randomId("med_")
+        val rawStream = app.contentResolver.openInputStream(uri) ?: return@withContext null
+        val importedBytes = CountingInputStream(rawStream).use { counting ->
+            vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().importMedia(mediaId, counting, dek, reportedSize)
+            }
+            counting.bytesRead
         }
-        decodeSampledBitmap(rawBytes)?.let { imageBitmapCache.put(mediaId, it) }
+        if (importedBytes <= 0L) {
+            vaultManager.activeMediaRepository().deleteMedia(mediaId)
+            return@withContext null
+        }
+
+        decodeSampledBitmapFromEncryptedMedia(mediaId)?.let { imageBitmapCache.put(mediaId, it) }
         CanvasImage(
             id = mediaId,
             source = mediaId,
@@ -420,7 +539,7 @@ class AppViewModel @JvmOverloads constructor(
             y = y.coerceAtLeast(0f),
             width = initW,
             height = initH,
-            sizeBytes = rawBytes.size.toLong()
+            sizeBytes = if (reportedSize > 0L) reportedSize else importedBytes
         )
     }
 
@@ -428,14 +547,14 @@ class AppViewModel @JvmOverloads constructor(
         if (!vaultManager.isUnlocked) return@withContext null
         val app = getApplication<Application>()
         var displayName: String? = null
-        var reportedSize: Long = 0L
+        var reportedSize: Long = queryUriSize(uri)
         runCatching {
             app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
                 if (c.moveToFirst()) {
                     val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (nameIdx >= 0) displayName = c.getString(nameIdx)
                     val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
-                    if (sizeIdx >= 0 && !c.isNull(sizeIdx)) reportedSize = c.getLong(sizeIdx)
+                    if (sizeIdx >= 0 && !c.isNull(sizeIdx) && c.getLong(sizeIdx) > 0L) reportedSize = c.getLong(sizeIdx)
                 }
             }
         }
@@ -496,11 +615,14 @@ class AppViewModel @JvmOverloads constructor(
         if (!vaultManager.isUnlocked) return@withContext null
         val app = getApplication<Application>()
         var displayName: String? = null
+        var reportedSize: Long = queryUriSize(uri)
         runCatching {
-            app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
                 if (c.moveToFirst()) {
                     val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (idx >= 0) displayName = c.getString(idx)
+                    val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx >= 0 && !c.isNull(sizeIdx) && c.getLong(sizeIdx) > 0L) reportedSize = c.getLong(sizeIdx)
                 }
             }
         }
@@ -517,7 +639,7 @@ class AppViewModel @JvmOverloads constructor(
         val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
         val mediaId = stream.use { s ->
             vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().importMedia(s, dek)
+                vaultManager.activeMediaRepository().importMedia(CryptoUtils.randomId("med_"), s, dek, reportedSize)
             }
         }
         val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Audio_${mediaId.take(6)}"
@@ -536,18 +658,20 @@ class AppViewModel @JvmOverloads constructor(
     suspend fun importMediaUri(uri: Uri): String? = withContext(Dispatchers.IO) {
         if (!vaultManager.isUnlocked) return@withContext null
         val app = getApplication<Application>()
-        val rawBytes = runCatching {
-            app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull() ?: return@withContext null
-        if (rawBytes.isEmpty()) return@withContext null
-        val mediaId = vaultManager.withActiveDek { dek ->
-            vaultManager.activeMediaRepository().importMediaBytes(
-                CryptoUtils.randomId("med_"),
-                rawBytes,
-                dek
-            )
+        val reportedSize = queryUriSize(uri)
+        val mediaId = CryptoUtils.randomId("med_")
+        val rawStream = app.contentResolver.openInputStream(uri) ?: return@withContext null
+        val importedBytes = CountingInputStream(rawStream).use { counting ->
+            vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().importMedia(mediaId, counting, dek, reportedSize)
+            }
+            counting.bytesRead
         }
-        decodeSampledBitmap(rawBytes)?.let { imageBitmapCache.put(mediaId, it) }
+        if (importedBytes <= 0L) {
+            vaultManager.activeMediaRepository().deleteMedia(mediaId)
+            return@withContext null
+        }
+        decodeSampledBitmapFromEncryptedMedia(mediaId)?.let { imageBitmapCache.put(mediaId, it) }
         mediaId
     }
 
@@ -593,31 +717,40 @@ class AppViewModel @JvmOverloads constructor(
     suspend fun loadDecryptedImageBitmap(mediaId: String): ImageBitmap? {
         if (mediaId.isBlank()) return null
         imageBitmapCache.get(mediaId)?.let { return it }
-        val bytes = loadDecryptedMediaBytes(mediaId) ?: return null
-        val bmp = withContext(Dispatchers.Default) { decodeSampledBitmap(bytes) } ?: return null
+        val bmp = withContext(Dispatchers.IO) { decodeSampledBitmapFromEncryptedMedia(mediaId) } ?: return null
         imageBitmapCache.put(mediaId, bmp)
         return bmp
     }
 
-    private fun decodeSampledBitmap(bytes: ByteArray, maxDim: Int = 1600): ImageBitmap? {
-        if (bytes.isEmpty()) return null
-        val orientation = readExifOrientation(bytes)
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        var sample = 1
-        while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) {
-            sample *= 2
-        }
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        val rawBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
-        return applyExifOrientation(rawBitmap, orientation).asImageBitmap()
-    }
+    private fun decodeSampledBitmapFromEncryptedMedia(mediaId: String, maxDim: Int = 1600): ImageBitmap? {
+        if (!vaultManager.isUnlocked) return null
+        return runCatching {
+            vaultManager.withActiveDek { dek ->
+                val repo = vaultManager.activeMediaRepository()
+                val orientation = runCatching {
+                    repo.openDecryptedStream(mediaId, dek).use { s ->
+                        ExifInterface(s).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                    }
+                }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
 
-    private fun readExifOrientation(bytes: ByteArray): Int = runCatching {
-        ExifInterface(ByteArrayInputStream(bytes))
-            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-    }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                repo.openDecryptedStream(mediaId, dek).use { s ->
+                    BitmapFactory.decodeStream(s, null, bounds)
+                }
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@withActiveDek null
+
+                var sample = 1
+                while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) {
+                    sample *= 2
+                }
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                val rawBitmap = repo.openDecryptedStream(mediaId, dek).use { s ->
+                    BitmapFactory.decodeStream(s, null, opts)
+                } ?: return@withActiveDek null
+                applyExifOrientation(rawBitmap, orientation).asImageBitmap()
+            }
+        }.getOrNull()
+    }
 
     private fun isExifDimensionSwapped(orientation: Int): Boolean =
         orientation == ExifInterface.ORIENTATION_ROTATE_90 ||
@@ -697,15 +830,59 @@ class AppViewModel @JvmOverloads constructor(
     fun restoreSingleDiary(log: DiaryLog) {
         val i = logs.indexOfFirst { it.id == log.id }
         if (i >= 0) logs[i] = log else logs.add(0, log)
-        hooks.persistLogs(logs.toList())
-        showStatus("Restored \"${log.heading.ifBlank { "Diary" }}\" to app.", 3000)
+        hooks.persistLogs(logs.toList()) { result ->
+            viewModelScope.launch {
+                result.onSuccess {
+                    showStatus("Restored \"${log.heading.ifBlank { "Diary" }}\" to app.", 3000)
+                }.onFailure { err ->
+                    showStatus("Restore save failed: ${err.message ?: "Storage error"}", 5000)
+                }
+            }
+        }
     }
 
     fun onRestoreBundle(restored: List<DiaryLog>) {
-        if (restored.isNotEmpty()) {
-            logs.clear()
-            logs.addAll(restored)
-            hooks.persistLogs(logs.toList())
+        if (restored.isEmpty()) return
+        val merged = mergeRestoredLogs(logs.toList(), restored)
+        logs.clear()
+        logs.addAll(merged)
+        hooks.persistLogs(logs.toList()) { result ->
+            result.onFailure { err ->
+                viewModelScope.launch {
+                    showStatus("Restore persist failed: ${err.message ?: "Storage error"}", 5000)
+                }
+            }
         }
     }
+}
+
+internal fun mergeRestoredLogs(existing: List<DiaryLog>, restored: List<DiaryLog>): List<DiaryLog> {
+    if (restored.isEmpty()) return existing
+    val existingById = existing.associateBy { it.id }.toMutableMap()
+    for (incoming in restored) {
+        val current = existingById[incoming.id]
+        if (current == null) {
+            existingById[incoming.id] = incoming
+        } else if (current == incoming) {
+            // Identical record already present
+        } else if (incoming.updatedAt > current.updatedAt) {
+            val copyId = "${current.id}_copy_${current.updatedAt}"
+            if (!existingById.containsKey(copyId)) {
+                existingById[copyId] = current.copy(
+                    id = copyId,
+                    heading = "${current.heading} (Local Copy)"
+                )
+            }
+            existingById[incoming.id] = incoming
+        } else {
+            val copyId = "${incoming.id}_copy_${incoming.updatedAt}"
+            if (!existingById.containsKey(copyId)) {
+                existingById[copyId] = incoming.copy(
+                    id = copyId,
+                    heading = "${incoming.heading} (Restored Copy)"
+                )
+            }
+        }
+    }
+    return existingById.values.toList()
 }

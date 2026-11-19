@@ -193,4 +193,58 @@ class EncryptedMediaRepositoryTest {
         assertFalse("mediaId1 was only referenced by diary A and must be deleted", mediaRepository.exists(mediaId1))
         assertTrue("mediaId2 is still referenced by diary B and must NOT be deleted", mediaRepository.exists(mediaId2))
     }
+
+    @Test
+    fun importMedia_verifiesEntireStreamToEof_andDeletesTmpOnTrailingCorruption() {
+        val mediaId = "large_corrupt_tail"
+        // 200 KB (> 3 Tink 64KB segments) so first-1KB check alone would miss tail corruption
+        val largePayload = ByteArray(200 * 1024) { (it % 239).toByte() }
+        val expectedTmp = File(mediaRepository.mediaDir, "$mediaId.lkm.tmp")
+
+        var thrown = false
+        try {
+            mediaRepository.importMediaInternal(
+                mediaId = mediaId,
+                inputStream = ByteArrayInputStream(largePayload),
+                dek = testDek,
+                estimatedSizeBytes = largePayload.size.toLong()
+            ) { tmpFile ->
+                val bytes = tmpFile.readBytes()
+                // Tamper near the very end of the final segment (well beyond first 1024 bytes)
+                bytes[bytes.size - 5] = (bytes[bytes.size - 5].toInt() xor 0xFF).toByte()
+                tmpFile.writeBytes(bytes)
+            }
+        } catch (e: StorageVerificationException) {
+            thrown = true
+        }
+
+        assertTrue("Verification must drain all chunks to EOF and catch tail corruption", thrown)
+        assertFalse(".tmp file must be deleted on verification failure", expectedTmp.exists())
+        assertFalse("Target .lkm must NOT exist when verification fails", mediaRepository.exists(mediaId))
+    }
+
+    @Test
+    fun importMedia_onInputStreamError_deletesTmpWithoutFinalizingTarget() {
+        val mediaId = "broken_source_stream"
+        val expectedTmp = File(mediaRepository.mediaDir, "$mediaId.lkm.tmp")
+        val failingStream = object : java.io.InputStream() {
+            var count = 0
+            override fun read(): Int {
+                if (count >= 4096) throw IOException("Simulated stream disconnect")
+                count++
+                return 0x42
+            }
+        }
+
+        var thrown = false
+        try {
+            mediaRepository.importMedia(mediaId, failingStream, testDek, 8192L)
+        } catch (e: IOException) {
+            thrown = true
+        }
+
+        assertTrue(thrown)
+        assertFalse(".tmp must be deleted on input stream failure", expectedTmp.exists())
+        assertFalse("Target .lkm must NOT be finalized on stream failure", mediaRepository.exists(mediaId))
+    }
 }
