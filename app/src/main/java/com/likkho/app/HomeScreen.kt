@@ -42,6 +42,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -236,6 +237,11 @@ fun PfpAvatar(pfp: Pfp?, size: Dp, modifier: Modifier = Modifier) {
         ) {
             if (pfp.source != null) {
                 val loader = LocalImageBitmapLoader.current
+                val keyLifecycle = LocalBitmapKeyLifecycle.current
+                DisposableEffect(pfp.source) {
+                    keyLifecycle?.acquire(pfp.source)
+                    onDispose { keyLifecycle?.release(pfp.source) }
+                }
                 val bmp by produceState<ImageBitmap?>(initialValue = null, key1 = pfp.source) {
                     value = loader?.invoke(pfp.source)
                 }

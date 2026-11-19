@@ -15,6 +15,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
 
 @Serializable
@@ -34,6 +36,8 @@ object FontRegistry {
     const val BUILTIN_SERIF = "builtin_serif"
     const val BUILTIN_SANS = "builtin_sans"
     const val BUILTIN_MONO = "builtin_mono"
+    const val MAX_FONT_BYTES = 30L * 1024L * 1024L
+    private const val STREAM_BUFFER_BYTES = 64 * 1024
 
     val builtinFonts: List<Pair<String, String>> = listOf(
         BUILTIN_SERIF to "Cormorant",
@@ -80,15 +84,19 @@ object FontRegistry {
 
     fun importFontFromUri(context: Context, uri: Uri, baseDir: File): CustomFont? {
         val rawDisplayName = queryDisplayName(context, uri)
-        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
-        if (!isValidFontBytes(bytes)) return null
-
         val dir = fontsDir(baseDir)
         val id = "custom_font_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}"
         val ext = if (rawDisplayName?.lowercase()?.endsWith(".otf") == true) "otf" else "ttf"
         val fileName = "$id.$ext"
         val destFile = File(dir, fileName)
-        destFile.writeBytes(bytes)
+
+        val streamed = context.contentResolver.openInputStream(uri)?.use { stream ->
+            streamValidatedFontToFile(stream, destFile)
+        } ?: false
+        if (!streamed) {
+            destFile.delete()
+            return null
+        }
 
         val loadedTypeface = runCatching { Typeface.createFromFile(destFile) }.getOrNull()
         if (loadedTypeface == null) {
@@ -112,8 +120,61 @@ object FontRegistry {
         return customFont
     }
 
-    fun isValidFontBytes(bytes: ByteArray): Boolean {
-        if (bytes.size < 12 || bytes.size > 30 * 1024 * 1024) return false
+    internal fun streamValidatedFontToFile(
+        inputStream: InputStream,
+        destFile: File,
+        maxBytes: Long = MAX_FONT_BYTES
+    ): Boolean {
+        destFile.parentFile?.mkdirs()
+        val tmpFile = File(destFile.parentFile, "${destFile.name}.tmp")
+        if (tmpFile.exists()) tmpFile.delete()
+
+        val header = ByteArray(12)
+        var headerRead = 0
+        while (headerRead < header.size) {
+            val n = inputStream.read(header, headerRead, header.size - headerRead)
+            if (n == -1) break
+            headerRead += n
+        }
+        if (headerRead < 12 || !isValidFontHeader(header)) {
+            return false
+        }
+
+        var totalBytes = headerRead.toLong()
+        val ok = try {
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(header, 0, headerRead)
+                val buffer = ByteArray(STREAM_BUFFER_BYTES)
+                var read: Int
+                while (inputStream.read(buffer).also { read = it } != -1) {
+                    totalBytes += read
+                    if (totalBytes > maxBytes) {
+                        return@use false
+                    }
+                    fos.write(buffer, 0, read)
+                }
+                fos.flush()
+                runCatching { if (fos.fd.valid()) fos.fd.sync() }
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+
+        if (!ok) {
+            tmpFile.delete()
+            return false
+        }
+        if (destFile.exists()) destFile.delete()
+        if (!tmpFile.renameTo(destFile)) {
+            tmpFile.delete()
+            return false
+        }
+        return true
+    }
+
+    private fun isValidFontHeader(bytes: ByteArray): Boolean {
+        if (bytes.size < 12) return false
         val b0 = bytes[0].toInt() and 0xFF
         val b1 = bytes[1].toInt() and 0xFF
         val b2 = bytes[2].toInt() and 0xFF
@@ -123,6 +184,11 @@ object FontRegistry {
         val tag = String(bytes, 0, 4, Charsets.US_ASCII)
         // OpenType 'OTTO', Apple TrueType 'true', TrueType Collection 'ttcf'
         return tag == "OTTO" || tag == "true" || tag == "ttcf"
+    }
+
+    fun isValidFontBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 12 || bytes.size > MAX_FONT_BYTES) return false
+        return isValidFontHeader(bytes)
     }
 
     fun cleanFontDisplayName(rawName: String?): String {

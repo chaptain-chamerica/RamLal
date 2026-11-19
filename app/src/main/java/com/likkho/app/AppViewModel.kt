@@ -16,6 +16,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -107,18 +108,16 @@ class AppViewModel @JvmOverloads constructor(
                 val hasDecoy = vaultManager.decoyExists() && vaultManager.hasPasscode(VaultId.DECOY)
                 val bio = vaultManager.hasBiometric(VaultId.PRIMARY)
 
-                val loadResult = if (!hasPrimary) {
+                val (initialLogs, initialFailed) = if (!hasPrimary) {
                     if (!vaultManager.isUnlocked) {
                         vaultManager.unlockNoPasscode()
                     }
                     if (vaultManager.isUnlocked) {
                         vaultManager.withActiveDek { dek ->
-                            vaultManager.activeDiaryRepository().loadAllDiaries(dek)
+                            vaultManager.activeDiaryRepository().loadAllDiariesMapped(dek) { it.toSummaryDiaryLog() }
                         }
-                    } else null
-                } else null
-                val initialLogs = loadResult?.diaries?.map { it.toDiaryLog() } ?: emptyList()
-                val initialFailed = loadResult?.failed ?: emptyList()
+                    } else emptyList<DiaryLog>() to emptyList()
+                } else emptyList<DiaryLog>() to emptyList()
 
                 val savedFonts = FontRegistry.loadSavedFonts(fontStorageDir())
 
@@ -165,9 +164,13 @@ class AppViewModel @JvmOverloads constructor(
 
     // ---------- navigation ----------
     fun navigateTo(r: Route, log: DiaryLog? = null) {
+        val leavingWorkspace = route == Route.WORKSPACE && r != Route.WORKSPACE
         openMenuLogId = null
-        editingLog = if (r == Route.WORKSPACE) log else editingLog
+        editingLog = if (r == Route.WORKSPACE) log else null
         route = r
+        if (leavingWorkspace) {
+            pruneInactiveBitmaps()
+        }
     }
 
     // ---------- derived ----------
@@ -176,7 +179,8 @@ class AppViewModel @JvmOverloads constructor(
             val q = searchQuery.trim().lowercase()
             val list = if (q.isEmpty()) logs.toList() else logs.filter {
                 it.heading.lowercase().contains(q) || it.plainPreview.lowercase().contains(q) ||
-                    it.contentHtml.lowercase().contains(q) || it.dateStamp.lowercase().contains(q)
+                    it.dateStamp.lowercase().contains(q) ||
+                    (it.isContentLoaded && it.contentHtml.lowercase().contains(q))
             }
             return list.sortedWith(compareByDescending<DiaryLog> { it.pinned }.thenByDescending { it.createdAt })
         }
@@ -188,6 +192,8 @@ class AppViewModel @JvmOverloads constructor(
         if (savedPasscode == null) { navigateTo(Route.SETTINGS); return }
         vaultManager.lock()
         logs.clear()
+        screenBitmapTracker.clear()
+        imageBitmapCache.evictAll()
         isLocked = true
     }
 
@@ -223,12 +229,10 @@ class AppViewModel @JvmOverloads constructor(
     fun loadLogsFromActiveVault() {
         viewModelScope.launch(Dispatchers.IO) {
             if (!vaultManager.isUnlocked) return@launch
-            val loadResult = vaultManager.withActiveDek { dek ->
+            val (list, failed) = vaultManager.withActiveDek { dek ->
                 val repo = vaultManager.activeDiaryRepository()
-                repo.loadAllDiaries(dek)
+                repo.loadAllDiariesMapped(dek) { it.toSummaryDiaryLog() }
             }
-            val list = loadResult.diaries.map { it.toDiaryLog() }
-            val failed = loadResult.failed
             withContext(Dispatchers.Main) {
                 logs.clear()
                 logs.addAll(list)
@@ -244,6 +248,38 @@ class AppViewModel @JvmOverloads constructor(
         }
     }
 
+    suspend fun loadFullDiaryLog(id: String): DiaryLog? = withContext(Dispatchers.IO) {
+        if (!vaultManager.isUnlocked) return@withContext null
+        runCatching {
+            vaultManager.withActiveDek { dek ->
+                vaultManager.activeDiaryRepository().loadDiary(id, dek).record.toDiaryLog()
+            }
+        }.getOrNull()
+    }
+
+    private fun resolveFullLogAndRun(log: DiaryLog, onLoaded: (DiaryLog) -> Unit) {
+        if (log.isContentLoaded) {
+            onLoaded(log)
+            return
+        }
+        viewModelScope.launch {
+            val full = loadFullDiaryLog(log.id)
+            if (full != null) {
+                onLoaded(full)
+            } else {
+                showStatus("Failed to load diary content.", BannerKind.ERROR)
+            }
+        }
+    }
+
+    fun openUnlockedLog(log: DiaryLog) {
+        resolveFullLogAndRun(log) { full -> navigateTo(Route.WORKSPACE, full) }
+    }
+
+    fun openUnlockedExport(log: DiaryLog) {
+        resolveFullLogAndRun(log) { full -> exportingLog = full }
+    }
+
     // ---------- logs ----------
     fun upsertLog(
         updated: DiaryLog,
@@ -251,10 +287,12 @@ class AppViewModel @JvmOverloads constructor(
         obsoleteMediaIds: Set<String> = emptySet(),
         onPersistResult: (Result<Unit>) -> Unit = {}
     ) {
+        val summary = updated.toSummary()
         val i = logs.indexOfFirst { it.id == updated.id }
-        if (i >= 0) logs[i] = updated else logs.add(0, updated)
-        editingLog = updated
-        hooks.persistLogs(logs.toList(), obsoleteMediaIds) { result ->
+        if (i >= 0) logs[i] = summary else logs.add(0, summary)
+        val persistPayload = logs.map { if (it.id == updated.id) updated else it }
+        editingLog = if (exitAfterSave) null else updated
+        hooks.persistLogs(persistPayload, obsoleteMediaIds) { result ->
             viewModelScope.launch {
                 result.onFailure { err ->
                     val st = storageFailureBanner("Save failed", err)
@@ -320,13 +358,13 @@ class AppViewModel @JvmOverloads constructor(
 
     fun openLog(log: DiaryLog) {
         if (log.diaryLockPin != null) pendingUnlock = PendingUnlock(log, UnlockAction.OPEN)
-        else navigateTo(Route.WORKSPACE, log)
+        else openUnlockedLog(log)
     }
 
     fun requestExport(log: DiaryLog) {
         openMenuLogId = null
         if (exportProcessingBanner != null) return
-        if (log.diaryLockPin != null) pendingUnlock = PendingUnlock(log, UnlockAction.EXPORT) else exportingLog = log
+        if (log.diaryLockPin != null) pendingUnlock = PendingUnlock(log, UnlockAction.EXPORT) else openUnlockedExport(log)
     }
 
     fun shareLog(log: DiaryLog) {
@@ -449,7 +487,42 @@ class AppViewModel @JvmOverloads constructor(
         return false
     }
 
-    private val imageBitmapCache = LruCache<String, ImageBitmap>(24)
+    private val bitmapCacheMaxBytes: Int = BitmapCachePolicy.computeMaxSizeBytes()
+    private val screenBitmapTracker = ScreenBitmapTracker()
+    private val imageBitmapCache = object : LruCache<String, ImageBitmap>(bitmapCacheMaxBytes) {
+        override fun sizeOf(key: String, value: ImageBitmap): Int {
+            return value.asAndroidBitmap().byteCount.coerceAtLeast(1)
+        }
+    }
+
+    val bitmapKeyLifecycle: BitmapKeyLifecycle = object : BitmapKeyLifecycle {
+        override fun acquire(key: String) {
+            screenBitmapTracker.acquire(key)
+        }
+
+        override fun release(key: String) {
+            if (screenBitmapTracker.release(key)) {
+                imageBitmapCache.remove(key)
+            }
+        }
+    }
+
+    fun pruneInactiveBitmaps() {
+        val active = screenBitmapTracker.activeKeys()
+        for (key in imageBitmapCache.snapshot().keys) {
+            if (!active.contains(key)) {
+                imageBitmapCache.remove(key)
+            }
+        }
+    }
+
+    fun onTrimMemory(level: Int) {
+        when (BitmapCachePolicy.classifyTrimMemory(level)) {
+            TrimMemoryAction.CLEAR_ALL -> imageBitmapCache.evictAll()
+            TrimMemoryAction.TRIM_HALF -> imageBitmapCache.trimToSize(bitmapCacheMaxBytes / 2)
+            TrimMemoryAction.KEEP -> Unit
+        }
+    }
 
     private class CountingInputStream(private val delegate: InputStream) : InputStream() {
         var bytesRead: Long = 0L
@@ -682,15 +755,6 @@ class AppViewModel @JvmOverloads constructor(
         mediaId
     }
 
-    suspend fun loadDecryptedMediaBytes(mediaId: String): ByteArray? = withContext(Dispatchers.IO) {
-        if (mediaId.isBlank() || !vaultManager.isUnlocked) return@withContext null
-        runCatching {
-            vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().readDecryptedBytes(mediaId, dek)
-            }
-        }.getOrNull()
-    }
-
     suspend fun openDecryptedMediaDataSource(mediaId: String): MediaDataSource? = withContext(Dispatchers.IO) {
         if (mediaId.isBlank() || !vaultManager.isUnlocked) return@withContext null
         runCatching {
@@ -835,9 +899,11 @@ class AppViewModel @JvmOverloads constructor(
     }
 
     fun restoreSingleDiary(log: DiaryLog) {
+        val summary = log.toSummary()
         val i = logs.indexOfFirst { it.id == log.id }
-        if (i >= 0) logs[i] = log else logs.add(0, log)
-        hooks.persistLogs(logs.toList()) { result ->
+        if (i >= 0) logs[i] = summary else logs.add(0, summary)
+        val persistPayload = logs.map { if (it.id == log.id) log else it }
+        hooks.persistLogs(persistPayload) { result ->
             viewModelScope.launch {
                 result.onSuccess {
                     showStatus("Restored \"${log.heading.ifBlank { "Diary" }}\" to app.", BannerKind.SUCCESS, 3000)
@@ -851,10 +917,13 @@ class AppViewModel @JvmOverloads constructor(
 
     fun onRestoreBundle(restored: List<DiaryLog>) {
         if (restored.isEmpty()) return
-        val merged = mergeRestoredLogs(logs.toList(), restored)
+        val restoredSummaries = restored.map { it.toSummary() }
+        val merged = mergeRestoredLogs(logs.toList(), restoredSummaries)
         logs.clear()
         logs.addAll(merged)
-        hooks.persistLogs(logs.toList()) { result ->
+        val byId = restored.associateBy { it.id }
+        val persistPayload = merged.map { byId[it.id] ?: it }
+        hooks.persistLogs(persistPayload) { result ->
             result.onFailure { err ->
                 viewModelScope.launch {
                     val st = storageFailureBanner("Restore persist failed", err)

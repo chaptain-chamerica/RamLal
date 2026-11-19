@@ -1,5 +1,6 @@
 package com.likkho.app
 
+import android.content.ComponentCallbacks2
 import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import android.view.WindowManager
@@ -74,6 +75,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        vm.onTrimMemory(level)
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        vm.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+    }
+
     fun applySystemBars(darkMode: Boolean, fullScreen: Boolean) {
         val statusBarStyle = if (darkMode) {
             SystemBarStyle.dark(AndroidColor.TRANSPARENT)
@@ -133,7 +144,8 @@ fun Root(vm: AppViewModel) {
     }
 
     CompositionLocalProvider(
-        LocalImageBitmapLoader provides { mediaId -> vm.loadDecryptedImageBitmap(mediaId) }
+        LocalImageBitmapLoader provides { mediaId -> vm.loadDecryptedImageBitmap(mediaId) },
+        LocalBitmapKeyLifecycle provides vm.bitmapKeyLifecycle
     ) {
     Box(Modifier.fillMaxSize().background(w.bg).statusBarsPadding()) {
         Crossfade(

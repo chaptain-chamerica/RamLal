@@ -64,6 +64,7 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 // ============================================================================
 
 val LocalImageBitmapLoader = staticCompositionLocalOf<(suspend (String) -> ImageBitmap?)?> { null }
+val LocalBitmapKeyLifecycle = staticCompositionLocalOf<BitmapKeyLifecycle?> { null }
 
 fun Modifier.wikiBorder(color: Color, width: Dp = 0.5.dp): Modifier = this.border(width, color, RectangleShape)
 

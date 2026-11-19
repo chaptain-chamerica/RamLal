@@ -6,8 +6,10 @@ import com.likkho.app.storage.model.VaultIndexRecord
 import kotlinx.serialization.SerializationException
 import java.io.EOFException
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
 import javax.crypto.AEADBadTagException
 
 data class RecoveryReport(
@@ -141,29 +143,50 @@ class DiaryRepository(
     }
 
     /**
-     * Copies a corrupt diary file to quarantine/ (never moves or deletes original).
+     * Copies a corrupt diary file to quarantine/ via 64 KB streaming (never moves or deletes original).
      * Idempotent when an identical copy for [diaryId] already exists in quarantine/.
      */
     private fun quarantineCopy(sourceFile: File, diaryId: String): File {
         quarantineDir.mkdirs()
-        val rawBytes = try {
-            readBytesWithRetry(sourceFile, maxAttempts = 1)
-        } catch (_: Exception) {
-            sourceFile.readBytes()
-        }
-        val hash = CryptoUtils.sha256Hex(rawBytes)
-        val existing = quarantineDir.listFiles { f -> f.isFile && f.name.startsWith("${diaryId}_") }
-            ?.firstOrNull { candidate ->
-                runCatching { CryptoUtils.sha256Hex(candidate.readBytes()) == hash }.getOrDefault(false)
+        val tmpQFile = File(quarantineDir, "${diaryId}_${System.currentTimeMillis()}.lkd.tmp")
+        if (tmpQFile.exists()) tmpQFile.delete()
+
+        val md = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
+        try {
+            FileInputStream(sourceFile).use { fis ->
+                FileOutputStream(tmpQFile).use { fos ->
+                    var read: Int
+                    while (fis.read(buffer).also { read = it } != -1) {
+                        md.update(buffer, 0, read)
+                        fos.write(buffer, 0, read)
+                    }
+                    fos.flush()
+                    runCatching { if (fos.fd.valid()) fos.fd.sync() }
+                }
             }
-        if (existing != null) return existing
+        } catch (e: Exception) {
+            tmpQFile.delete()
+            throw e
+        }
+
+        val hash = md.digest().joinToString("") { "%02x".format(it) }
+        val existing = quarantineDir.listFiles { f ->
+            f.isFile && f.name.startsWith("${diaryId}_") && f.name.endsWith(".lkd")
+        }?.firstOrNull { candidate ->
+            runCatching { CryptoUtils.sha256Hex(candidate) == hash }.getOrDefault(false)
+        }
+        if (existing != null) {
+            tmpQFile.delete()
+            return existing
+        }
 
         val qFile = File(quarantineDir, "${diaryId}_${System.currentTimeMillis()}.lkd")
-        FileOutputStream(qFile).use { fos ->
-            fos.write(rawBytes)
-            fos.flush()
-            runCatching { if (fos.fd.valid()) fos.fd.sync() }
+        if (!tmpQFile.renameTo(qFile)) {
+            tmpQFile.delete()
+            throw IOException("Failed to finalize quarantine file for $diaryId")
         }
+        SafeStorageWriter.fsyncDirectory(quarantineDir)
         return qFile
     }
 
@@ -214,10 +237,16 @@ class DiaryRepository(
         val quarantined = mutableListOf<String>()
         val ioErrors = mutableListOf<String>()
 
-        // 1. Clean dangling .tmp files
+        // 1. Clean dangling .tmp files in diaries/ and quarantine/
         for (f in files) {
             if (f.name.endsWith(".tmp")) {
                 if (f.delete()) cleanedTmp++
+            }
+        }
+        val quarantineFiles = quarantineDir.listFiles() ?: emptyArray()
+        for (qf in quarantineFiles) {
+            if (qf.name.endsWith(".tmp")) {
+                if (qf.delete()) cleanedTmp++
             }
         }
 
@@ -524,21 +553,26 @@ class DiaryRepository(
     }
 
     /**
-     * Loads all diaries and returns both successfully decoded records and any failed/corrupt entries.
+     * Loads diaries one-by-one and transforms each immediately via [mapper] (e.g., to summary-only
+     * entries without contentHtml) so full records are never accumulated in RAM together.
      */
     @Synchronized
-    fun loadAllDiaries(dek: ByteArray): LoadDiariesResult {
+    fun <T> loadAllDiariesMapped(
+        dek: ByteArray,
+        mapper: (DiaryRecord) -> T
+    ): Pair<List<T>, List<FailedDiaryEntry>> {
         val diskIds = listDiskDiaryIds()
         val entries = listDiaries(dek)
         val orderedIds = LinkedHashSet<String>()
         entries.forEach { orderedIds.add(it.id) }
         diskIds.sorted().forEach { orderedIds.add(it) }
 
-        val loaded = mutableListOf<DiaryRecord>()
+        val mapped = mutableListOf<T>()
         val failed = mutableListOf<FailedDiaryEntry>()
         for (id in orderedIds) {
             try {
-                loaded.add(loadDiary(id, dek).record)
+                val record = loadDiary(id, dek).record
+                mapped.add(mapper(record))
             } catch (e: CorruptedDiaryException) {
                 failed.add(
                     FailedDiaryEntry(
@@ -556,6 +590,15 @@ class DiaryRepository(
                 )
             }
         }
+        return mapped to failed
+    }
+
+    /**
+     * Loads all diaries and returns both successfully decoded records and any failed/corrupt entries.
+     */
+    @Synchronized
+    fun loadAllDiaries(dek: ByteArray): LoadDiariesResult {
+        val (loaded, failed) = loadAllDiariesMapped(dek) { it }
         return LoadDiariesResult(diaries = loaded, failed = failed)
     }
 }

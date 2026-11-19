@@ -94,9 +94,12 @@ class RealFeatureHooks(
             vaultManager.withActiveDek { dek ->
                 val diaryRepo = vaultManager.activeDiaryRepository()
                 val mediaRepo = vaultManager.activeMediaRepository()
-                val record = log.toDiaryRecord()
+                val record = if (log.isContentLoaded) {
+                    log.toDiaryRecord().also { diaryRepo.saveDiary(it, dek) }
+                } else {
+                    diaryRepo.loadDiary(log.id, dek).record
+                }
                 val targetFile = File(shareDir, "${record.id}.likkho")
-                diaryRepo.saveDiary(record, dek)
                 vaultManager.backupEngine.createShareDiaryFile(
                     targetFile = targetFile,
                     diaryId = record.id,
@@ -111,17 +114,26 @@ class RealFeatureHooks(
 
     override suspend fun exportDiary(log: DiaryLog, format: ExportFormat): String =
         withContext(dispatcher) {
-            val safeName = log.heading.filter { it.isLetterOrDigit() || it == ' ' }.trim().replace(' ', '_').ifBlank { "diary_${log.id}" }
+            val fullLog = if (!log.isContentLoaded && vaultManager.isUnlocked) {
+                runCatching {
+                    vaultManager.withActiveDek { dek ->
+                        vaultManager.activeDiaryRepository().loadDiary(log.id, dek).record.toDiaryLog()
+                    }
+                }.getOrDefault(log)
+            } else {
+                log
+            }
+            val safeName = fullLog.heading.filter { it.isLetterOrDigit() || it == ' ' }.trim().replace(' ', '_').ifBlank { "diary_${fullLog.id}" }
             val file = File(exportDir, "$safeName.${format.ext}")
             val textContent = buildString {
-                appendLine(log.heading)
-                appendLine("Created: ${log.dateStamp} ${log.timeStamp}")
-                appendLine("Updated: ${log.updatedDateStamp} ${log.updatedTimeStamp}")
+                appendLine(fullLog.heading)
+                appendLine("Created: ${fullLog.dateStamp} ${fullLog.timeStamp}")
+                appendLine("Updated: ${fullLog.updatedDateStamp} ${fullLog.updatedTimeStamp}")
                 appendLine("----------------------------------------")
-                appendLine(if (log.contentHtml.isNotBlank()) log.contentHtml else log.plainPreview)
+                appendLine(if (fullLog.contentHtml.isNotBlank()) fullLog.contentHtml else fullLog.plainPreview)
             }
             file.writeText(textContent, Charsets.UTF_8)
-            "Exported \"${log.heading.ifBlank { "Diary" }}\" as ${format.label} to Downloads/Likkho."
+            "Exported \"${fullLog.heading.ifBlank { "Diary" }}\" as ${format.label} to Downloads/Likkho."
         }
 
     // =========================================================================
@@ -155,9 +167,10 @@ class RealFeatureHooks(
         val zipFile = File(exportDir, "Likkho_Export_${System.currentTimeMillis()}.zip")
         vaultManager.withActiveDek { dek ->
             val diaryRepo = vaultManager.activeDiaryRepository()
-            val diaries = diaryRepo.loadAllDiaries(dek).diaries
+            val indexEntries = diaryRepo.listDiaries(dek)
             ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-                for (diary in diaries) {
+                for (entry in indexEntries) {
+                    val diary = runCatching { diaryRepo.loadDiary(entry.id, dek).record }.getOrNull() ?: continue
                     val entryName = "diaries/${diary.id}_${diary.heading.filter { it.isLetterOrDigit() }.take(20)}.txt"
                     zos.putNextEntry(ZipEntry(entryName))
                     val content = "${diary.heading}\n\n${diary.contentHtml.ifBlank { diary.plainPreview }}"
@@ -265,12 +278,11 @@ class RealFeatureHooks(
                     mediaRepo = mediaRepo,
                     vaultDek = dek
                 )
-                val loadRes = diaryRepo.loadAllDiaries(dek)
-                val allLogs = loadRes.diaries.map { it.toDiaryLog() }
+                val (allLogs, failed) = diaryRepo.loadAllDiariesMapped(dek) { it.toSummaryDiaryLog() }
                 RestoreResult(
                     logs = allLogs,
                     skippedMediaCount = res.skippedMediaCount,
-                    failedDiaries = loadRes.failed
+                    failedDiaries = failed
                 )
             }
         } catch (e: Exception) {
@@ -344,18 +356,43 @@ class RealFeatureHooks(
                         val indexMap = currentIndex.entries.associateBy { it.id }
                         for (log in snapshot) {
                             val existing = indexMap[log.id]
-                            val expectedFlags = (if (log.diaryLockPin != null) 1 else 0) or
-                                (if (log.audioAttachments.isNotEmpty()) 2 else 0) or
-                                (if (log.canvasImages.isNotEmpty()) 4 else 0) or
-                                (if (log.videoAttachments.isNotEmpty()) 8 else 0)
-                            val changed = existing == null ||
-                                existing.updatedAt != log.updatedAt ||
-                                existing.pinned != log.pinned ||
-                                existing.flags != expectedFlags ||
-                                existing.heading != log.heading ||
-                                existing.plainPreview != log.plainPreview
-                            if (changed) {
-                                repo.saveDiary(log.toDiaryRecord(), dek)
+                            if (log.isContentLoaded) {
+                                val expectedFlags = (if (log.diaryLockPin != null) 1 else 0) or
+                                    (if (log.audioAttachments.isNotEmpty()) 2 else 0) or
+                                    (if (log.canvasImages.isNotEmpty()) 4 else 0) or
+                                    (if (log.videoAttachments.isNotEmpty()) 8 else 0)
+                                val changed = existing == null ||
+                                    existing.updatedAt != log.updatedAt ||
+                                    existing.pinned != log.pinned ||
+                                    existing.flags != expectedFlags ||
+                                    existing.heading != log.heading ||
+                                    existing.plainPreview != log.plainPreview
+                                if (changed) {
+                                    repo.saveDiary(log.toDiaryRecord(), dek)
+                                }
+                            } else {
+                                val lockBit = if (log.diaryLockPin != null) 1 else 0
+                                val metaChanged = existing == null ||
+                                    existing.updatedAt != log.updatedAt ||
+                                    existing.pinned != log.pinned ||
+                                    existing.heading != log.heading ||
+                                    existing.plainPreview != log.plainPreview ||
+                                    (existing.flags and 1) != lockBit
+                                if (metaChanged) {
+                                    val diskFile = File(repo.diariesDir, "${log.id}.lkd")
+                                    val recordToSave = if (diskFile.exists()) {
+                                        repo.loadDiary(log.id, dek).record.copy(
+                                            heading = log.heading,
+                                            updatedAt = log.updatedAt,
+                                            pinned = log.pinned,
+                                            reminderAt = log.reminderAt,
+                                            plainPreview = log.plainPreview
+                                        )
+                                    } else {
+                                        log.toDiaryRecord()
+                                    }
+                                    repo.saveDiary(recordToSave, dek)
+                                }
                             }
                         }
 
@@ -660,6 +697,26 @@ fun DiaryLog.toDiaryRecord(): DiaryRecord {
         content = emptyList(),
         plainPreview = plainPreview,
         contentHtml = contentHtml
+    )
+}
+
+fun DiaryRecord.toSummaryDiaryLog(): DiaryLog {
+    return DiaryLog(
+        id = id,
+        heading = heading,
+        contentHtml = "",
+        plainPreview = plainPreview,
+        pfp = pfp?.let { Pfp(it.sourceMediaId, it.text, it.bgColor, it.textColor, it.textScale) },
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+        reminderAt = reminderAt,
+        pinned = pinned,
+        diaryLockPin = diaryLock?.let { "${it.saltHex}:${it.hashHex}" },
+        canvasBgSource = null,
+        canvasImages = emptyList(),
+        audioAttachments = emptyList(),
+        videoAttachments = emptyList(),
+        isContentLoaded = false
     )
 }
 

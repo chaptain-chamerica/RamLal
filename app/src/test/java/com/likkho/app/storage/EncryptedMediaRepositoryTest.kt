@@ -247,4 +247,39 @@ class EncryptedMediaRepositoryTest {
         assertFalse(".tmp must be deleted on input stream failure", expectedTmp.exists())
         assertFalse("Target .lkm must NOT be finalized on stream failure", mediaRepository.exists(mediaId))
     }
+
+    @Test
+    fun seekableEncryptedMediaReader_supportsRandomSeekAcrossSegments_andClosesCleanly() {
+        val mediaId = "audio_seekable_stream"
+        // 300 KB (> 4 Tink 64 KB segments) simulating a multi-minute audio track
+        val totalLen = 300 * 1024
+        val payload = ByteArray(totalLen) { idx -> ((idx * 37) and 0xFF).toByte() }
+        mediaRepository.importMedia(mediaId, ByteArrayInputStream(payload), testDek, totalLen.toLong())
+
+        mediaRepository.openSeekableMediaReader(mediaId, testDek).use { reader ->
+            assertEquals(totalLen.toLong(), reader.getSize())
+
+            // Seek forward into segment 3 (offset 200_000), read 4096 bytes
+            val midBuf = ByteArray(4096)
+            val midRead = reader.readAt(200_000L, midBuf, 0, midBuf.size)
+            assertEquals(4096, midRead)
+            assertArrayEquals(payload.copyOfRange(200_000, 204_096), midBuf)
+
+            // Seek backward to segment 0 (offset 123), read 1024 bytes
+            val startBuf = ByteArray(1024)
+            val startRead = reader.readAt(123L, startBuf, 0, startBuf.size)
+            assertEquals(1024, startRead)
+            assertArrayEquals(payload.copyOfRange(123, 123 + 1024), startBuf)
+
+            // Cross-segment boundary read (around 64 KB boundary)
+            val crossBuf = ByteArray(8192)
+            val crossOffset = (64 * 1024) - 512
+            val crossRead = reader.readAt(crossOffset.toLong(), crossBuf, 0, crossBuf.size)
+            assertEquals(8192, crossRead)
+            assertArrayEquals(payload.copyOfRange(crossOffset, crossOffset + 8192), crossBuf)
+
+            // Read at EOF returns -1
+            assertEquals(-1, reader.readAt(totalLen.toLong(), ByteArray(16), 0, 16))
+        }
+    }
 }

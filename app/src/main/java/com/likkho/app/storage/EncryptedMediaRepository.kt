@@ -211,29 +211,34 @@ class EncryptedMediaRepository(
 
     /**
      * Opens a seekable in-memory MediaDataSource backed by Tink StreamingAEAD for random-access
-     * video/audio playback without persisting plaintext to disk or buffering entire large videos in RAM.
+     * video/audio playback without persisting plaintext to disk or buffering entire large videos/audio in RAM.
      */
     fun openMediaDataSource(mediaId: String, dek: ByteArray): MediaDataSource {
+        val reader = openSeekableMediaReader(mediaId, dek)
+        return StreamingEncryptedMediaDataSource(reader)
+    }
+
+    internal fun openSeekableMediaReader(mediaId: String, dek: ByteArray): SeekableEncryptedMediaReader {
         val file = getMediaFile(mediaId)
         if (!file.exists()) {
             throw IOException("Media file not found: $mediaId.$MEDIA_EXTENSION")
         }
         val streamingAead = createStreamingAead(dek)
         val aad = buildAad(mediaId, vaultId)
-        return StreamingEncryptedMediaDataSource(file, streamingAead, aad)
+        return SeekableEncryptedMediaReader(file, streamingAead, aad)
     }
 
-    private class StreamingEncryptedMediaDataSource(
+    internal class SeekableEncryptedMediaReader(
         file: File,
         streamingAead: StreamingAead,
         aad: ByteArray
-    ) : MediaDataSource() {
+    ) : java.io.Closeable {
         private val fis = FileInputStream(file)
         private val channel = streamingAead.newSeekableDecryptingChannel(fis.channel, aad)
         private var cachedSize: Long = -1L
 
         @Synchronized
-        override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+        fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
             if (position < 0) return -1
             val totalSize = getSize()
             if (totalSize >= 0 && position >= totalSize) return -1
@@ -250,7 +255,7 @@ class EncryptedMediaRepository(
         }
 
         @Synchronized
-        override fun getSize(): Long {
+        fun getSize(): Long {
             if (cachedSize < 0) {
                 cachedSize = runCatching { channel.size() }.getOrDefault(-1L)
             }
@@ -262,6 +267,17 @@ class EncryptedMediaRepository(
             runCatching { channel.close() }
             runCatching { fis.close() }
         }
+    }
+
+    private class StreamingEncryptedMediaDataSource(
+        private val reader: SeekableEncryptedMediaReader
+    ) : MediaDataSource() {
+        override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int =
+            reader.readAt(position, buffer, offset, size)
+
+        override fun getSize(): Long = reader.getSize()
+
+        override fun close() = reader.close()
     }
 
     /**

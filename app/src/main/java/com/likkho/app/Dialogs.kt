@@ -70,8 +70,8 @@ fun UnlockDiaryDialog(vm: AppViewModel) {
             val log = pending.log; val act = pending.action
             vm.pendingUnlock = null
             when (act) {
-                UnlockAction.OPEN -> vm.navigateTo(Route.WORKSPACE, log)
-                UnlockAction.EXPORT -> vm.exportingLog = log
+                UnlockAction.OPEN -> vm.openUnlockedLog(log)
+                UnlockAction.EXPORT -> vm.openUnlockedExport(log)
                 UnlockAction.DELETE -> vm.pendingDeleteLog = log
             }
         } else {

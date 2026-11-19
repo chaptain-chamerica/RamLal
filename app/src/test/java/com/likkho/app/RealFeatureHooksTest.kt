@@ -578,4 +578,83 @@ class RealFeatureHooksTest {
         assertEquals(Icons.Outlined.CheckCircle, statusBannerIcon(BannerKind.SUCCESS))
         assertEquals(BannerKind.SUCCESS, StatusBannerState("Saved cleanly").kind)
     }
+
+    @Test
+    fun homeSummaryLogs_preserveFullDiskContentAcrossPersistPinExportAndShare() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+
+        val mediaId = vaultManager.withActiveDek { dek ->
+            vaultManager.activeMediaRepository().importMediaBytes("img_step4", byteArrayOf(10, 20, 30, 40), dek)
+        }
+        val fullContent = "<p>Secret <b>full diary body</b> that must not live in Home list RAM.</p>"
+        val fullLog = DiaryLog(
+            id = "lazy_diary_1",
+            heading = "Lazy Heading",
+            contentHtml = fullContent,
+            plainPreview = "Secret full diary body",
+            createdAt = 1_000L,
+            updatedAt = 2_000L,
+            pinned = false,
+            diaryLockPin = "4321",
+            canvasBgSource = mediaId,
+            canvasImages = listOf(CanvasImage(id = mediaId, source = mediaId, x = 12f, y = 24f, width = 100f, height = 80f)),
+            audioAttachments = listOf(CanvasAudio(id = "aud_1", name = "voice.m4a", audioUri = "aud_1", durationSec = 5)),
+            videoAttachments = listOf(CanvasVideo(id = "vid_1", name = "clip.mp4", source = "vid_1", durationSec = 9)),
+            isContentLoaded = true
+        )
+        hooks.persistLogs(listOf(fullLog))
+
+        // Direct model summary helper strips heavy fields and marks isContentLoaded = false
+        val directSummary = fullLog.toSummary()
+        assertFalse(directSummary.isContentLoaded)
+        assertEquals("", directSummary.contentHtml)
+        assertTrue(directSummary.canvasImages.isEmpty())
+        assertTrue(directSummary.audioAttachments.isEmpty())
+        assertTrue(directSummary.videoAttachments.isEmpty())
+        assertEquals(null, directSummary.canvasBgSource)
+        assertEquals("Lazy Heading", directSummary.heading)
+        assertEquals("Secret full diary body", directSummary.plainPreview)
+
+        // loadAllDiariesMapped loads summaries 1-by-1 without contentHtml/media lists in memory
+        val (summaries, failed) = vaultManager.withActiveDek { dek ->
+            vaultManager.activeDiaryRepository().loadAllDiariesMapped(dek) { it.toSummaryDiaryLog() }
+        }
+        assertTrue(failed.isEmpty())
+        assertEquals(1, summaries.size)
+        val summary = summaries.first()
+        assertFalse(summary.isContentLoaded)
+        assertEquals("", summary.contentHtml)
+        assertTrue(summary.canvasImages.isEmpty())
+        assertNotNull(summary.diaryLockPin)
+
+        // Pinning a summary log (updated metadata, empty contentHtml) must merge metadata and preserve disk HTML/media
+        val pinnedSummary = summary.copy(pinned = true, updatedAt = 3_000L)
+        hooks.persistLogs(listOf(pinnedSummary))
+
+        val reloadedFull = vaultManager.withActiveDek { dek ->
+            vaultManager.activeDiaryRepository().loadDiary("lazy_diary_1", dek).record.toDiaryLog()
+        }
+        assertTrue("Pinned flag should update", reloadedFull.pinned)
+        assertEquals("Full contentHtml must remain intact after summary persistLogs", fullContent, reloadedFull.contentHtml)
+        assertEquals(mediaId, reloadedFull.canvasBgSource)
+        assertEquals(1, reloadedFull.canvasImages.size)
+        assertEquals(1, reloadedFull.audioAttachments.size)
+        assertEquals(1, reloadedFull.videoAttachments.size)
+
+        // Exporting a summary log must lazy-load full content from disk
+        hooks.exportDiary(pinnedSummary, ExportFormat("txt", ".txt", "Plain Text Document"))
+        val exportedFile = File(File(filesDir, "exports"), "Lazy_Heading.txt")
+        assertTrue(exportedFile.exists())
+        assertTrue(exportedFile.readText().contains(fullContent))
+
+        // Sharing a summary log as .likkho must NOT wipe disk content and must bundle the full diary
+        val shareMsg = hooks.shareDiaryAsArchive(pinnedSummary, "SharePass123!")
+        assertTrue(shareMsg.contains("Shared"))
+        val afterShareFull = vaultManager.withActiveDek { dek ->
+            vaultManager.activeDiaryRepository().loadDiary("lazy_diary_1", dek).record.toDiaryLog()
+        }
+        assertEquals(fullContent, afterShareFull.contentHtml)
+        assertEquals(1, afterShareFull.canvasImages.size)
+    }
 }
+

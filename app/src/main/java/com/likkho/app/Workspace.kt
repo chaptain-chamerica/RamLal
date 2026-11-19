@@ -109,7 +109,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
     var images by remember { mutableStateOf(initial?.canvasImages ?: emptyList()) }
     var audios by remember { mutableStateOf(initial?.audioAttachments ?: emptyList()) }
     var videos by remember { mutableStateOf(initial?.videoAttachments ?: emptyList()) }
-    val editorState = remember(initial?.id) { RichTextEditorState.fromHtml(initial?.contentHtml.orEmpty()) }
+    val editorState = remember(initial?.id, initial?.isContentLoaded) { RichTextEditorState.fromHtml(initial?.contentHtml.orEmpty()) }
     var saved by remember { mutableStateOf(false) }
     var selImg by remember { mutableStateOf<String?>(null) }
     var selAud by remember { mutableStateOf<String?>(null) }
@@ -363,6 +363,12 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
 
         // ---------- canvas (infinite right/bottom media drag, screen-width writing) ----------
+        val keyLifecycle = LocalBitmapKeyLifecycle.current
+        DisposableEffect(bgSrc) {
+            val k = bgSrc?.takeIf { it.isNotBlank() }
+            if (k != null) keyLifecycle?.acquire(k)
+            onDispose { if (k != null) keyLifecycle?.release(k) }
+        }
         val bgBitmap by produceState<ImageBitmap?>(null, bgSrc) {
             value = bgSrc?.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
         }
@@ -548,7 +554,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 viewportWPx = viewportWPx,
                                 viewportHPx = viewportHPx,
                                 viewportRootOrigin = viewportRootOrigin,
-                                loadAudioBytes = { id -> vm.loadDecryptedMediaBytes(id) },
+                                openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
                                 onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selAud = a.id; selImg = null; selVid = null },
                                 onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
@@ -1017,7 +1023,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 viewportWPx = viewportWPx,
                                 viewportHPx = viewportHPx,
                                 viewportRootOrigin = viewportRootOrigin,
-                                loadAudioBytes = { id -> vm.loadDecryptedMediaBytes(id) },
+                                openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
                                 onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selAud = a.id; selImg = null; selVid = null },
                                 onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
@@ -1092,6 +1098,12 @@ fun WorkspaceScreen(vm: AppViewModel) {
     )
     imgStudio?.let { id ->
         images.find { it.id == id }?.let { targetImg ->
+            val studioKeyLifecycle = LocalBitmapKeyLifecycle.current
+            DisposableEffect(targetImg.source) {
+                val k = targetImg.source.takeIf { it.isNotBlank() }
+                if (k != null) studioKeyLifecycle?.acquire(k)
+                onDispose { if (k != null) studioKeyLifecycle?.release(k) }
+            }
             val previewBmp by produceState<ImageBitmap?>(null, targetImg.source) {
                 value = targetImg.source.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
             }
@@ -1108,6 +1120,12 @@ fun WorkspaceScreen(vm: AppViewModel) {
         } ?: run { imgStudio = null }
     }
     if (bgStudio) {
+        val bgStudioKeyLifecycle = LocalBitmapKeyLifecycle.current
+        DisposableEffect(bgSrc) {
+            val k = bgSrc?.takeIf { it.isNotBlank() }
+            if (k != null) bgStudioKeyLifecycle?.acquire(k)
+            onDispose { if (k != null) bgStudioKeyLifecycle?.release(k) }
+        }
         val bgPreviewBmp by produceState<ImageBitmap?>(null, bgSrc) {
             value = bgSrc?.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
         }
@@ -1297,6 +1315,12 @@ private fun DraggableImage(
         }
     }
 
+    val imgKeyLifecycle = LocalBitmapKeyLifecycle.current
+    DisposableEffect(im.source) {
+        val k = im.source.takeIf { it.isNotBlank() }
+        if (k != null) imgKeyLifecycle?.acquire(k)
+        onDispose { if (k != null) imgKeyLifecycle?.release(k) }
+    }
     val bitmap by produceState<ImageBitmap?>(null, im.source) {
         value = im.source.takeIf { it.isNotBlank() }?.let { loadImageBitmap(it) }
     }
@@ -1367,21 +1391,6 @@ private fun DraggableImage(
     }
 }
 
-private class ByteArrayMediaDataSource(private val data: ByteArray) : MediaDataSource() {
-    override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-        if (position < 0 || position >= data.size) return -1
-        val pos = position.toInt()
-        val remaining = data.size - pos
-        val count = minOf(size, remaining)
-        System.arraycopy(data, pos, buffer, offset, count)
-        return count
-    }
-
-    override fun getSize(): Long = data.size.toLong()
-
-    override fun close() {}
-}
-
 /** Opaque RED audio card #b32424. Play button before slider. Draggable infinitely right/bottom. */
 @Composable
 private fun AudioCard(
@@ -1393,7 +1402,7 @@ private fun AudioCard(
     viewportWPx: Float,
     viewportHPx: Float,
     viewportRootOrigin: Offset,
-    loadAudioBytes: suspend (String) -> ByteArray?,
+    openMediaDataSource: suspend (String) -> MediaDataSource?,
     onStatus: (String) -> Unit,
     onSelect: () -> Unit,
     onDragProgress: (Float, Float) -> Unit,
@@ -1462,11 +1471,18 @@ private fun AudioCard(
     var progress by remember(a.id) { mutableStateOf(0f) }
     var durationMs by remember(a.id) { mutableStateOf((a.durationSec * 1000).coerceAtLeast(1000)) }
     var mediaPlayer by remember(a.id) { mutableStateOf<MediaPlayer?>(null) }
+    var activeDataSource by remember(a.id) { mutableStateOf<MediaDataSource?>(null) }
+    var disposed by remember(a.id) { mutableStateOf(false) }
 
     DisposableEffect(a.id) {
+        disposed = false
         onDispose {
+            disposed = true
+            runCatching { mediaPlayer?.stop() }
             runCatching { mediaPlayer?.release() }
             mediaPlayer = null
+            runCatching { activeDataSource?.close() }
+            activeDataSource = null
         }
     }
 
@@ -1508,25 +1524,37 @@ private fun AudioCard(
         if (loadingAudio) return
         loadingAudio = true
         scope.launch {
-            val bytes = a.audioUri.takeIf { it.isNotBlank() }?.let { loadAudioBytes(it) }
-            if (bytes == null || bytes.isEmpty()) {
+            val ds = a.audioUri.takeIf { it.isNotBlank() }?.let { openMediaDataSource(it) }
+            if (ds == null) {
                 loadingAudio = false
                 onStatus("Audio data unavailable.")
+                return@launch
+            }
+            if (disposed) {
+                loadingAudio = false
+                runCatching { ds.close() }
                 return@launch
             }
             val preparedPlayer = withContext(Dispatchers.IO) {
                 runCatching {
                     MediaPlayer().apply {
-                        setDataSource(ByteArrayMediaDataSource(bytes))
+                        setDataSource(ds)
                         prepare()
                     }
                 }.getOrNull()
             }
             loadingAudio = false
+            if (disposed) {
+                runCatching { preparedPlayer?.release() }
+                runCatching { ds.close() }
+                return@launch
+            }
             if (preparedPlayer == null) {
+                runCatching { ds.close() }
                 onStatus("Unsupported audio format.")
                 return@launch
             }
+            activeDataSource = ds
             preparedPlayer.setOnCompletionListener {
                 playing = false
                 progress = 0f
@@ -1715,6 +1743,12 @@ private fun VideoCard(
         }
     }
 
+    val vidKeyLifecycle = LocalBitmapKeyLifecycle.current
+    DisposableEffect(v.source) {
+        val k = v.source.takeIf { it.isNotBlank() }?.let { "vthumb_$it" }
+        if (k != null) vidKeyLifecycle?.acquire(k)
+        onDispose { if (k != null) vidKeyLifecycle?.release(k) }
+    }
     val thumbnail by produceState<ImageBitmap?>(null, v.source) {
         value = v.source.takeIf { it.isNotBlank() }?.let { loadThumbnail(it) }
     }

@@ -318,4 +318,94 @@ class BackupEngineTest {
         assertTrue("Older backup shared diary must be kept as conflict copy", ids.any { it.startsWith("d_shared_copy_") })
         assertEquals("Local Newer Shared", diaryRepo.loadDiary("d_shared", vaultDek).record.heading)
     }
+
+    @Test
+    fun restoreBackup_tamperedMidStream_throwsCannotOpenFileException_andCleansStaging() {
+        mediaRepo.importMediaBytes("tamper_m1", ByteArray(150 * 1024) { it.toByte() }, vaultDek)
+        val diary = DiaryRecord(
+            id = "d_tamper",
+            heading = "Tamper Guard",
+            images = listOf(CanvasImageRecord(mediaId = "tamper_m1"))
+        )
+        diaryRepo.saveDiary(diary, vaultDek)
+
+        val backupFile = File(baseDir, "tamper_stream.lkb")
+        backupEngine.createBackup(backupFile, testPassphrase, diaryRepo, mediaRepo, vaultDek, fastIterations)
+
+        val bytes = backupFile.readBytes()
+        val midOffset = bytes.size / 2
+        bytes[midOffset] = (bytes[midOffset].toInt() xor 0xFF).toByte()
+        backupFile.writeBytes(bytes)
+
+        diaryRepo.deleteDiary("d_tamper", vaultDek)
+
+        var threw = false
+        try {
+            backupEngine.restoreBackup(backupFile, testPassphrase, diaryRepo, mediaRepo, vaultDek)
+        } catch (_: CannotOpenFileException) {
+            threw = true
+        }
+        assertTrue("Expected CannotOpenFileException on mid-stream tamper", threw)
+        assertEquals("Vault must remain clean after failed restore", 0, diaryRepo.listDiaries(vaultDek).size)
+        assertEquals("Staging and snapshot dirs must be cleaned up", 0, tempDir.listFiles()?.size ?: 0)
+    }
+
+    @Test
+    fun restoreBackup_legacyV1Container_stillRestoresCleanly() {
+        val mediaBytes = "legacy v1 payload".toByteArray(Charsets.UTF_8)
+        val diary = DiaryRecord(
+            id = "d_v1",
+            heading = "Legacy V1 Entry",
+            images = listOf(CanvasImageRecord(mediaId = "m_v1"))
+        )
+        val jsonBytes = kotlinx.serialization.json.Json.encodeToString(DiaryRecord.serializer(), diary).toByteArray(Charsets.UTF_8)
+        val manifest = com.likkho.app.storage.model.BackupManifest(
+            schemaVersion = 1,
+            appVersion = "1.0.0",
+            diaryCount = 1,
+            mediaCount = 1,
+            items = listOf(
+                com.likkho.app.storage.model.BackupItemHash("diaries/d_v1", CryptoUtils.sha256Hex(jsonBytes), jsonBytes.size.toLong()),
+                com.likkho.app.storage.model.BackupItemHash("media/m_v1", CryptoUtils.sha256Hex(mediaBytes), mediaBytes.size.toLong())
+            )
+        )
+        val v1Bytes = SecureContainerCodec.encodeBackupContainer(
+            manifest = manifest,
+            diaries = listOf(diary),
+            mediaList = listOf("m_v1" to mediaBytes),
+            passphrase = testPassphrase,
+            iterations = fastIterations
+        )
+        val v1File = File(baseDir, "legacy_v1.lkb")
+        v1File.writeBytes(v1Bytes)
+
+        val res = backupEngine.restoreBackup(v1File, testPassphrase, diaryRepo, mediaRepo, vaultDek)
+        assertEquals(1, res.restoredDiaries)
+        assertEquals(1, res.importedMedia)
+        assertArrayEquals(mediaBytes, mediaRepo.readDecryptedBytes("m_v1", vaultDek))
+    }
+
+    @Test
+    fun backupAndRestore_over200MbVault_passesUnderXmx64mHeapLimit() {
+        val workRoot = tempFolder.newFolder("xmx64_work")
+        try {
+            val javaBin = File(File(System.getProperty("java.home"), "bin"), "java").absolutePath
+            val classpath = System.getProperty("java.class.path")
+            val process = ProcessBuilder(
+                javaBin,
+                "-Xmx64m",
+                "-cp",
+                classpath,
+                "com.likkho.app.storage.backup.BackupLowHeapRunner",
+                workRoot.absolutePath
+            ).redirectErrorStream(true).start()
+
+            val output = process.inputStream.bufferedReader().readText()
+            val exitCode = process.waitFor()
+            assertEquals("200+ MB backup/restore failed under -Xmx64m:\n$output", 0, exitCode)
+            assertTrue("Expected LOW_HEAP_OK marker in output:\n$output", output.contains("LOW_HEAP_OK"))
+        } finally {
+            workRoot.deleteRecursively()
+        }
+    }
 }

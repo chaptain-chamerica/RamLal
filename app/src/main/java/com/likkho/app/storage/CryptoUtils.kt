@@ -139,12 +139,16 @@ object CryptoUtils {
 
     fun sha256Hex(stream: java.io.InputStream): String {
         val md = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(8192)
+        val buffer = ByteArray(64 * 1024)
         var read: Int
         while (stream.read(buffer).also { read = it } != -1) {
             md.update(buffer, 0, read)
         }
         return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    fun sha256Hex(file: java.io.File): String {
+        return java.io.FileInputStream(file).use { sha256Hex(it) }
     }
 
     /**

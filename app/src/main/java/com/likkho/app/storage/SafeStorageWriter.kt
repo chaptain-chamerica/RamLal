@@ -36,6 +36,86 @@ object SafeStorageWriter {
         safeWriteInternal(targetFile, data, verifier, onDirectorySync = null)
     }
 
+    /**
+     * Streams data to [targetFile] via [writer] without holding the full payload in memory.
+     * Enforces free space check, writes to .tmp -> flush + fsync -> [verifier] -> .bak -> atomic rename -> parent dir fsync -> remove .bak.
+     */
+    @Synchronized
+    fun safeWriteStreaming(
+        targetFile: File,
+        estimatedRequiredBytes: Long = 0L,
+        verifier: ((File) -> Unit)? = null,
+        writer: (FileOutputStream) -> Unit
+    ) {
+        val parentDir = targetFile.parentFile ?: throw IOException("Target file has no parent directory")
+        parentDir.mkdirs()
+
+        val requiredBytes = estimatedRequiredBytes.coerceAtLeast(0L) + MIN_FREE_SPACE_BYTES
+        val usable = parentDir.usableSpace
+        if (usable in 1 until requiredBytes) {
+            throw InsufficientStorageException(
+                "Insufficient storage: required $requiredBytes bytes, available $usable bytes"
+            )
+        }
+
+        val tmpFile = File(parentDir, "${targetFile.name}.tmp")
+        val bakFile = File(parentDir, "${targetFile.name}.bak")
+        if (tmpFile.exists()) {
+            tmpFile.delete()
+        }
+
+        try {
+            FileOutputStream(tmpFile).use { fos ->
+                writer(fos)
+                fos.flush()
+                if (fos.channel.isOpen) {
+                    fos.channel.force(true)
+                }
+                if (fos.fd.valid()) {
+                    fos.fd.sync()
+                }
+            }
+        } catch (e: Exception) {
+            tmpFile.delete()
+            throw e
+        }
+
+        if (verifier != null) {
+            try {
+                verifier(tmpFile)
+            } catch (e: Exception) {
+                tmpFile.delete()
+                throw StorageVerificationException("Verification of streamed file failed: ${e.message}", e)
+            }
+        }
+
+        if (targetFile.exists()) {
+            if (bakFile.exists()) {
+                bakFile.delete()
+            }
+            if (!targetFile.renameTo(bakFile)) {
+                copyFile(targetFile, bakFile)
+                targetFile.delete()
+            }
+        }
+
+        val renamed = tmpFile.renameTo(targetFile)
+        if (!renamed) {
+            if (bakFile.exists() && !targetFile.exists()) {
+                if (bakFile.renameTo(targetFile)) {
+                    fsyncDirectory(parentDir)
+                }
+            }
+            tmpFile.delete()
+            throw IOException("Failed to rename temporary file to ${targetFile.name}")
+        }
+
+        fsyncDirectory(parentDir)
+        if (bakFile.exists()) {
+            bakFile.delete()
+        }
+    }
+
     @Synchronized
     internal fun safeWriteInternal(
         targetFile: File,

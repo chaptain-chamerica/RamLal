@@ -79,11 +79,25 @@ data class DiaryLog(
     val canvasImages: List<CanvasImage> = emptyList(),
     val audioAttachments: List<CanvasAudio> = emptyList(),
     val videoAttachments: List<CanvasVideo> = emptyList(),
+    val isContentLoaded: Boolean = true,
 ) {
     val dateStamp: String get() = fmtDate(createdAt)
     val timeStamp: String get() = fmtTime(createdAt)
     val updatedDateStamp: String get() = fmtDate(updatedAt)
     val updatedTimeStamp: String get() = fmtTime(updatedAt)
+
+    fun toSummary(): DiaryLog = if (!isContentLoaded && contentHtml.isEmpty() && canvasImages.isEmpty() && audioAttachments.isEmpty() && videoAttachments.isEmpty()) {
+        this
+    } else {
+        copy(
+            contentHtml = "",
+            canvasBgSource = null,
+            canvasImages = emptyList(),
+            audioAttachments = emptyList(),
+            videoAttachments = emptyList(),
+            isContentLoaded = false
+        )
+    }
 }
 
 data class MicSettings(val format: String = "wav", val sampleRate: Int = 44100, val bitRate: Int = 128000)
