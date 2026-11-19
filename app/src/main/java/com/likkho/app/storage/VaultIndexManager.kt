@@ -108,6 +108,20 @@ class VaultIndexManager internal constructor(
     }
 
     /**
+     * Loads the encrypted index, safely rebuilding via [rebuildFromDiariesVerified] when missing or corrupt
+     * so wrong DEK or partial rebuilds never overwrite disk index with an empty/incomplete index.
+     */
+    fun loadIndex(
+        dek: ByteArray,
+        diariesDir: File = File(vaultDir, "diaries")
+    ): VaultIndexRecord {
+        return when (val status = readIndexStatus(dek)) {
+            is IndexReadResult.Loaded -> status.index
+            is IndexReadResult.Missing, is IndexReadResult.Corrupt -> rebuildFromDiariesVerified(diariesDir, dek)
+        }
+    }
+
+    /**
      * Encrypts and safely writes the index record using [SafeStorageWriter].
      */
     fun writeIndex(indexRecord: VaultIndexRecord, dek: ByteArray) {
@@ -204,7 +218,7 @@ class VaultIndexManager internal constructor(
         return lkdFiles.size to entries
     }
 
-    private fun rebuildFromDiariesVerified(diariesDir: File, dek: ByteArray): VaultIndexRecord {
+    fun rebuildFromDiariesVerified(diariesDir: File, dek: ByteArray): VaultIndexRecord {
         val (totalLkdFiles, decodableEntries) = scanDecodableDiaries(diariesDir, dek)
         val decodableCount = decodableEntries.size
         val entries = customEntryScanner?.invoke(diariesDir, dek) ?: decodableEntries

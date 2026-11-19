@@ -229,4 +229,51 @@ class VaultIndexManagerTest {
         assertTrue("removeEntry must refuse partial rebuild when rebuilt < decodable count", partialRemoveThrew)
         assertTrue(corruptMarker.contentEquals(partialScannerManager.indexFile.readBytes()))
     }
+
+    @Test
+    fun loadIndex_usesVerifiedRebuildOnCorrupt_neverWritesEmptyIndexOnWrongDek() {
+        val diariesDir = File(vaultDir, "diaries")
+        diariesDir.mkdirs()
+
+        val d1 = DiaryRecord("d1", "One", 100L, 200L, pinned = false, plainPreview = "P1")
+        val d2 = DiaryRecord("d2", "Two", 300L, 400L, pinned = false, plainPreview = "P2")
+        File(diariesDir, "d1.lkd").writeBytes(DiaryFileCodec.encode(d1, testDek))
+        File(diariesDir, "d2.lkd").writeBytes(DiaryFileCodec.encode(d2, testDek))
+
+        val validIndex = VaultIndexRecord(
+            entries = listOf(
+                IndexEntryRecord("d1", 100L, 200L, false, 0, "P1", "One"),
+                IndexEntryRecord("d2", 300L, 400L, false, 0, "P2", "Two")
+            )
+        )
+        indexManager.writeIndex(validIndex, testDek)
+        val originalBytes = indexManager.indexFile.readBytes()
+
+        // Wrong DEK triggers Corrupt -> loadIndex must throw and never overwrite existing index.lki
+        val wrongDek = CryptoUtils.secureRandomBytes(32)
+        var wrongDekThrew = false
+        try {
+            indexManager.loadIndex(wrongDek, diariesDir)
+        } catch (_: StorageVerificationException) {
+            wrongDekThrew = true
+        }
+        assertTrue("loadIndex with wrong DEK must throw instead of writing empty index", wrongDekThrew)
+        assertTrue(originalBytes.contentEquals(indexManager.indexFile.readBytes()))
+        assertEquals(setOf("d1", "d2"), indexManager.loadIndex(testDek, diariesDir).entries.map { it.id }.toSet())
+
+        // Corrupt index + partial scanner (< decodable count) -> loadIndex must fail without writing index
+        val corruptBytes = byteArrayOf(0x09, 0x08, 0x07, 0x06)
+        indexManager.indexFile.writeBytes(corruptBytes)
+        val partialManager = VaultIndexManager(VaultId.PRIMARY, vaultDir) { _, _ ->
+            listOf(IndexEntryRecord("d1", 100L, 200L, false, 0, "P1", "One"))
+        }
+        var partialThrew = false
+        try {
+            partialManager.loadIndex(testDek, diariesDir)
+        } catch (_: StorageVerificationException) {
+            partialThrew = true
+        }
+        assertTrue("loadIndex must refuse partial rebuild when rebuilt < decodable count", partialThrew)
+        assertTrue(corruptBytes.contentEquals(partialManager.indexFile.readBytes()))
+    }
 }

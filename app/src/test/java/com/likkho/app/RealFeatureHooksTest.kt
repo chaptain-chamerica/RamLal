@@ -1,5 +1,8 @@
 package com.likkho.app
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Warning
 import com.likkho.app.storage.ClockProvider
 import com.likkho.app.storage.InMemoryKeyStoreProvider
 import com.likkho.app.storage.VaultId
@@ -510,5 +513,69 @@ class RealFeatureHooksTest {
         )
         assertEquals(importedId, successRes)
         assertTrue(sessionMedia.contains(importedId))
+    }
+
+    @Test
+    fun deleteAndReminder_raceDoesNotResurrectDiary_andMissingFileFails() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+
+        // 1. scheduleReminder on non-existent diary must fail and NOT create .lkd file
+        val missingRes = arrayOfNulls<Result<Unit>>(1)
+        val ghostLog = DiaryLog(id = "ghost_rem", heading = "Ghost")
+        hooks.scheduleReminder(ghostLog, 99_999L) { missingRes[0] = it }
+        assertTrue("scheduleReminder on missing diary must fail", missingRes[0]?.isFailure == true)
+        assertFalse(
+            "scheduleReminder must never create a diary file when missing",
+            File(vaultManager.primaryDiaryRepo.diariesDir, "ghost_rem.lkd").exists()
+        )
+
+        // 2. Delete + stale queued scheduleReminder race must NEVER resurrect deleted diary
+        val queued = kotlinx.coroutines.test.StandardTestDispatcher(testScheduler)
+        val queuedHooks = RealFeatureHooks(
+            context = null,
+            vaultManager = vaultManager,
+            dispatcher = queued,
+            scope = kotlinx.coroutines.CoroutineScope(queued),
+            baseStorageDir = filesDir
+        )
+        val diary = DiaryLog(id = "d_race", heading = "With Reminder", reminderAt = 50_000L, updatedAt = 1000L)
+        hooks.persistLogs(listOf(diary))
+        assertTrue(File(vaultManager.primaryDiaryRepo.diariesDir, "d_race.lkd").exists())
+
+        val delRes = arrayOfNulls<Result<Unit>>(1)
+        val remRaceRes = arrayOfNulls<Result<Unit>>(1)
+        queuedHooks.cancelReminder(diary.id)
+        queuedHooks.deleteDiary(diary.id) { delRes[0] = it }
+        queuedHooks.scheduleReminder(diary, 80_000L) { remRaceRes[0] = it }
+        testScheduler.advanceUntilIdle()
+
+        assertTrue("Delete must succeed", delRes[0]?.isSuccess == true)
+        assertTrue("Stale scheduleReminder after delete must fail", remRaceRes[0]?.isFailure == true)
+        assertFalse(
+            "Deleted diary must not reappear after reminder race",
+            File(vaultManager.primaryDiaryRepo.diariesDir, "d_race.lkd").exists()
+        )
+        val loadedAfter = vaultManager.withActiveDek { dek ->
+            vaultManager.primaryDiaryRepo.loadAllDiaries(dek).diaries
+        }
+        assertTrue("Deleted diary must stay absent from loaded diaries", loadedAfter.none { it.id == "d_race" })
+    }
+
+    @Test
+    fun statusBanner_mapsStorageFailuresToErrorKindWithWarningIcon() {
+        val prefixes = listOf(
+            "Save failed",
+            "Delete failed",
+            "Pin update failed",
+            "Media cleanup failed"
+        )
+        for (prefix in prefixes) {
+            val state = storageFailureBanner(prefix, IllegalStateException("Vault locked"))
+            assertEquals(BannerKind.ERROR, state.kind)
+            assertTrue(state.message.startsWith("$prefix:"))
+        }
+        assertEquals(Icons.Outlined.Warning, statusBannerIcon(BannerKind.ERROR))
+        assertEquals(Icons.Outlined.CheckCircle, statusBannerIcon(BannerKind.SUCCESS))
+        assertEquals(BannerKind.SUCCESS, StatusBannerState("Saved cleanly").kind)
     }
 }

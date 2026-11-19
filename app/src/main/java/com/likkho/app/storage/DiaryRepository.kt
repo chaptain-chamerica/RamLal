@@ -295,8 +295,10 @@ class DiaryRepository(
             is IndexReadResult.Missing, is IndexReadResult.Corrupt -> true
         }
         if (needsRebuild) {
-            indexManager.rebuildFromDiaries(diariesDir, dek)
-            indexRebuilt = true
+            runCatching {
+                indexManager.rebuildFromDiariesVerified(diariesDir, dek)
+                indexRebuilt = true
+            }
         }
 
         return RecoveryReport(
@@ -518,7 +520,7 @@ class DiaryRepository(
         if (status is IndexReadResult.Loaded && indexMatchesDisk(status.index, dek)) {
             return status.index
         }
-        return indexManager.rebuildFromDiaries(diariesDir, dek)
+        return indexManager.rebuildFromDiariesVerified(diariesDir, dek)
     }
 
     /**

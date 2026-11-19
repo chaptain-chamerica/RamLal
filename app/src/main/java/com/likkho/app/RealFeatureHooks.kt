@@ -1,5 +1,6 @@
 package com.likkho.app
 
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -27,6 +28,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -448,13 +450,23 @@ class RealFeatureHooks(
                     vaultManager.withActiveDek { dek ->
                         val repo = vaultManager.getDiaryRepository(boundVaultId)
                         val diaryFile = File(repo.diariesDir, "${log.id}.lkd")
-                        val existing = if (diaryFile.exists()) repo.loadDiary(log.id, dek).record else null
-                        val record = (existing ?: log.toDiaryRecord()).copy(reminderAt = at)
+                        if (!diaryFile.exists()) {
+                            throw FileNotFoundException("Diary ${log.id} does not exist; cannot update reminder.")
+                        }
+                        val existing = repo.loadDiary(log.id, dek).record
+                        val record = existing.copy(reminderAt = at)
                         repo.saveDiary(record, dek)
                     }
                 }
             }
             onResult(result)
+        }
+    }
+
+    override fun cancelReminder(diaryId: String) {
+        runCatching {
+            val nm = context?.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.cancel(diaryId.hashCode())
         }
     }
 

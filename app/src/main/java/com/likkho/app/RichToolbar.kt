@@ -80,7 +80,7 @@ fun RichToolbar(
                     kotlinx.coroutines.delay(2200)
                     hint = null
                 } else {
-                    vm.showStatus("Please select a valid .ttf or .otf font file.")
+                    vm.showStatus("Please select a valid .ttf or .otf font file.", BannerKind.ERROR)
                 }
             }
         }
@@ -405,7 +405,7 @@ fun RichToolbar(
             Pop.WIKI -> Pop1 {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     WikiTextField(wikiQ, { wikiQ = it }, Modifier.weight(1f), if (wikiLang == "en") "Search English Wikipedia..." else "हिन्दी विकिपीडिया खोजें...", onDone = {})
-                    WikiButton(if (wikiBusy) "Searching..." else "Search", { if (wikiQ.isNotBlank()) { wikiBusy = true; scope.launch { vm.showStatus(runCatching { hooks.wikipediaInsert(wikiQ.trim(), wikiLang, wikiImgs) }.getOrElse { "Wikipedia failed." }); wikiBusy = false; pop = Pop.NONE } } }, kind = BtnKind.PRIMARY, height = 36.dp, enabled = !wikiBusy)
+                    WikiButton(if (wikiBusy) "Searching..." else "Search", { if (wikiQ.isNotBlank()) { wikiBusy = true; scope.launch { val r = runCatching { hooks.wikipediaInsert(wikiQ.trim(), wikiLang, wikiImgs) }; r.onSuccess { vm.showStatus(it, BannerKind.SUCCESS) }.onFailure { vm.showStatus("Wikipedia failed.", BannerKind.ERROR) }; wikiBusy = false; pop = Pop.NONE } } }, kind = BtnKind.PRIMARY, height = 36.dp, enabled = !wikiBusy)
                 }
                 if (sugg.isNotEmpty()) Column(Modifier.fillMaxWidth().padding(top = 6.dp).background(w.bg).wikiBorder(w.border, 0.5.dp)) {
                     sugg.forEach { s -> Column(Modifier.fillMaxWidth().clickable { wikiQ = s.title }.padding(8.dp)) { Text(s.title, style = sansStyle(12.sp, w.text, FontWeight.SemiBold)); Text(s.description, style = sansStyle(10.sp, w.muted, FontWeight.Normal)) }; HairlineDivider() }

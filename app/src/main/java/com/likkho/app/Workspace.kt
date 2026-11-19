@@ -130,7 +130,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
 
     DisposableEffect(editorState) {
         editorState.onLockedSpoilerBlocked = { blocked ->
-            vm.showStatus("Enter spoiler passcode to edit, delete, or copy.")
+            vm.showStatus("Enter spoiler passcode to edit, delete, or copy.", BannerKind.ERROR)
             spoilerUnlockPrompt = blocked
         }
         onDispose {
@@ -160,7 +160,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     selAud = null
                     selVid = null
                 } else {
-                    vm.showStatus("Could not import image.")
+                    vm.showStatus("Could not import image.", BannerKind.ERROR)
                 }
             }
         }
@@ -177,7 +177,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     selImg = null
                     selAud = null
                 } else {
-                    vm.showStatus("Could not import video.")
+                    vm.showStatus("Could not import video.", BannerKind.ERROR)
                 }
             }
         }
@@ -194,7 +194,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     selImg = null
                     selVid = null
                 } else {
-                    vm.showStatus("Could not import audio.")
+                    vm.showStatus("Could not import audio.", BannerKind.ERROR)
                 }
             }
         }
@@ -207,7 +207,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     sessionImportedMediaIds.add(mediaId)
                     bgSrc = mediaId
                 } else {
-                    vm.showStatus("Could not import background image.")
+                    vm.showStatus("Could not import background image.", BannerKind.ERROR)
                 }
             }
         }
@@ -241,7 +241,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 hooks.scheduleReminder(log, reminderAt) { remRes ->
                     remRes.onFailure { err ->
                         scope.launch {
-                            vm.showStatus("Reminder update failed: ${err.message ?: "Storage error"}", 4000)
+                            val st = storageFailureBanner("Reminder update failed", err)
+                            vm.showStatus(st.message, st.kind, 4000)
                         }
                     }
                 }
@@ -526,7 +527,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 viewportRootOrigin = viewportRootOrigin,
                                 loadThumbnail = { id -> vm.loadVideoThumbnailBitmap(id) },
                                 openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
-                                onStatus = { vm.showStatus(it) },
+                                onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selVid = v.id; selImg = null; selAud = null },
                                 onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
                                 onMove = { x, y ->
@@ -548,7 +549,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 viewportHPx = viewportHPx,
                                 viewportRootOrigin = viewportRootOrigin,
                                 loadAudioBytes = { id -> vm.loadDecryptedMediaBytes(id) },
-                                onStatus = { vm.showStatus(it) },
+                                onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selAud = a.id; selImg = null; selVid = null },
                                 onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
                                 onMove = { x, y ->
@@ -631,10 +632,10 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 }
                                 is RichTextEditorState.SpoilerCopyResult.Masked -> {
                                     systemClipboard.setText(AnnotatedString(copyResult.text))
-                                    vm.showStatus("Copied with hidden spoiler text masked.")
+                                    vm.showStatus("Copied with hidden spoiler text masked.", BannerKind.INFO)
                                 }
                                 is RichTextEditorState.SpoilerCopyResult.Blocked -> {
-                                    vm.showStatus("Enter spoiler passcode to copy hidden text.")
+                                    vm.showStatus("Enter spoiler passcode to copy hidden text.", BannerKind.ERROR)
                                     spoilerUnlockPrompt = copyResult.blockingSpoiler
                                 }
                             }
@@ -995,7 +996,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 viewportRootOrigin = viewportRootOrigin,
                                 loadThumbnail = { id -> vm.loadVideoThumbnailBitmap(id) },
                                 openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
-                                onStatus = { vm.showStatus(it) },
+                                onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selVid = v.id; selImg = null; selAud = null },
                                 onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
                                 onMove = { x, y ->
@@ -1017,7 +1018,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 viewportHPx = viewportHPx,
                                 viewportRootOrigin = viewportRootOrigin,
                                 loadAudioBytes = { id -> vm.loadDecryptedMediaBytes(id) },
-                                onStatus = { vm.showStatus(it) },
+                                onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selAud = a.id; selImg = null; selVid = null },
                                 onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
                                 onMove = { x, y ->
@@ -1084,7 +1085,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 uri = uri,
                 importPhoto = { vm.importMediaUri(it) },
                 sessionImportedMediaIds = sessionImportedMediaIds,
-                onFailure = { vm.showStatus("Could not import PFP image.") }
+                onFailure = { vm.showStatus("Could not import PFP image.", BannerKind.ERROR) }
             )
         },
         onSave = { pfp = it }

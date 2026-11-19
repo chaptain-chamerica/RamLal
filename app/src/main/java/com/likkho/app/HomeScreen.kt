@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.MenuBook
@@ -33,6 +34,8 @@ import androidx.compose.material.icons.outlined.NotificationsActive
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -262,6 +265,12 @@ fun PfpAvatar(pfp: Pfp?, size: Dp, modifier: Modifier = Modifier) {
     }
 }
 
+internal fun statusBannerIcon(kind: BannerKind): ImageVector = when (kind) {
+    BannerKind.ERROR -> Icons.Outlined.Warning
+    BannerKind.INFO -> Icons.Outlined.Info
+    BannerKind.SUCCESS -> Icons.Outlined.CheckCircle
+}
+
 /** Floating processing / status banners shown above the FAB (App.tsx bottom-20). */
 @Composable
 fun HomeFloatingBanners(vm: AppViewModel, modifier: Modifier = Modifier) {
@@ -272,7 +281,16 @@ fun HomeFloatingBanners(vm: AppViewModel, modifier: Modifier = Modifier) {
         }
         val st = vm.exportStatusBanner
         if (st != null && vm.exportProcessingBanner == null) {
-            FloatingBanner(st, BannerKind.SUCCESS, leading = { Icon(Icons.Outlined.CheckCircle, null, tint = w.success, modifier = Modifier.size(16.dp)) })
+            val tint = when (st.kind) {
+                BannerKind.ERROR -> w.danger
+                BannerKind.INFO -> w.accent
+                BannerKind.SUCCESS -> w.success
+            }
+            FloatingBanner(
+                text = st.message,
+                kind = st.kind,
+                leading = { Icon(statusBannerIcon(st.kind), null, tint = tint, modifier = Modifier.size(16.dp)) }
+            )
         }
     }
 }

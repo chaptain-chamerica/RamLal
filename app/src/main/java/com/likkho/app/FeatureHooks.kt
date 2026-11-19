@@ -66,6 +66,7 @@ interface FeatureHooks {
     fun deleteDiary(id: String, onResult: (Result<Unit>) -> Unit = {})
     fun deleteUnreferencedMedia(candidateIds: Set<String>, onResult: (Result<Unit>) -> Unit = {})
     fun scheduleReminder(log: DiaryLog, at: Long?, onResult: (Result<Unit>) -> Unit = {})
+    fun cancelReminder(diaryId: String) {}
     suspend fun pickImage(): CanvasImage?                      // media picker "Add Image"
     suspend fun pickAudio(): CanvasAudio?                      // media picker "Attach Audio"
     suspend fun pickPfpImage(): String?                        // "Browse Image" in PFP studio

@@ -36,6 +36,10 @@ import java.io.InputStream
 data class PendingUnlock(val log: DiaryLog, val action: UnlockAction)
 enum class UnlockAction { OPEN, EXPORT, DELETE }
 data class RingingAlert(val heading: String, val preview: String)
+data class StatusBannerState(val message: String, val kind: BannerKind = BannerKind.SUCCESS)
+
+internal fun storageFailureBanner(prefix: String, err: Throwable): StatusBannerState =
+    StatusBannerState("$prefix: ${err.message ?: "Storage error"}", BannerKind.ERROR)
 
 /**
  * All UI state + navigation. UI-level behaviour (what opens/closes when a button is pressed) is implemented here.
@@ -75,7 +79,7 @@ class AppViewModel @JvmOverloads constructor(
     var pendingDeleteLog by mutableStateOf<DiaryLog?>(null)
     var pendingUnlock by mutableStateOf<PendingUnlock?>(null)
     var exportProcessingBanner by mutableStateOf<String?>(null)
-    var exportStatusBanner by mutableStateOf<String?>(null)
+    var exportStatusBanner by mutableStateOf<StatusBannerState?>(null)
     var ringingAlert by mutableStateOf<RingingAlert?>(null)
     var availableUpdate by mutableStateOf<AppUpdateInfo?>(null)
     var failedDiaries by mutableStateOf<List<FailedDiaryEntry>>(emptyList())
@@ -136,6 +140,7 @@ class AppViewModel @JvmOverloads constructor(
                         if (initialFailed.isNotEmpty()) {
                             showStatus(
                                 "${initialFailed.size} diary ${if (initialFailed.size == 1) "file" else "files"} failed to open (${initialFailed.joinToString { it.diaryId }}).",
+                                BannerKind.ERROR,
                                 8000
                             )
                         }
@@ -231,6 +236,7 @@ class AppViewModel @JvmOverloads constructor(
                 if (failed.isNotEmpty()) {
                     showStatus(
                         "${failed.size} diary ${if (failed.size == 1) "file" else "files"} failed to open (${failed.joinToString { it.diaryId }}).",
+                        BannerKind.ERROR,
                         8000
                     )
                 }
@@ -251,7 +257,8 @@ class AppViewModel @JvmOverloads constructor(
         hooks.persistLogs(logs.toList(), obsoleteMediaIds) { result ->
             viewModelScope.launch {
                 result.onFailure { err ->
-                    showStatus("Save failed: ${err.message ?: "Storage error"}", 5000)
+                    val st = storageFailureBanner("Save failed", err)
+                    showStatus(st.message, st.kind, 5000)
                 }
                 onPersistResult(result)
             }
@@ -264,7 +271,8 @@ class AppViewModel @JvmOverloads constructor(
             hooks.deleteUnreferencedMedia(candidateIds) { result ->
                 result.onFailure { err ->
                     viewModelScope.launch {
-                        showStatus("Media cleanup failed: ${err.message ?: "Storage error"}", 4000)
+                        val st = storageFailureBanner("Media cleanup failed", err)
+                        showStatus(st.message, st.kind, 4000)
                     }
                 }
             }
@@ -278,7 +286,8 @@ class AppViewModel @JvmOverloads constructor(
         hooks.persistLogs(logs.toList()) { result ->
             result.onFailure { err ->
                 viewModelScope.launch {
-                    showStatus("Pin update failed: ${err.message ?: "Storage error"}", 4000)
+                    val st = storageFailureBanner("Pin update failed", err)
+                    showStatus(st.message, st.kind, 4000)
                 }
             }
         }
@@ -294,20 +303,15 @@ class AppViewModel @JvmOverloads constructor(
     fun confirmDelete() {
         val t = pendingDeleteLog ?: return
         if (t.reminderAt != null) {
-            hooks.scheduleReminder(t, null) { remRes ->
-                remRes.onFailure { err ->
-                    viewModelScope.launch {
-                        showStatus("Reminder update failed: ${err.message ?: "Storage error"}", 4000)
-                    }
-                }
-            }
+            hooks.cancelReminder(t.id)
         }
         logs.removeAll { it.id == t.id }
         pendingDeleteLog = null
         hooks.deleteDiary(t.id) { result ->
             result.onFailure { err ->
                 viewModelScope.launch {
-                    showStatus("Delete failed: ${err.message ?: "Storage error"}", 5000)
+                    val st = storageFailureBanner("Delete failed", err)
+                    showStatus(st.message, st.kind, 5000)
                 }
             }
         }
@@ -335,15 +339,16 @@ class AppViewModel @JvmOverloads constructor(
         val log = sharingLog ?: return
         sharingLog = null
         if (passphrase.length < 8) {
-            showStatus("Passphrase must be at least 8 characters.")
+            showStatus("Passphrase must be at least 8 characters.", BannerKind.ERROR)
             return
         }
         exportStatusBanner = null
         exportProcessingBanner = "Encrypting \"${log.heading}\" as .likkho archive... Please wait."
         viewModelScope.launch {
-            val msg = runCatching { hooks.shareDiaryAsArchive(log, passphrase) }.getOrElse { "Cannot open this file" }
+            val res = runCatching { hooks.shareDiaryAsArchive(log, passphrase) }
             exportProcessingBanner = null
-            showStatus(msg)
+            res.onSuccess { showStatus(it, BannerKind.SUCCESS) }
+                .onFailure { showStatus("Cannot open this file", BannerKind.ERROR) }
         }
     }
 
@@ -353,15 +358,17 @@ class AppViewModel @JvmOverloads constructor(
         exportStatusBanner = null
         exportProcessingBanner = "Exporting \"${log.heading}\" as ${format.label}... Please wait."
         viewModelScope.launch {
-            val msg = runCatching { hooks.exportDiary(log, format) }.getOrElse { "Export failed." }
+            val res = runCatching { hooks.exportDiary(log, format) }
             exportProcessingBanner = null
-            showStatus(msg)
+            res.onSuccess { showStatus(it, BannerKind.SUCCESS) }
+                .onFailure { showStatus("Export failed.", BannerKind.ERROR) }
         }
     }
 
-    fun showStatus(msg: String, millis: Long = 3200) {
-        exportStatusBanner = msg
-        viewModelScope.launch { delay(millis); if (exportStatusBanner == msg) exportStatusBanner = null }
+    fun showStatus(msg: String, kind: BannerKind = BannerKind.SUCCESS, millis: Long = 3200) {
+        val state = StatusBannerState(msg, kind)
+        exportStatusBanner = state
+        viewModelScope.launch { delay(millis); if (exportStatusBanner == state) exportStatusBanner = null }
     }
 
     fun dismissRinging() { ringingAlert = null }
@@ -833,9 +840,10 @@ class AppViewModel @JvmOverloads constructor(
         hooks.persistLogs(logs.toList()) { result ->
             viewModelScope.launch {
                 result.onSuccess {
-                    showStatus("Restored \"${log.heading.ifBlank { "Diary" }}\" to app.", 3000)
+                    showStatus("Restored \"${log.heading.ifBlank { "Diary" }}\" to app.", BannerKind.SUCCESS, 3000)
                 }.onFailure { err ->
-                    showStatus("Restore save failed: ${err.message ?: "Storage error"}", 5000)
+                    val st = storageFailureBanner("Restore save failed", err)
+                    showStatus(st.message, st.kind, 5000)
                 }
             }
         }
@@ -849,7 +857,8 @@ class AppViewModel @JvmOverloads constructor(
         hooks.persistLogs(logs.toList()) { result ->
             result.onFailure { err ->
                 viewModelScope.launch {
-                    showStatus("Restore persist failed: ${err.message ?: "Storage error"}", 5000)
+                    val st = storageFailureBanner("Restore persist failed", err)
+                    showStatus(st.message, st.kind, 5000)
                 }
             }
         }

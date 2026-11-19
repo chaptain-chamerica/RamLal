@@ -290,4 +290,37 @@ class DiaryRepositoryTest {
         assertEquals("Orphan cleanup must NOT delete media when undecodable/quarantined diary exists", 0, cleaned)
         assertTrue("Media of undecodable/quarantined diary must be preserved", mediaRepo.exists("m_corrupt_diary"))
     }
+
+    @Test
+    fun loadIndex_onWrongDek_neverOverwritesValidIndexWithEmpty() {
+        val d1 = sampleDiary("idx_1", "First")
+        val d2 = sampleDiary("idx_2", "Second")
+        repository.saveDiary(d1, testDek)
+        repository.saveDiary(d2, testDek)
+
+        val originalIndexBytes = repository.indexManager.indexFile.readBytes()
+        val wrongDek = CryptoUtils.secureRandomBytes(32)
+
+        var threw = false
+        try {
+            repository.loadIndex(wrongDek)
+        } catch (_: StorageVerificationException) {
+            threw = true
+        }
+        assertTrue("DiaryRepository.loadIndex(wrongDek) must fail instead of writing empty index", threw)
+        assertTrue(
+            "Original valid index.lki bytes must remain untouched after wrong-DEK loadIndex",
+            originalIndexBytes.contentEquals(repository.indexManager.indexFile.readBytes())
+        )
+
+        // scanAndRecover with wrong DEK must also keep index intact
+        repository.scanAndRecover(wrongDek)
+        assertTrue(
+            "Original valid index.lki bytes must remain untouched after wrong-DEK scanAndRecover",
+            originalIndexBytes.contentEquals(repository.indexManager.indexFile.readBytes())
+        )
+
+        val validEntries = repository.listDiaries(testDek)
+        assertEquals(setOf("idx_1", "idx_2"), validEntries.map { it.id }.toSet())
+    }
 }
