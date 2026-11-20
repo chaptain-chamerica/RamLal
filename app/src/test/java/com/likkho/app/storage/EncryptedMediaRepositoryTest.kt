@@ -282,4 +282,30 @@ class EncryptedMediaRepositoryTest {
             assertEquals(-1, reader.readAt(totalLen.toLong(), ByteArray(16), 0, 16))
         }
     }
+
+    @Test
+    fun deleteMedia_retriesOnceOnFailure_andCheckedResultReportsFailedIds() {
+        var transientAttempts = 0
+        val retryRepo = EncryptedMediaRepository(VaultId.PRIMARY, vaultDir, testClock) { file ->
+            transientAttempts++
+            if (transientAttempts == 1) false else file.delete()
+        }
+        retryRepo.importMediaBytes("m_retry_ok", "retry".toByteArray(), testDek)
+        assertTrue(retryRepo.deleteMedia("m_retry_ok"))
+        assertEquals(2, transientAttempts)
+        assertFalse(retryRepo.exists("m_retry_ok"))
+
+        var hardFailAttempts = 0
+        val failingRepo = EncryptedMediaRepository(VaultId.PRIMARY, vaultDir, testClock) { _ ->
+            hardFailAttempts++
+            false
+        }
+        failingRepo.importMediaBytes("m_always_fail", "locked".toByteArray(), testDek)
+        val res = failingRepo.deleteUnreferencedMediaForDiaryChecked(setOf("m_always_fail"), emptySet())
+        assertEquals(0, res.deletedCount)
+        assertEquals(listOf("m_always_fail"), res.failedIds)
+        assertEquals(2, hardFailAttempts)
+        assertTrue(failingRepo.exists("m_always_fail"))
+    }
 }
+

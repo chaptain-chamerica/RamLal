@@ -241,4 +241,19 @@ class VaultManagerTest {
         assertFalse("unlockWithPin (Decoy) must clean .tmp", tmpDecoy.exists())
         assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
     }
+
+    @Test
+    fun unlockPaths_cleanStaleVaultTmpDirs() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+        vaultManager.lock()
+
+        val staleDir = File(vaultManager.backupEngine.tempDir, "vault_snapshot_crashed").apply { mkdirs() }
+        File(staleDir, "leftover.bin").writeBytes(ByteArray(128 * 1024))
+        assertTrue(staleDir.exists())
+
+        val res = vaultManager.unlockNoPasscode()
+        assertTrue(res is UnlockResult.Success)
+        assertFalse("Unlock maintenance must clean stale vaults/tmp folders", staleDir.exists())
+    }
 }
+

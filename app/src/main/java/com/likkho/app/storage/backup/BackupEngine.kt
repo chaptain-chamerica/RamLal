@@ -17,6 +17,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Backup and Share engine for custom binary .lkb and .likkho containers per user specification:
@@ -34,9 +35,71 @@ class BackupEngine(
     val defaultIterations: Int = SecureContainerCodec.DEFAULT_ITERATIONS,
     val appVersion: String = "1.0.0"
 ) {
+    private val activeOps = AtomicInteger(0)
+
+    internal var onBeforeCommitHookForTest: ((snapshotDir: File) -> Unit)? = null
+
     init {
         if (!tempDir.exists()) {
             tempDir.mkdirs()
+        }
+    }
+
+    fun isOperationActive(): Boolean = activeOps.get() > 0
+
+    /**
+     * Deletes all stale temp folders/files in [tempDir] when no backup/restore/share op is active.
+     */
+    fun cleanupStaleTempDirs(): Long {
+        if (activeOps.get() > 0 || !tempDir.exists()) return 0L
+        var freed = 0L
+        val children = tempDir.listFiles() ?: return 0L
+        for (child in children) {
+            freed += com.likkho.app.storage.StorageMetrics.directorySizeBytes(child)
+            child.deleteRecursively()
+        }
+        return freed
+    }
+
+    private fun snapshotVaultMetadata(vaultDir: File, snapshotDir: File) {
+        if (!vaultDir.exists()) return
+        val children = vaultDir.listFiles() ?: return
+        for (child in children) {
+            if (child.name == "media") continue
+            val dest = File(snapshotDir, child.name)
+            if (child.isDirectory) {
+                child.copyRecursively(dest, overwrite = true)
+            } else {
+                child.copyTo(dest, overwrite = true)
+            }
+        }
+    }
+
+    private fun rollbackVaultMetadata(
+        vaultDir: File,
+        snapshotDir: File,
+        mediaRepo: EncryptedMediaRepository,
+        newlyImportedMediaIds: List<String>
+    ) {
+        for (mId in newlyImportedMediaIds) {
+            runCatching { mediaRepo.deleteMedia(mId) }
+            runCatching { File(mediaRepo.mediaDir, "$mId.${EncryptedMediaRepository.MEDIA_EXTENSION}.tmp").delete() }
+        }
+        if (snapshotDir.exists() && snapshotDir.listFiles()?.isNotEmpty() == true) {
+            val currentChildren = vaultDir.listFiles() ?: emptyArray()
+            for (child in currentChildren) {
+                if (child.name == "media") continue
+                child.deleteRecursively()
+            }
+            val snapChildren = snapshotDir.listFiles() ?: emptyArray()
+            for (child in snapChildren) {
+                val dest = File(vaultDir, child.name)
+                if (child.isDirectory) {
+                    child.copyRecursively(dest, overwrite = true)
+                } else {
+                    child.copyTo(dest, overwrite = true)
+                }
+            }
         }
     }
 
@@ -84,91 +147,140 @@ class BackupEngine(
         vaultDek: ByteArray,
         iterations: Int = defaultIterations
     ): BackupResult {
-        SecureContainerCodec.validatePassphrase(passphrase)
-        val parentDir = targetFile.parentFile ?: tempDir
-        if (!parentDir.exists()) parentDir.mkdirs()
+        activeOps.incrementAndGet()
+        try {
+            SecureContainerCodec.validatePassphrase(passphrase)
+            val parentDir = targetFile.parentFile ?: tempDir
+            if (!parentDir.exists()) parentDir.mkdirs()
 
-        val tmpStale = File(parentDir, "${targetFile.name}.tmp")
-        if (tmpStale.exists()) tmpStale.delete()
+            val tmpStale = File(parentDir, "${targetFile.name}.tmp")
+            if (tmpStale.exists()) tmpStale.delete()
 
-        var diaryCount = 0
-        var mediaCount = 0
-        var failedMediaCount = 0
-        var estimatedBytes = 4096L
+            var diaryCount = 0
+            var mediaCount = 0
+            var failedMediaCount = 0
+            var estimatedBytes = 4096L
 
-        // Pass 1: Compute per-item hashes & sizes by streaming each item individually
-        val summaries = diaryRepo.listDiaries(vaultDek)
-        val validDiaryIds = mutableListOf<String>()
-        val itemHashes = mutableListOf<BackupItemHash>()
+            // Pass 1: Compute per-item hashes & sizes by streaming each item individually
+            val summaries = diaryRepo.listDiaries(vaultDek)
+            val validDiaryIds = mutableListOf<String>()
+            val itemHashes = mutableListOf<BackupItemHash>()
 
-        for (sum in summaries) {
-            try {
-                val decoded = diaryRepo.loadDiary(sum.id, vaultDek)
-                val diaryJson = SecureContainerCodec.encodeDiaryRecordBytes(decoded.record)
-                itemHashes.add(BackupItemHash("diaries/${decoded.record.id}", CryptoUtils.sha256Hex(diaryJson), diaryJson.size.toLong()))
-                validDiaryIds.add(sum.id)
-                estimatedBytes += diaryJson.size + 64
-                diaryCount++
-            } catch (_: Exception) {}
-        }
-
-        val referencedMediaIds = diaryRepo.collectAllReferencedMediaIds(vaultDek)
-        val validMediaMeta = mutableListOf<Pair<String, Long>>()
-
-        for (mId in referencedMediaIds) {
-            if (mediaRepo.exists(mId)) {
+            for (sum in summaries) {
                 try {
-                    val (sha256, byteSize) = mediaRepo.openDecryptedStream(mId, vaultDek).use { stream ->
-                        computeStreamSha256AndSize(stream)
+                    val decoded = diaryRepo.loadDiary(sum.id, vaultDek)
+                    val diaryJson = SecureContainerCodec.encodeDiaryRecordBytes(decoded.record)
+                    itemHashes.add(BackupItemHash("diaries/${decoded.record.id}", CryptoUtils.sha256Hex(diaryJson), diaryJson.size.toLong()))
+                    validDiaryIds.add(sum.id)
+                    estimatedBytes += diaryJson.size + 64
+                    diaryCount++
+                } catch (_: Exception) {}
+            }
+
+            val referencedMediaIds = diaryRepo.collectAllReferencedMediaIds(vaultDek)
+            val validMediaMeta = mutableListOf<Pair<String, Long>>()
+
+            for (mId in referencedMediaIds) {
+                if (mediaRepo.exists(mId)) {
+                    try {
+                        val (sha256, byteSize) = mediaRepo.openDecryptedStream(mId, vaultDek).use { stream ->
+                            computeStreamSha256AndSize(stream)
+                        }
+                        validMediaMeta.add(mId to byteSize)
+                        itemHashes.add(BackupItemHash("media/$mId", sha256, byteSize))
+                        estimatedBytes += byteSize + 1024
+                        mediaCount++
+                    } catch (_: Exception) {
+                        failedMediaCount++
                     }
-                    validMediaMeta.add(mId to byteSize)
-                    itemHashes.add(BackupItemHash("media/$mId", sha256, byteSize))
-                    estimatedBytes += byteSize + 1024
-                    mediaCount++
-                } catch (_: Exception) {
+                } else {
                     failedMediaCount++
                 }
-            } else {
-                failedMediaCount++
             }
-        }
 
-        val manifest = BackupManifest(
-            schemaVersion = DiaryFileCodec.CURRENT_SCHEMA_VERSION,
-            appVersion = appVersion,
-            createdAt = System.currentTimeMillis(),
-            diaryCount = diaryCount,
-            mediaCount = mediaCount,
-            items = itemHashes
-        )
-
-        // Pass 2: Stream encrypted container directly to .tmp + streaming read-back verification + atomic rename
-        SafeStorageWriter.safeWriteStreaming(
-            targetFile = targetFile,
-            estimatedRequiredBytes = estimatedBytes,
-            verifier = { writtenFile ->
-                SecureContainerCodec.verifyBackupContainerStreaming(writtenFile, passphrase)
-            }
-        ) { fos ->
-            SecureContainerCodec.encodeBackupContainerStreaming(
-                outputStream = fos,
-                manifest = manifest,
-                diaryIds = validDiaryIds,
-                diaryLoader = { id -> diaryRepo.loadDiary(id, vaultDek).record },
-                mediaItems = validMediaMeta,
-                mediaOpener = { id -> mediaRepo.openDecryptedStream(id, vaultDek) },
-                passphrase = passphrase,
-                iterations = iterations
+            val manifest = BackupManifest(
+                schemaVersion = DiaryFileCodec.CURRENT_SCHEMA_VERSION,
+                appVersion = appVersion,
+                createdAt = System.currentTimeMillis(),
+                diaryCount = diaryCount,
+                mediaCount = mediaCount,
+                items = itemHashes
             )
+
+            // Pass 2: Stream encrypted container directly to .tmp + streaming read-back verification + atomic rename
+            SafeStorageWriter.safeWriteStreaming(
+                targetFile = targetFile,
+                estimatedRequiredBytes = estimatedBytes,
+                verifier = { writtenFile ->
+                    SecureContainerCodec.verifyBackupContainerStreaming(writtenFile, passphrase)
+                }
+            ) { fos ->
+                SecureContainerCodec.encodeBackupContainerStreaming(
+                    outputStream = fos,
+                    manifest = manifest,
+                    diaryIds = validDiaryIds,
+                    diaryLoader = { id -> diaryRepo.loadDiary(id, vaultDek).record },
+                    mediaItems = validMediaMeta,
+                    mediaOpener = { id -> mediaRepo.openDecryptedStream(id, vaultDek) },
+                    passphrase = passphrase,
+                    iterations = iterations
+                )
+            }
+
+            return BackupResult(
+                success = true,
+                diaryCount = diaryCount,
+                mediaCount = mediaCount,
+                failedMediaCount = failedMediaCount,
+                backupFile = targetFile
+            )
+        } finally {
+            activeOps.decrementAndGet()
+        }
+    }
+
+    /**
+     * Retains only the latest [keepCount] verified .lkb backup files in [backupDir]
+     * (always preserving [protectedFile]), and removes stale .tmp/.bak files.
+     * Returns total bytes freed.
+     */
+    fun pruneOldBackups(
+        backupDir: File,
+        keepCount: Int = 1,
+        protectedFile: File? = null
+    ): Long {
+        if (!backupDir.exists()) return 0L
+        var freedBytes = 0L
+
+        val transient = backupDir.listFiles { f ->
+            f.isFile && (f.name.endsWith(".tmp") || f.name.endsWith(".bak"))
+        } ?: emptyArray()
+        for (f in transient) {
+            val len = f.length()
+            if (f.delete()) freedBytes += len
         }
 
-        return BackupResult(
-            success = true,
-            diaryCount = diaryCount,
-            mediaCount = mediaCount,
-            failedMediaCount = failedMediaCount,
-            backupFile = targetFile
-        )
+        val lkbFiles = (backupDir.listFiles { f ->
+            f.isFile && f.name.endsWith(".lkb")
+        } ?: emptyArray()).sortedByDescending { it.lastModified() }
+
+        val keepLimit = keepCount.coerceAtLeast(1)
+        val keepSet = LinkedHashSet<String>()
+        if (protectedFile != null && protectedFile.exists()) {
+            keepSet.add(protectedFile.absolutePath)
+        }
+        for (f in lkbFiles) {
+            if (keepSet.size >= keepLimit) break
+            keepSet.add(f.absolutePath)
+        }
+
+        for (f in lkbFiles) {
+            if (!keepSet.contains(f.absolutePath)) {
+                val len = f.length()
+                if (f.delete()) freedBytes += len
+            }
+        }
+        return freedBytes
     }
 
     /**
@@ -191,8 +303,10 @@ class BackupEngine(
         vaultDek: ByteArray
     ): RestoreResult {
         if (!backupFile.exists()) throw CannotOpenFileException()
+        activeOps.incrementAndGet()
         val stagingDir = newStageDir("restore_stage")
         val snapshotDir = newStageDir("vault_snapshot")
+        val newlyImportedMediaIds = mutableListOf<String>()
 
         var restoredDiaries = 0
         var conflictCopies = 0
@@ -207,11 +321,8 @@ class BackupEngine(
                 stagingDir = stagingDir
             )
 
-            // 2. Snapshot active vault for rollback on error
-            val vaultDir = diaryRepo.vaultDir
-            if (vaultDir.exists()) {
-                vaultDir.copyRecursively(snapshotDir, overwrite = true)
-            }
+            // 2. Slim snapshot: only diaries, index.lki, and vault metadata (never duplicate media/ bytes)
+            snapshotVaultMetadata(diaryRepo.vaultDir, snapshotDir)
 
             // 3. Apply merge rule for diaries one-by-one from staged files
             for (stagedDiary in staged.diaries) {
@@ -258,6 +369,7 @@ class BackupEngine(
                 if (mediaRepo.exists(mId)) {
                     skippedMediaCount++
                 } else {
+                    newlyImportedMediaIds.add(mId)
                     val fileLen = stagedFile.length()
                     FileInputStream(stagedFile).use { fis ->
                         mediaRepo.importMedia(mId, fis, vaultDek, estimatedSizeBytes = fileLen)
@@ -266,6 +378,8 @@ class BackupEngine(
                 }
                 stagedFile.delete()
             }
+
+            onBeforeCommitHookForTest?.invoke(snapshotDir)
 
             // 5. Self-heal index
             diaryRepo.indexManager.rebuildFromDiariesVerified(diaryRepo.diariesDir, vaultDek)
@@ -278,15 +392,12 @@ class BackupEngine(
                 skippedMediaCount = skippedMediaCount
             )
         } catch (e: Exception) {
-            if (snapshotDir.exists() && snapshotDir.listFiles()?.isNotEmpty() == true) {
-                diaryRepo.vaultDir.deleteRecursively()
-                diaryRepo.vaultDir.mkdirs()
-                snapshotDir.copyRecursively(diaryRepo.vaultDir, overwrite = true)
-            }
+            rollbackVaultMetadata(diaryRepo.vaultDir, snapshotDir, mediaRepo, newlyImportedMediaIds)
             throw e
         } finally {
             if (snapshotDir.exists()) snapshotDir.deleteRecursively()
             if (stagingDir.exists()) stagingDir.deleteRecursively()
+            activeOps.decrementAndGet()
         }
     }
 
@@ -299,6 +410,7 @@ class BackupEngine(
         diaryIdToDelete: String
     ): BackupResult {
         if (!backupFile.exists()) throw CannotOpenFileException()
+        activeOps.incrementAndGet()
         val stagingDir = newStageDir("backup_edit_stage")
 
         try {
@@ -373,6 +485,7 @@ class BackupEngine(
             )
         } finally {
             if (stagingDir.exists()) stagingDir.deleteRecursively()
+            activeOps.decrementAndGet()
         }
     }
 
@@ -392,44 +505,49 @@ class BackupEngine(
         vaultDek: ByteArray,
         iterations: Int = defaultIterations
     ): File {
-        SecureContainerCodec.validatePassphrase(passphrase)
-        val decoded = diaryRepo.loadDiary(diaryId, vaultDek)
-        val record = decoded.record
+        activeOps.incrementAndGet()
+        try {
+            SecureContainerCodec.validatePassphrase(passphrase)
+            val decoded = diaryRepo.loadDiary(diaryId, vaultDek)
+            val record = decoded.record
 
-        val mediaIds = extractRecordMediaIds(record)
-        val validMediaMeta = mutableListOf<Pair<String, Long>>()
-        var estimatedBytes = 4096L
+            val mediaIds = extractRecordMediaIds(record)
+            val validMediaMeta = mutableListOf<Pair<String, Long>>()
+            var estimatedBytes = 4096L
 
-        for (mId in mediaIds) {
-            if (mediaRepo.exists(mId)) {
-                try {
-                    val (_, byteSize) = mediaRepo.openDecryptedStream(mId, vaultDek).use { stream ->
-                        computeStreamSha256AndSize(stream)
-                    }
-                    validMediaMeta.add(mId to byteSize)
-                    estimatedBytes += byteSize + 1024
-                } catch (_: Exception) {}
+            for (mId in mediaIds) {
+                if (mediaRepo.exists(mId)) {
+                    try {
+                        val (_, byteSize) = mediaRepo.openDecryptedStream(mId, vaultDek).use { stream ->
+                            computeStreamSha256AndSize(stream)
+                        }
+                        validMediaMeta.add(mId to byteSize)
+                        estimatedBytes += byteSize + 1024
+                    } catch (_: Exception) {}
+                }
             }
-        }
 
-        SafeStorageWriter.safeWriteStreaming(
-            targetFile = targetFile,
-            estimatedRequiredBytes = estimatedBytes,
-            verifier = { writtenFile ->
-                SecureContainerCodec.verifyShareContainerStreaming(writtenFile, passphrase)
+            SafeStorageWriter.safeWriteStreaming(
+                targetFile = targetFile,
+                estimatedRequiredBytes = estimatedBytes,
+                verifier = { writtenFile ->
+                    SecureContainerCodec.verifyShareContainerStreaming(writtenFile, passphrase)
+                }
+            ) { fos ->
+                SecureContainerCodec.encodeShareContainerStreaming(
+                    outputStream = fos,
+                    diary = record,
+                    mediaItems = validMediaMeta,
+                    mediaOpener = { id -> mediaRepo.openDecryptedStream(id, vaultDek) },
+                    passphrase = passphrase,
+                    iterations = iterations
+                )
             }
-        ) { fos ->
-            SecureContainerCodec.encodeShareContainerStreaming(
-                outputStream = fos,
-                diary = record,
-                mediaItems = validMediaMeta,
-                mediaOpener = { id -> mediaRepo.openDecryptedStream(id, vaultDek) },
-                passphrase = passphrase,
-                iterations = iterations
-            )
-        }
 
-        return targetFile
+            return targetFile
+        } finally {
+            activeOps.decrementAndGet()
+        }
     }
 
     /**
@@ -443,8 +561,10 @@ class BackupEngine(
         vaultDek: ByteArray
     ): RestoreResult {
         if (!shareFile.exists()) throw CannotOpenFileException()
+        activeOps.incrementAndGet()
         val stagingDir = newStageDir("share_stage")
         val snapshotDir = newStageDir("share_snapshot")
+        val newlyImportedMediaIds = mutableListOf<String>()
 
         var restoredDiaries = 0
         var conflictCopies = 0
@@ -458,10 +578,7 @@ class BackupEngine(
                 stagingDir = stagingDir
             )
 
-            val vaultDir = diaryRepo.vaultDir
-            if (vaultDir.exists()) {
-                vaultDir.copyRecursively(snapshotDir, overwrite = true)
-            }
+            snapshotVaultMetadata(diaryRepo.vaultDir, snapshotDir)
 
             val restoredRecord = staged.diary
             val existingFile = File(diaryRepo.diariesDir, "${restoredRecord.id}.lkd")
@@ -500,6 +617,7 @@ class BackupEngine(
                 if (mediaRepo.exists(mId)) {
                     skippedMediaCount++
                 } else {
+                    newlyImportedMediaIds.add(mId)
                     val fileLen = stagedFile.length()
                     FileInputStream(stagedFile).use { fis ->
                         mediaRepo.importMedia(mId, fis, vaultDek, estimatedSizeBytes = fileLen)
@@ -508,6 +626,8 @@ class BackupEngine(
                 }
                 stagedFile.delete()
             }
+
+            onBeforeCommitHookForTest?.invoke(snapshotDir)
 
             diaryRepo.indexManager.rebuildFromDiariesVerified(diaryRepo.diariesDir, vaultDek)
             snapshotDir.deleteRecursively()
@@ -519,15 +639,12 @@ class BackupEngine(
                 skippedMediaCount = skippedMediaCount
             )
         } catch (e: Exception) {
-            if (snapshotDir.exists() && snapshotDir.listFiles()?.isNotEmpty() == true) {
-                diaryRepo.vaultDir.deleteRecursively()
-                diaryRepo.vaultDir.mkdirs()
-                snapshotDir.copyRecursively(diaryRepo.vaultDir, overwrite = true)
-            }
+            rollbackVaultMetadata(diaryRepo.vaultDir, snapshotDir, mediaRepo, newlyImportedMediaIds)
             throw e
         } finally {
             if (snapshotDir.exists()) snapshotDir.deleteRecursively()
             if (stagingDir.exists()) stagingDir.deleteRecursively()
+            activeOps.decrementAndGet()
         }
     }
 }

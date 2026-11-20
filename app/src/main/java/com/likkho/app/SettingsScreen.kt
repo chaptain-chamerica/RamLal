@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Fingerprint
@@ -103,6 +104,7 @@ fun SettingsScreen(vm: AppViewModel) {
     var pinError by remember { mutableStateOf("") }
     var manualUpdate by remember { mutableStateOf<AppUpdateInfo?>(null) }
     var checkingUpdate by remember { mutableStateOf(false) }
+    var freeingSpace by remember { mutableStateOf(false) }
     var passwordCount by remember { mutableStateOf(hooks.loadPasswords(vm.vaultMode).size) }
 
     val activePin = if (vm.vaultMode == VaultMode.DECOY) vm.secondaryPasscode else vm.savedPasscode
@@ -221,6 +223,24 @@ fun SettingsScreen(vm: AppViewModel) {
                 // 7 legal
                 SettingsRow(Icons.Outlined.Description, title = "Legal, About & Data Notice", subtitle = "Privacy Policy, Terms, About, Licenses, Export & Clear Data",
                     trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = w.muted) }, onClick = { showLegal = true })
+                HairlineDivider()
+                // 7b free up space
+                SettingsRow(
+                    icon = Icons.Outlined.DeleteSweep,
+                    title = "Free up space",
+                    subtitle = if (freeingSpace) "Cleaning unused media, exports & temp..." else "Clean orphan media, old backups, exports & temp files",
+                    trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = w.muted) },
+                    enabled = !freeingSpace,
+                    onClick = {
+                        freeingSpace = true
+                        scope.launch {
+                            val freedBytes = runCatching { hooks.freeUpSpace() }.getOrDefault(0L)
+                            val freedMb = freedBytes.toDouble() / (1024.0 * 1024.0)
+                            freeingSpace = false
+                            showToast("Freed ${String.format(java.util.Locale.US, "%.2f", freedMb)} MB")
+                        }
+                    },
+                )
                 HairlineDivider()
                 // 8 update
                 SettingsRow(

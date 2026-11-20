@@ -4,6 +4,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.core.content.FileProvider
 import com.likkho.app.storage.CryptoUtils
 import com.likkho.app.storage.VaultId
 import com.likkho.app.storage.VaultManager
@@ -47,13 +48,16 @@ class RealFeatureHooks(
     val vaultManager: VaultManager,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val scope: CoroutineScope = CoroutineScope(dispatcher + SupervisorJob()),
-    val baseStorageDir: File = context?.filesDir ?: File(vaultManager.baseDir, "app_files")
+    val baseStorageDir: File = context?.filesDir ?: File(vaultManager.baseDir, "app_files"),
+    val cacheStorageDir: File = context?.cacheDir ?: File(vaultManager.baseDir, "app_cache")
 ) : FeatureHooks {
 
     private val writeMutex = Mutex()
     private val backupDir = File(baseStorageDir, "backups").apply { mkdirs() }
-    private val shareDir = File(baseStorageDir, "shares").apply { mkdirs() }
-    private val exportDir = File(baseStorageDir, "exports").apply { mkdirs() }
+    val shareCacheDir = File(cacheStorageDir, "shares")
+    val exportCacheDir = File(cacheStorageDir, "exports")
+    private val legacyShareDir = File(baseStorageDir, "shares")
+    private val legacyExportDir = File(baseStorageDir, "exports")
 
     @Volatile
     private var lastUsedPassphrase: String? = null
@@ -83,6 +87,115 @@ class RealFeatureHooks(
     //  Home: 3-dot Menu (Share & Export)
     // =========================================================================
 
+    private fun clearDirectoryContents(dir: File): Long {
+        if (!dir.exists()) return 0L
+        var freed = 0L
+        val children = dir.listFiles() ?: return 0L
+        for (child in children) {
+            freed += com.likkho.app.storage.StorageMetrics.directorySizeBytes(child)
+            child.deleteRecursively()
+        }
+        return freed
+    }
+
+    fun cleanupExportAndShareCaches(): Long {
+        var freed = 0L
+        freed += clearDirectoryContents(exportCacheDir)
+        freed += clearDirectoryContents(shareCacheDir)
+        freed += clearDirectoryContents(legacyExportDir)
+        freed += clearDirectoryContents(legacyShareDir)
+        if (legacyExportDir.exists() && (legacyExportDir.listFiles()?.isEmpty() == true)) {
+            legacyExportDir.delete()
+        }
+        if (legacyShareDir.exists() && (legacyShareDir.listFiles()?.isEmpty() == true)) {
+            legacyShareDir.delete()
+        }
+        return freed
+    }
+
+    @Volatile
+    private var startupOrphanCleanupDone = false
+
+    private fun measureManagedStorageBytes(): Long {
+        val basePath = runCatching { baseStorageDir.canonicalPath }.getOrDefault(baseStorageDir.absolutePath)
+        val vaultPath = runCatching { vaultManager.baseDir.canonicalPath }.getOrDefault(vaultManager.baseDir.absolutePath)
+        val exportPath = runCatching { exportCacheDir.canonicalPath }.getOrDefault(exportCacheDir.absolutePath)
+        val sharePath = runCatching { shareCacheDir.canonicalPath }.getOrDefault(shareCacheDir.absolutePath)
+
+        var total = com.likkho.app.storage.StorageMetrics.directorySizeBytes(baseStorageDir)
+        if (!vaultPath.startsWith(basePath)) {
+            total += com.likkho.app.storage.StorageMetrics.directorySizeBytes(vaultManager.baseDir)
+        }
+        if (!exportPath.startsWith(basePath) && !exportPath.startsWith(vaultPath)) {
+            total += com.likkho.app.storage.StorageMetrics.directorySizeBytes(exportCacheDir)
+        }
+        if (!sharePath.startsWith(basePath) && !sharePath.startsWith(vaultPath)) {
+            total += com.likkho.app.storage.StorageMetrics.directorySizeBytes(shareCacheDir)
+        }
+        return total
+    }
+
+    override suspend fun runStartupStorageCleanup(): Long = withContext(dispatcher) {
+        var freed = cleanupExportAndShareCaches()
+        freed += vaultManager.cleanupStaleTempDirs()
+        if (!startupOrphanCleanupDone && vaultManager.isUnlocked) {
+            startupOrphanCleanupDone = true
+            runCatching {
+                vaultManager.withActiveDek { dek ->
+                    val repo = vaultManager.activeDiaryRepository()
+                    val mediaRepo = vaultManager.activeMediaRepository()
+                    val countBefore = measureManagedStorageBytes()
+                    repo.cleanupOrphanMedia(dek, mediaRepo)
+                    val countAfter = measureManagedStorageBytes()
+                    freed += (countBefore - countAfter).coerceAtLeast(0L)
+                }
+            }
+        }
+        freed
+    }
+
+    override suspend fun freeUpSpace(): Long = withContext(dispatcher) {
+        writeMutex.withLock {
+            val beforeBytes = measureManagedStorageBytes()
+            cleanupExportAndShareCaches()
+            vaultManager.cleanupStaleTempDirs()
+            vaultManager.backupEngine.pruneOldBackups(backupDir, keepCount = 1)
+            if (vaultManager.isUnlocked) {
+                vaultManager.withActiveDek { dek ->
+                    val diaryRepo = vaultManager.activeDiaryRepository()
+                    val mediaRepo = vaultManager.activeMediaRepository()
+                    diaryRepo.cleanupOrphanMedia(dek, mediaRepo, olderThanMs = 0L)
+                }
+            }
+            val afterBytes = measureManagedStorageBytes()
+            (beforeBytes - afterBytes).coerceAtLeast(0L)
+        }
+    }
+
+    private fun shareViaFileProvider(file: File, mimeType: String, chooserTitle: String) {
+        val ctx = context ?: return
+        runCatching {
+            val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(sendIntent, chooserTitle).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ctx.startActivity(chooser)
+        }
+    }
+
+    private fun mimeTypeForExportFormat(format: ExportFormat): String = when (format.ext.lowercase()) {
+        "txt" -> "text/plain"
+        "md" -> "text/markdown"
+        "html", "htm" -> "text/html"
+        "json" -> "application/json"
+        else -> "application/octet-stream"
+    }
+
     override suspend fun shareDiaryAsArchive(log: DiaryLog, passphrase: String): String =
         withContext(dispatcher) {
             if (!vaultManager.isUnlocked) {
@@ -91,6 +204,9 @@ class RealFeatureHooks(
             if (passphrase.length < 8) {
                 throw IllegalArgumentException("Passphrase must be at least 8 characters.")
             }
+            clearDirectoryContents(shareCacheDir)
+            clearDirectoryContents(legacyShareDir)
+            shareCacheDir.mkdirs()
             vaultManager.withActiveDek { dek ->
                 val diaryRepo = vaultManager.activeDiaryRepository()
                 val mediaRepo = vaultManager.activeMediaRepository()
@@ -99,7 +215,7 @@ class RealFeatureHooks(
                 } else {
                     diaryRepo.loadDiary(log.id, dek).record
                 }
-                val targetFile = File(shareDir, "${record.id}.likkho")
+                val targetFile = File(shareCacheDir, "${record.id}.likkho")
                 vaultManager.backupEngine.createShareDiaryFile(
                     targetFile = targetFile,
                     diaryId = record.id,
@@ -108,12 +224,16 @@ class RealFeatureHooks(
                     mediaRepo = mediaRepo,
                     vaultDek = dek
                 )
+                shareViaFileProvider(targetFile, "application/octet-stream", "Share \"${log.heading.ifBlank { "Diary" }}\"")
                 "Shared \"${log.heading.ifBlank { "Diary" }}\" as encrypted .likkho archive."
             }
         }
 
     override suspend fun exportDiary(log: DiaryLog, format: ExportFormat): String =
         withContext(dispatcher) {
+            clearDirectoryContents(exportCacheDir)
+            clearDirectoryContents(legacyExportDir)
+            exportCacheDir.mkdirs()
             val fullLog = if (!log.isContentLoaded && vaultManager.isUnlocked) {
                 runCatching {
                     vaultManager.withActiveDek { dek ->
@@ -124,7 +244,7 @@ class RealFeatureHooks(
                 log
             }
             val safeName = fullLog.heading.filter { it.isLetterOrDigit() || it == ' ' }.trim().replace(' ', '_').ifBlank { "diary_${fullLog.id}" }
-            val file = File(exportDir, "$safeName.${format.ext}")
+            val file = File(exportCacheDir, "$safeName.${format.ext}")
             val textContent = buildString {
                 appendLine(fullLog.heading)
                 appendLine("Created: ${fullLog.dateStamp} ${fullLog.timeStamp}")
@@ -133,7 +253,8 @@ class RealFeatureHooks(
                 appendLine(if (fullLog.contentHtml.isNotBlank()) fullLog.contentHtml else fullLog.plainPreview)
             }
             file.writeText(textContent, Charsets.UTF_8)
-            "Exported \"${fullLog.heading.ifBlank { "Diary" }}\" as ${format.label} to Downloads/Likkho."
+            shareViaFileProvider(file, mimeTypeForExportFormat(format), "Export \"${fullLog.heading.ifBlank { "Diary" }}\"")
+            "Exported \"${fullLog.heading.ifBlank { "Diary" }}\" as ${format.label}."
         }
 
     // =========================================================================
@@ -164,7 +285,10 @@ class RealFeatureHooks(
         if (!vaultManager.isUnlocked) {
             return@withContext "Vault is locked."
         }
-        val zipFile = File(exportDir, "Likkho_Export_${System.currentTimeMillis()}.zip")
+        clearDirectoryContents(exportCacheDir)
+        clearDirectoryContents(legacyExportDir)
+        exportCacheDir.mkdirs()
+        val zipFile = File(exportCacheDir, "Likkho_Export_${System.currentTimeMillis()}.zip")
         vaultManager.withActiveDek { dek ->
             val diaryRepo = vaultManager.activeDiaryRepository()
             val indexEntries = diaryRepo.listDiaries(dek)
@@ -179,15 +303,15 @@ class RealFeatureHooks(
                 }
             }
         }
-        "All data exported to Downloads/Likkho (ZIP)."
+        shareViaFileProvider(zipFile, "application/zip", "Export All Diaries (ZIP)")
+        "All data exported (ZIP)."
     }
 
     override suspend fun clearAllData() {
         withContext(dispatcher) {
             vaultManager.clearAllData()
             backupDir.deleteRecursively(); backupDir.mkdirs()
-            shareDir.deleteRecursively(); shareDir.mkdirs()
-            exportDir.deleteRecursively(); exportDir.mkdirs()
+            cleanupExportAndShareCaches()
         }
     }
 
@@ -251,7 +375,10 @@ class RealFeatureHooks(
         vaultManager.withActiveDek { dek ->
             val diaryRepo = vaultManager.activeDiaryRepository()
             val mediaRepo = vaultManager.activeMediaRepository()
-            val targetFile = File(backupDir, "backup_${System.currentTimeMillis()}.lkb")
+            var targetFile = File(backupDir, "backup_${System.currentTimeMillis()}.lkb")
+            if (targetFile.exists()) {
+                targetFile = File(backupDir, "backup_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(4)}.lkb")
+            }
             val res = vaultManager.backupEngine.createBackup(
                 targetFile = targetFile,
                 passphrase = passphrase.toCharArray(),
@@ -259,7 +386,49 @@ class RealFeatureHooks(
                 mediaRepo = mediaRepo,
                 vaultDek = dek
             )
+            // Delete older backups ONLY AFTER the newly written backup passed full verification.
+            vaultManager.backupEngine.pruneOldBackups(backupDir, keepCount = 1, protectedFile = targetFile)
             BackupResult(failedMediaCount = res.failedMediaCount)
+        }
+    }
+
+    override suspend fun performBackupToStream(
+        passphrase: String,
+        openOutput: () -> java.io.OutputStream
+    ): BackupResult = withContext(dispatcher) {
+        if (!vaultManager.isUnlocked) return@withContext BackupResult(0)
+        lastUsedPassphrase = passphrase
+        val stageFile = File(
+            vaultManager.backupEngine.tempDir,
+            "saf_backup_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(4)}.lkb"
+        )
+        try {
+            val res = vaultManager.withActiveDek { dek ->
+                val diaryRepo = vaultManager.activeDiaryRepository()
+                val mediaRepo = vaultManager.activeMediaRepository()
+                vaultManager.backupEngine.createBackup(
+                    targetFile = stageFile,
+                    passphrase = passphrase.toCharArray(),
+                    diaryRepo = diaryRepo,
+                    mediaRepo = mediaRepo,
+                    vaultDek = dek
+                )
+            }
+            openOutput().use { os ->
+                java.io.FileInputStream(stageFile).use { fis ->
+                    val buffer = ByteArray(64 * 1024)
+                    var read: Int
+                    while (fis.read(buffer).also { read = it } != -1) {
+                        os.write(buffer, 0, read)
+                    }
+                    os.flush()
+                }
+            }
+            BackupResult(failedMediaCount = res.failedMediaCount)
+        } finally {
+            stageFile.delete()
+            File(stageFile.parentFile, "${stageFile.name}.tmp").delete()
+            File(stageFile.parentFile, "${stageFile.name}.bak").delete()
         }
     }
 
@@ -399,7 +568,10 @@ class RealFeatureHooks(
                         if (cleanupSnapshot.isNotEmpty()) {
                             val scan = repo.scanReferencedMediaIds(dek)
                             if (!scan.hasUndecodableOrQuarantined) {
-                                mediaRepo.deleteUnreferencedMediaForDiary(cleanupSnapshot, scan.referencedIds)
+                                val delRes = mediaRepo.deleteUnreferencedMediaForDiaryChecked(cleanupSnapshot, scan.referencedIds)
+                                if (delRes.failedIds.isNotEmpty()) {
+                                    throw java.io.IOException("Failed to delete unused media: ${delRes.failedIds.joinToString()}")
+                                }
                             }
                         }
                     }
@@ -460,7 +632,10 @@ class RealFeatureHooks(
                         val mediaRepo = vaultManager.getMediaRepository(boundVaultId)
                         val scan = repo.scanReferencedMediaIds(dek)
                         if (!scan.hasUndecodableOrQuarantined) {
-                            mediaRepo.deleteUnreferencedMediaForDiary(snapshot, scan.referencedIds)
+                            val delRes = mediaRepo.deleteUnreferencedMediaForDiaryChecked(snapshot, scan.referencedIds)
+                            if (delRes.failedIds.isNotEmpty()) {
+                                throw java.io.IOException("Failed to delete unused media: ${delRes.failedIds.joinToString()}")
+                            }
                         }
                     }
                 }

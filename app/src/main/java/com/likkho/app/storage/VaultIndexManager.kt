@@ -208,7 +208,9 @@ class VaultIndexManager internal constructor(
                                 (if (r.images.isNotEmpty()) 4 else 0) or
                                 (if (r.videos.isNotEmpty()) 8 else 0),
                         plainPreview = r.plainPreview,
-                        heading = r.heading
+                        heading = r.heading,
+                        mediaIds = DiaryRepository.extractRecordMediaIds(r).sorted(),
+                        hasTrackedMediaIds = true
                     )
                 )
             } catch (_: Exception) {

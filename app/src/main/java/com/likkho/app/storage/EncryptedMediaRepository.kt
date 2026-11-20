@@ -1,8 +1,12 @@
 package com.likkho.app.storage
 
 import android.media.MediaDataSource
+import android.util.Log
 import com.google.crypto.tink.StreamingAead
 import com.google.crypto.tink.subtle.AesGcmHkdfStreaming
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
@@ -22,18 +26,28 @@ import java.nio.ByteBuffer
  * - Atomic import: temp write -> verify read-back -> atomic rename.
  * - Orphan cleanup: removes unreferenced media older than 24 hours (prevents race conditions with new imports).
  */
-class EncryptedMediaRepository(
+data class MediaDeleteResult(
+    val deletedCount: Int,
+    val failedIds: List<String> = emptyList()
+)
+
+class EncryptedMediaRepository @JvmOverloads constructor(
     val vaultId: VaultId,
     val vaultDir: File,
-    val clockProvider: ClockProvider = DefaultClockProvider
+    val clockProvider: ClockProvider = DefaultClockProvider,
+    private val fileDeleter: (File) -> Boolean = { it.delete() }
 ) {
     val mediaDir = File(vaultDir, "media")
+    val orphanCandidatesFile = File(vaultDir, "orphan_candidates.json")
 
     companion object {
         const val MEDIA_EXTENSION = "lkm"
         const val CIPHERTEXT_SEGMENT_SIZE_BYTES = 64 * 1024 // 64 KB segments
         const val DERIVED_KEY_SIZE_BYTES = 32 // AES-256
         const val ORPHAN_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000L // 24 hours
+        private const val TAG = "EncryptedMediaRepo"
+        private val json = Json { ignoreUnknownKeys = true }
+        private val candidatesSerializer = MapSerializer(String.serializer(), Long.serializer())
 
         fun buildAad(mediaId: String, vaultId: VaultId): ByteArray {
             return "LKM1_${vaultId.dirName}_$mediaId".toByteArray(Charsets.UTF_8)
@@ -282,19 +296,109 @@ class EncryptedMediaRepository(
 
     /**
      * Deletes media file and any associated temporary files.
+     * Logs a warning and retries once if file deletion fails.
      */
     @Synchronized
     fun deleteMedia(mediaId: String): Boolean {
         val file = getMediaFile(mediaId)
         val tmpFile = File(mediaDir, "$mediaId.$MEDIA_EXTENSION.tmp")
         if (tmpFile.exists()) tmpFile.delete()
-        return if (file.exists()) file.delete() else true
+        if (!file.exists()) {
+            removeOrphanCandidates(setOf(mediaId))
+            return true
+        }
+        if (fileDeleter(file)) {
+            removeOrphanCandidates(setOf(mediaId))
+            return true
+        }
+        runCatching { Log.w(TAG, "Failed to delete media $mediaId; retrying once.") }
+        val retryOk = fileDeleter(file)
+        if (!retryOk) {
+            runCatching { Log.e(TAG, "Retry failed deleting media $mediaId at ${file.absolutePath}") }
+        } else {
+            removeOrphanCandidates(setOf(mediaId))
+        }
+        return retryOk
     }
 
     /**
      * Checks if a media file exists on disk.
      */
     fun exists(mediaId: String): Boolean = getMediaFile(mediaId).exists()
+
+    @Synchronized
+    fun listMediaIdsOnDisk(): Set<String> {
+        if (!mediaDir.exists()) return emptySet()
+        return (mediaDir.listFiles { f -> f.isFile && f.name.endsWith(".$MEDIA_EXTENSION") } ?: emptyArray())
+            .map { it.name.removeSuffix(".$MEDIA_EXTENSION") }
+            .toSet()
+    }
+
+    @Synchronized
+    fun loadOrphanCandidates(): Map<String, Long> {
+        if (!orphanCandidatesFile.exists()) return emptyMap()
+        return runCatching {
+            json.decodeFromString(candidatesSerializer, orphanCandidatesFile.readText(Charsets.UTF_8))
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun saveOrphanCandidates(map: Map<String, Long>) {
+        if (map.isEmpty()) {
+            if (orphanCandidatesFile.exists()) orphanCandidatesFile.delete()
+            return
+        }
+        vaultDir.mkdirs()
+        orphanCandidatesFile.writeText(json.encodeToString(candidatesSerializer, map), Charsets.UTF_8)
+    }
+
+    @Synchronized
+    fun markOrphanCandidates(mediaIds: Set<String>) {
+        if (mediaIds.isEmpty()) return
+        val now = clockProvider.wallClockMs()
+        val updated = loadOrphanCandidates().toMutableMap()
+        var changed = false
+        for (id in mediaIds) {
+            if (!updated.containsKey(id) && exists(id)) {
+                updated[id] = now
+                changed = true
+            }
+        }
+        if (changed) saveOrphanCandidates(updated)
+    }
+
+    @Synchronized
+    fun removeOrphanCandidates(mediaIds: Set<String>) {
+        if (mediaIds.isEmpty() || !orphanCandidatesFile.exists()) return
+        val updated = loadOrphanCandidates().toMutableMap()
+        var changed = false
+        for (id in mediaIds) {
+            if (updated.remove(id) != null) changed = true
+        }
+        if (changed) saveOrphanCandidates(updated)
+    }
+
+    /**
+     * Deletes media files that are referenced only by the specified diary and not referenced
+     * by any other diary in the vault, returning deleted count and any failed media IDs.
+     */
+    @Synchronized
+    fun deleteUnreferencedMediaForDiaryChecked(
+        deletedDiaryMediaIds: Set<String>,
+        remainingReferencedMediaIds: Set<String>
+    ): MediaDeleteResult {
+        var deletedCount = 0
+        val failedIds = mutableListOf<String>()
+        for (mediaId in deletedDiaryMediaIds) {
+            if (!remainingReferencedMediaIds.contains(mediaId)) {
+                if (deleteMedia(mediaId)) {
+                    deletedCount++
+                } else {
+                    failedIds.add(mediaId)
+                }
+            }
+        }
+        return MediaDeleteResult(deletedCount = deletedCount, failedIds = failedIds)
+    }
 
     /**
      * Deletes media files that are referenced only by the specified diary and not referenced
@@ -305,22 +409,15 @@ class EncryptedMediaRepository(
         deletedDiaryMediaIds: Set<String>,
         remainingReferencedMediaIds: Set<String>
     ): Int {
-        var deletedCount = 0
-        for (mediaId in deletedDiaryMediaIds) {
-            if (!remainingReferencedMediaIds.contains(mediaId)) {
-                if (deleteMedia(mediaId)) {
-                    deletedCount++
-                }
-            }
-        }
-        return deletedCount
+        return deleteUnreferencedMediaForDiaryChecked(deletedDiaryMediaIds, remainingReferencedMediaIds).deletedCount
     }
 
     /**
      * Cleans up orphaned media per STORAGE_SPEC Section 6:
-     * - Media files not referenced in any diary AND older than 24 hours are removed.
+     * - Media files not referenced in any diary (including recovered undecodable diary refs) AND older than [olderThanMs] are removed.
      * - Newly imported media (< 24 hours old) are kept to prevent race conditions during import.
-     * - If undecodable or quarantined diaries exist, media deletion is skipped to preserve their attachments.
+     * - If an undecodable/quarantined diary exists whose media IDs could NOT be recovered from index/.bak/quarantine,
+     *   unknown media files are preserved; explicit orphan_candidates (from deleted unreadable diaries) can still be cleaned.
      */
     @Synchronized
     fun cleanupOrphans(
@@ -336,26 +433,51 @@ class EncryptedMediaRepository(
             tmp.delete()
         }
 
-        if (hasUndecodableOrQuarantined) {
+        val candidates = loadOrphanCandidates()
+        if (hasUndecodableOrQuarantined && candidates.isEmpty()) {
             return 0
         }
 
         val files = mediaDir.listFiles { f -> f.name.endsWith(".$MEDIA_EXTENSION") } ?: emptyArray()
         val now = clockProvider.wallClockMs()
         var deletedCount = 0
+        val remainingCandidates = candidates.toMutableMap()
+        var candidatesChanged = false
+
+        // Prune candidates that became referenced or no longer exist on disk
+        val diskIds = files.map { it.name.removeSuffix(".$MEDIA_EXTENSION") }.toSet()
+        for (candId in candidates.keys) {
+            if (referencedMediaIds.contains(candId) || !diskIds.contains(candId)) {
+                remainingCandidates.remove(candId)
+                candidatesChanged = true
+            }
+        }
 
         for (file in files) {
             val mediaId = file.name.removeSuffix(".$MEDIA_EXTENSION")
-            if (!referencedMediaIds.contains(mediaId)) {
-                val age = now - file.lastModified()
-                if (age > olderThanMs) {
-                    if (file.delete()) {
-                        deletedCount++
+            if (referencedMediaIds.contains(mediaId)) continue
+
+            val candidateTs = remainingCandidates[mediaId]
+            if (hasUndecodableOrQuarantined && candidateTs == null) {
+                continue
+            }
+
+            val refTimestamp = if (candidateTs != null) minOf(file.lastModified(), candidateTs) else file.lastModified()
+            val age = now - refTimestamp
+            val eligibleByAge = olderThanMs <= 0L || age > olderThanMs
+            if (eligibleByAge) {
+                if (deleteMedia(mediaId)) {
+                    deletedCount++
+                    if (remainingCandidates.remove(mediaId) != null) {
+                        candidatesChanged = true
                     }
                 }
             }
         }
 
+        if (candidatesChanged) {
+            saveOrphanCandidates(remainingCandidates)
+        }
         return deletedCount
     }
 }

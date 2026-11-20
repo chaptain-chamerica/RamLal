@@ -60,6 +60,16 @@ class DiaryRepository(
 
     companion object {
         const val MAX_IO_RETRIES = 3
+
+        fun extractRecordMediaIds(record: DiaryRecord): Set<String> {
+            val ids = mutableSetOf<String>()
+            record.pfp?.sourceMediaId?.let { ids.add(it) }
+            record.background?.mediaId?.let { ids.add(it) }
+            record.images.forEach { ids.add(it.mediaId) }
+            record.audios.forEach { ids.add(it.mediaId) }
+            record.videos.forEach { ids.add(it.mediaId) }
+            return ids
+        }
     }
 
     fun ensureDirs() {
@@ -379,7 +389,9 @@ class DiaryRepository(
                     (if (record.images.isNotEmpty()) 4 else 0) or
                     (if (record.videos.isNotEmpty()) 8 else 0),
             plainPreview = record.plainPreview,
-            heading = record.heading
+            heading = record.heading,
+            mediaIds = extractRecordMediaIds(record).sorted(),
+            hasTrackedMediaIds = true
         )
         indexManager.upsertEntry(entry, dek, diariesDir)
     }
@@ -409,23 +421,54 @@ class DiaryRepository(
         }
     }
 
-    private fun extractRecordMediaIds(record: DiaryRecord): Set<String> {
-        val ids = mutableSetOf<String>()
-        record.pfp?.sourceMediaId?.let { ids.add(it) }
-        record.background?.mediaId?.let { ids.add(it) }
-        record.images.forEach { ids.add(it.mediaId) }
-        record.audios.forEach { ids.add(it.mediaId) }
-        record.videos.forEach { ids.add(it.mediaId) }
-        return ids
+    private fun extractRecordMediaIds(record: DiaryRecord): Set<String> =
+        Companion.extractRecordMediaIds(record)
+
+    private fun tryRecoverMediaIdsForDiary(
+        diaryId: String,
+        dek: ByteArray,
+        loadedIndex: VaultIndexRecord?
+    ): Set<String>? {
+        val mainFile = File(diariesDir, "$diaryId.lkd")
+        if (mainFile.exists()) {
+            try {
+                val decoded = DiaryFileCodec.decode(readBytesWithRetry(mainFile), dek, diaryId)
+                return extractRecordMediaIds(decoded.record)
+            } catch (_: Exception) {}
+        }
+        val bakFile = File(diariesDir, "$diaryId.lkd.bak")
+        if (bakFile.exists()) {
+            try {
+                val decoded = DiaryFileCodec.decode(readBytesWithRetry(bakFile), dek, diaryId)
+                return extractRecordMediaIds(decoded.record)
+            } catch (_: Exception) {}
+        }
+        val qFiles = quarantineDir.listFiles { f ->
+            f.isFile && f.name.startsWith("${diaryId}_") && f.name.endsWith(".lkd")
+        } ?: emptyArray()
+        for (qf in qFiles) {
+            try {
+                val decoded = DiaryFileCodec.decode(readBytesWithRetry(qf), dek, diaryId)
+                return extractRecordMediaIds(decoded.record)
+            } catch (_: Exception) {}
+        }
+        val idxEntry = loadedIndex?.entries?.find { it.id == diaryId }
+        if (idxEntry != null && idxEntry.hasTrackedMediaIds) {
+            return idxEntry.mediaIds.toSet()
+        }
+        return null
     }
 
     /**
-     * Scans all referenced media IDs across diaries and reports whether any undecodable or
-     * quarantined diary exists (in which case its media cannot be safely enumerated and must be preserved).
+     * Scans all referenced media IDs across readable diaries AND recoverable undecodable/quarantined diaries
+     * (via .bak / decodable quarantine / tracked index.lki entries).
+     * Sets [MediaReferenceScan.hasUndecodableOrQuarantined] ONLY if an undecodable/quarantined diary exists
+     * whose media IDs could not be recovered from any source.
      */
     fun scanReferencedMediaIds(dek: ByteArray, excludeDiaryId: String? = null): MediaReferenceScan {
         val mediaIds = mutableSetOf<String>()
-        var hasUndecodable = false
+        var hasUnknownUndecodable = false
+        val loadedIndex = (indexManager.readIndexStatus(dek) as? IndexReadResult.Loaded)?.index
 
         val lkdFiles = diariesDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray()
         for (f in lkdFiles) {
@@ -435,7 +478,12 @@ class DiaryRepository(
                 val decoded = DiaryFileCodec.decode(readBytesWithRetry(f), dek, diaryId)
                 mediaIds.addAll(extractRecordMediaIds(decoded.record))
             } catch (_: Exception) {
-                hasUndecodable = true
+                val recovered = tryRecoverMediaIdsForDiary(diaryId, dek, loadedIndex)
+                if (recovered != null) {
+                    mediaIds.addAll(recovered)
+                } else {
+                    hasUnknownUndecodable = true
+                }
             }
         }
 
@@ -447,13 +495,18 @@ class DiaryRepository(
                 val decoded = DiaryFileCodec.decode(readBytesWithRetry(qf), dek, baseId)
                 mediaIds.addAll(extractRecordMediaIds(decoded.record))
             } catch (_: Exception) {
-                hasUndecodable = true
+                val recovered = tryRecoverMediaIdsForDiary(baseId, dek, loadedIndex)
+                if (recovered != null) {
+                    mediaIds.addAll(recovered)
+                } else {
+                    hasUnknownUndecodable = true
+                }
             }
         }
 
         return MediaReferenceScan(
             referencedIds = mediaIds,
-            hasUndecodableOrQuarantined = hasUndecodable
+            hasUndecodableOrQuarantined = hasUnknownUndecodable
         )
     }
 
@@ -466,7 +519,7 @@ class DiaryRepository(
     }
 
     /**
-     * Runs orphan media cleanup while protecting any media when undecodable/quarantined diaries exist.
+     * Runs orphan media cleanup while protecting any media that belongs (or could belong) to undecodable/quarantined diaries.
      */
     @Synchronized
     fun cleanupOrphanMedia(
@@ -484,9 +537,10 @@ class DiaryRepository(
 
     /**
      * Deletes a diary in strict order:
-     * 1. Remove diary files (.lkd / .bak / .tmp)
+     * 1. Remove diary files (.lkd / .bak / .tmp / quarantine copies)
      * 2. Update encrypted index
-     * 3. Delete unreferenced media (only if no undecodable/quarantined diaries could reference them)
+     * 3. Delete unreferenced media (propagating failures after retry; if diary was unreadable with unknown IDs,
+     *    marks unreferenced media on disk as orphan candidates)
      */
     @Synchronized
     fun deleteDiary(
@@ -498,34 +552,45 @@ class DiaryRepository(
         val file = File(diariesDir, "$id.lkd")
         val bakFile = File(diariesDir, "$id.lkd.bak")
         val tmpFile = File(diariesDir, "$id.lkd.tmp")
+        val qFiles = quarantineDir.listFiles { f ->
+            f.isFile && f.name.startsWith("${id}_") && f.name.endsWith(".lkd")
+        } ?: emptyArray()
 
-        val diaryMediaIds = mutableSetOf<String>()
-        if (mediaRepo != null && file.exists()) {
-            try {
-                val decoded = DiaryFileCodec.decode(readBytesWithRetry(file), dek, id)
-                diaryMediaIds.addAll(extractRecordMediaIds(decoded.record))
-            } catch (_: Exception) {
-                // Proceed with file deletion even if record decode fails
-            }
-        }
+        val loadedIndex = (indexManager.readIndexStatus(dek) as? IndexReadResult.Loaded)?.index
+        val existedOnDisk = file.exists() || bakFile.exists() || qFiles.isNotEmpty()
+        val recoveredMediaIds = if (mediaRepo != null && existedOnDisk) {
+            tryRecoverMediaIdsForDiary(id, dek, loadedIndex)
+        } else null
+        val hadUnreadableUnknownIds = mediaRepo != null && existedOnDisk && recoveredMediaIds == null
 
-        // Step 1: Delete diary files
+        // Step 1: Delete diary files (+ any quarantine copies for this diary)
         if (file.exists() && !file.delete()) {
             throw IOException("Failed to delete diary file: ${file.name}")
         }
         if (bakFile.exists()) bakFile.delete()
         if (tmpFile.exists()) tmpFile.delete()
+        for (qf in qFiles) qf.delete()
         onDeleteStep?.invoke("diary_file_deleted")
 
         // Step 2: Update encrypted index
         indexManager.removeEntry(id, dek, diariesDir)
         onDeleteStep?.invoke("index_updated")
 
-        // Step 3: Delete unreferenced media
-        if (mediaRepo != null && diaryMediaIds.isNotEmpty()) {
+        // Step 3: Delete unreferenced media or mark orphan candidates
+        if (mediaRepo != null) {
             val remainingScan = scanReferencedMediaIds(dek, excludeDiaryId = id)
-            if (!remainingScan.hasUndecodableOrQuarantined) {
-                mediaRepo.deleteUnreferencedMediaForDiary(diaryMediaIds, remainingScan.referencedIds)
+            if (recoveredMediaIds != null && recoveredMediaIds.isNotEmpty() && !remainingScan.hasUndecodableOrQuarantined) {
+                val res = mediaRepo.deleteUnreferencedMediaForDiaryChecked(
+                    recoveredMediaIds,
+                    remainingScan.referencedIds
+                )
+                if (res.failedIds.isNotEmpty()) {
+                    throw IOException("Failed to delete media file(s): ${res.failedIds.joinToString()}")
+                }
+            } else if (hadUnreadableUnknownIds) {
+                val diskIds = mediaRepo.listMediaIdsOnDisk()
+                val candidates = diskIds - remainingScan.referencedIds
+                mediaRepo.markOrphanCandidates(candidates)
             }
         }
         onDeleteStep?.invoke("media_deleted")

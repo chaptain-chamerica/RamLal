@@ -99,6 +99,8 @@ class AppViewModel @JvmOverloads constructor(
     init {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                hooks.runStartupStorageCleanup()
+
                 // Initialize primary vault envelope on first launch
                 if (!vaultManager.envelopeV1.exists()) {
                     vaultManager.ensurePrimaryVaultInitialized()

@@ -408,4 +408,78 @@ class BackupEngineTest {
             workRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun restoreBackup_snapshotSkipsMediaDir_andRollsBackOnFailure() {
+        val backupMediaId = "m_backup_new"
+        mediaRepo.importMediaBytes(backupMediaId, ByteArray(128 * 1024) { (it + 1).toByte() }, vaultDek)
+        val backupDiary = DiaryRecord(
+            id = "d_from_backup",
+            heading = "From Backup",
+            images = listOf(CanvasImageRecord(mediaId = backupMediaId))
+        )
+        diaryRepo.saveDiary(backupDiary, vaultDek)
+
+        val backupFile = File(baseDir, "slim_snapshot.lkb")
+        backupEngine.createBackup(backupFile, testPassphrase, diaryRepo, mediaRepo, vaultDek, fastIterations)
+
+        // Reset vault so it only has an existing large local media + local diary
+        diaryRepo.deleteDiary("d_from_backup", vaultDek)
+        mediaRepo.deleteMedia(backupMediaId)
+
+        val existingMediaId = "m_local_large"
+        val existingMediaPayload = ByteArray(1024 * 1024) { (it * 3).toByte() }
+        mediaRepo.importMediaBytes(existingMediaId, existingMediaPayload, vaultDek)
+        diaryRepo.saveDiary(
+            DiaryRecord(
+                id = "d_local",
+                heading = "Local Entry",
+                images = listOf(CanvasImageRecord(mediaId = existingMediaId))
+            ),
+            vaultDek
+        )
+
+        var sawMediaInSnapshot = true
+        var cleanupDuringOpFreed = -1L
+        try {
+            backupEngine.onBeforeCommitHookForTest = { snapshotDir ->
+                sawMediaInSnapshot = File(snapshotDir, "media").exists()
+                // Guard check: cleanupStaleTempDirs must be a no-op while restore is active
+                cleanupDuringOpFreed = backupEngine.cleanupStaleTempDirs()
+                throw java.io.IOException("Simulated failure before commit")
+            }
+            var threw = false
+            try {
+                backupEngine.restoreBackup(backupFile, testPassphrase, diaryRepo, mediaRepo, vaultDek)
+            } catch (_: java.io.IOException) {
+                threw = true
+            }
+            assertTrue(threw)
+        } finally {
+            backupEngine.onBeforeCommitHookForTest = null
+        }
+
+        assertFalse("Slim snapshot must NOT copy media/ directory", sawMediaInSnapshot)
+        assertEquals("cleanupStaleTempDirs must skip cleanup while restore is running", 0L, cleanupDuringOpFreed)
+        assertTrue("Existing local diary must survive rollback", diaryRepo.listDiaries(vaultDek).any { it.id == "d_local" })
+        assertFalse("Backup diary must be rolled back", diaryRepo.listDiaries(vaultDek).any { it.id == "d_from_backup" })
+        assertTrue("Existing local media must survive rollback", mediaRepo.exists(existingMediaId))
+        assertArrayEquals(existingMediaPayload, mediaRepo.readDecryptedBytes(existingMediaId, vaultDek))
+        assertFalse("Newly imported backup media must be deleted on rollback", mediaRepo.exists(backupMediaId))
+    }
+
+    @Test
+    fun cleanupStaleTempDirs_deletesOldSnapshotAndStageFoldersWhenIdle() {
+        val snap = File(tempDir, "vault_snapshot_9999").apply { mkdirs() }
+        File(snap, "big_blob.bin").writeBytes(ByteArray(256 * 1024))
+        val shareSnap = File(tempDir, "share_snapshot_8888").apply { mkdirs() }
+        File(shareSnap, "tmp.bin").writeBytes(ByteArray(64 * 1024))
+        val stage = File(tempDir, "restore_stage_7777").apply { mkdirs() }
+        File(stage, "stage.bin").writeBytes(ByteArray(64 * 1024))
+
+        val freed = backupEngine.cleanupStaleTempDirs()
+        assertTrue(freed >= 384 * 1024L)
+        assertEquals(0, tempDir.listFiles()?.size ?: 0)
+    }
 }
+

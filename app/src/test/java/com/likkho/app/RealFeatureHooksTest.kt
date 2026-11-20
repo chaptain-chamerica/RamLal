@@ -228,11 +228,12 @@ class RealFeatureHooksTest {
         val message = hooks.exportAllDataZip()
         assertTrue(message.contains("ZIP"))
 
-        val exportsDir = File(filesDir, "exports")
+        val exportsDir = hooks.exportCacheDir
         val zipFiles = exportsDir.listFiles { file -> file.extension == "zip" }
         assertNotNull(zipFiles)
         assertTrue(zipFiles!!.isNotEmpty())
         assertTrue(zipFiles[0].length() > 0)
+        assertEquals(0L, com.likkho.app.storage.StorageMetrics.directorySizeBytes(File(filesDir, "exports")))
     }
 
     @Test
@@ -641,11 +642,12 @@ class RealFeatureHooksTest {
         assertEquals(1, reloadedFull.audioAttachments.size)
         assertEquals(1, reloadedFull.videoAttachments.size)
 
-        // Exporting a summary log must lazy-load full content from disk
+        // Exporting a summary log must lazy-load full content from disk into cacheDir/exports (0 bytes in filesDir/exports)
         hooks.exportDiary(pinnedSummary, ExportFormat("txt", ".txt", "Plain Text Document"))
-        val exportedFile = File(File(filesDir, "exports"), "Lazy_Heading.txt")
+        val exportedFile = File(hooks.exportCacheDir, "Lazy_Heading.txt")
         assertTrue(exportedFile.exists())
         assertTrue(exportedFile.readText().contains(fullContent))
+        assertEquals(0L, com.likkho.app.storage.StorageMetrics.directorySizeBytes(File(filesDir, "exports")))
 
         // Sharing a summary log as .likkho must NOT wipe disk content and must bundle the full diary
         val shareMsg = hooks.shareDiaryAsArchive(pinnedSummary, "SharePass123!")
@@ -656,5 +658,155 @@ class RealFeatureHooksTest {
         assertEquals(fullContent, afterShareFull.contentHtml)
         assertEquals(1, afterShareFull.canvasImages.size)
     }
+
+    @Test
+    fun performBackup_threeBackups_keepsOnlyLatestValidLkb() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+        val pass = "BackupPass123!"
+        val backupsDir = File(filesDir, "backups")
+
+        hooks.persistLogs(listOf(DiaryLog(id = "d_b1", heading = "First State")))
+        hooks.performBackup(pass)
+        Thread.sleep(5)
+
+        hooks.persistLogs(listOf(DiaryLog(id = "d_b2", heading = "Second State")))
+        hooks.performBackup(pass)
+        Thread.sleep(5)
+
+        hooks.persistLogs(listOf(DiaryLog(id = "d_b3", heading = "Third State")))
+        hooks.performBackup(pass)
+
+        val lkbFiles = backupsDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray()
+        assertEquals("Only latest 1 .lkb backup should remain after 3 backups", 1, lkbFiles.size)
+
+        val contents = hooks.openBackupVault(pass)
+        assertEquals(3, contents.size)
+        assertTrue(contents.any { it.id == "d_b3" })
+    }
+
+    @Test
+    fun performBackup_failedNewBackup_preservesExistingValidBackup() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+        val goodPass = "BackupPass123!"
+        val backupsDir = File(filesDir, "backups")
+
+        hooks.persistLogs(listOf(DiaryLog(id = "d_keep", heading = "Surviving Entry")))
+        hooks.performBackup(goodPass)
+
+        val beforeFiles = backupsDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray()
+        assertEquals(1, beforeFiles.size)
+        val originalFile = beforeFiles.first()
+
+        var threw = false
+        try {
+            // Passphrase < 8 chars fails inside BackupEngine.createBackup before pruneOldBackups
+            hooks.performBackup("short")
+        } catch (_: IllegalArgumentException) {
+            threw = true
+        }
+        assertTrue(threw)
+
+        val afterFiles = backupsDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray()
+        assertEquals("Previous valid backup must remain when new backup fails", 1, afterFiles.size)
+        assertEquals(originalFile.absolutePath, afterFiles.first().absolutePath)
+        assertEquals(1, hooks.openBackupVault(goodPass).size)
+    }
+
+    @Test
+    fun performBackupToStream_writesVerifiedContainerWithoutBloatingAppPrivateBackups() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+        val pass = "SafPassphrase123!"
+        hooks.persistLogs(listOf(DiaryLog(id = "saf_1", heading = "External SAF Entry", plainPreview = "Saved outside filesDir")))
+
+        val externalSafFile = File(tempFolder.newFolder("external_saf"), "likkho_saf_backup.lkb")
+        val result = hooks.performBackupToStream(pass) { externalSafFile.outputStream() }
+        assertEquals(0, result.failedMediaCount)
+        assertTrue(externalSafFile.exists() && externalSafFile.length() > 0L)
+
+        val backupsDir = File(filesDir, "backups")
+        val internalLkbs = backupsDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray()
+        assertEquals("SAF backup must not leave .lkb files in app-private backups/", 0, internalLkbs.size)
+        val leftoverSafTemp = vaultManager.backupEngine.tempDir.listFiles { f -> f.name.startsWith("saf_backup_") } ?: emptyArray()
+        assertEquals(0, leftoverSafTemp.size)
+
+        val contents = vaultManager.backupEngine.readBackupContents(externalSafFile, pass.toCharArray())
+        assertEquals(1, contents.diaries.size)
+        assertEquals("External SAF Entry", contents.diaries.first().heading)
+    }
+
+    @Test
+    fun exportsAndShares_writeToCacheDir_andStartupClearsCacheAndLegacyExports() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+        hooks.persistLogs(listOf(DiaryLog(id = "exp_1", heading = "First Export", plainPreview = "body")))
+
+        // Legacy bloat files present from previous app version
+        val legacyExports = File(filesDir, "exports").apply { mkdirs() }
+        val legacyShares = File(filesDir, "shares").apply { mkdirs() }
+        File(legacyExports, "old_export.txt").writeBytes(ByteArray(1024))
+        File(legacyShares, "old_share.likkho").writeBytes(ByteArray(1024))
+
+        hooks.exportDiary(DiaryLog(id = "exp_1", heading = "First Export", contentHtml = "Hello"), ExportFormat("txt", ".txt", "Text"))
+        assertEquals("filesDir/exports must be cleaned and unused", 0L, com.likkho.app.storage.StorageMetrics.directorySizeBytes(File(filesDir, "exports")))
+        assertEquals(1, hooks.exportCacheDir.listFiles()?.size ?: 0)
+
+        hooks.exportAllDataZip()
+        val cachedFilesAfterZip = hooks.exportCacheDir.listFiles() ?: emptyArray()
+        assertEquals("Previous export should be pruned before writing new ZIP", 1, cachedFilesAfterZip.size)
+        assertTrue(cachedFilesAfterZip[0].extension == "zip")
+
+        val freed = hooks.runStartupStorageCleanup()
+        assertTrue(freed > 0L)
+        assertEquals(0, hooks.exportCacheDir.listFiles()?.size ?: 0)
+        assertEquals(0, hooks.shareCacheDir.listFiles()?.size ?: 0)
+        assertEquals(0L, com.likkho.app.storage.StorageMetrics.directorySizeBytes(File(filesDir, "shares")))
+    }
+
+    @Test
+    fun freeUpSpace_removesOrphanMediaOldBackupsExportsAndTemp_preservingActiveMediaAndLatestBackup() = runTest(testDispatcher) {
+        vaultManager.ensurePrimaryVaultInitialized()
+
+        val activeId = vaultManager.withActiveDek { dek ->
+            vaultManager.activeMediaRepository().importMediaBytes("m_active_keep", ByteArray(40 * 1024) { 1 }, dek)
+        }
+        val orphanId = vaultManager.withActiveDek { dek ->
+            vaultManager.activeMediaRepository().importMediaBytes("m_orphan_drop", ByteArray(256 * 1024) { 2 }, dek)
+        }
+        hooks.persistLogs(
+            listOf(
+                DiaryLog(
+                    id = "d_active",
+                    heading = "Keep My Media",
+                    canvasImages = listOf(CanvasImage(id = activeId, source = activeId, width = 100f, height = 100f))
+                )
+            )
+        )
+
+        // Create 2 backups manually (simulating stale extra backups) + export cache + vaults/tmp bloat
+        val backupsDir = File(filesDir, "backups").apply { mkdirs() }
+        val oldLkb = File(backupsDir, "backup_1000.lkb").apply {
+            writeBytes(ByteArray(128 * 1024))
+            setLastModified(1_000_000L)
+        }
+        val newLkb = File(backupsDir, "backup_2000.lkb").apply {
+            writeBytes(ByteArray(32 * 1024))
+            setLastModified(2_000_000L)
+        }
+        File(hooks.exportCacheDir.apply { mkdirs() }, "stale_export.zip").writeBytes(ByteArray(64 * 1024))
+        val tmpSnap = File(vaultManager.backupEngine.tempDir, "vault_snapshot_stale").apply { mkdirs() }
+        File(tmpSnap, "leftover.bin").writeBytes(ByteArray(96 * 1024))
+
+        val freedBytes = hooks.freeUpSpace()
+        val expectedMinFreed = (256L + 128L + 64L + 96L) * 1024L
+        assertTrue("Expected at least $expectedMinFreed bytes freed, got $freedBytes", freedBytes >= expectedMinFreed)
+
+        assertTrue("Active referenced media must be preserved", vaultManager.activeMediaRepository().exists(activeId))
+        assertFalse("Unreferenced orphan media must be removed", vaultManager.activeMediaRepository().exists(orphanId))
+        assertFalse("Older backup must be pruned", oldLkb.exists())
+        assertTrue("Latest backup must remain", newLkb.exists())
+        assertEquals(0, hooks.exportCacheDir.listFiles()?.size ?: 0)
+        assertEquals(0, vaultManager.backupEngine.tempDir.listFiles()?.size ?: 0)
+    }
 }
+
+
 

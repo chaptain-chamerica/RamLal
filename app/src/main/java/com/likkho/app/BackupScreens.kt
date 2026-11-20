@@ -1,6 +1,8 @@
 package com.likkho.app
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -52,6 +54,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -93,14 +97,27 @@ fun BackupRestoreScreen(vm: AppViewModel) {
         }
     }
 
-    fun backup() {
+    val context = LocalContext.current
+
+    fun validateBackupKey(): String? {
         val rem = vm.remainingCooldownSeconds()
-        if (rem > 0) { cooldown = rem; err("Too many wrong attempts. Please wait ${rem}s."); return }
-        if (backupPass.isBlank()) { err("Please enter your Encryption Key."); return }
+        if (rem > 0) { cooldown = rem; err("Too many wrong attempts. Please wait ${rem}s."); return null }
+        if (backupPass.isBlank()) { err("Please enter your Encryption Key."); return null }
+        return backupPass.trim()
+    }
+
+    val safBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        val pass = validateBackupKey()
+        if (uri == null || pass == null) {
+            busy = false
+            return@rememberLauncherForActivityResult
+        }
         busy = true
         scope.launch {
             try {
-                val hash = vm.hooks.hashPassphrase(backupPass.trim())
+                val hash = vm.hooks.hashPassphrase(pass)
                 val saved = vm.savedKeyHash
                 if (saved != null && hash != saved) {
                     val secs = vm.recordPasscodeFailure()
@@ -108,11 +125,53 @@ fun BackupRestoreScreen(vm: AppViewModel) {
                     return@launch
                 }
                 vm.resetPasscodeFailures()
-                val meta = vm.hooks.performBackup(backupPass.trim())
+                val meta = vm.hooks.performBackupToStream(pass) {
+                    context.contentResolver.openOutputStream(uri)
+                        ?: throw java.io.IOException("Could not open chosen folder for writing.")
+                }
+                if (saved == null) vm.savedKeyHash = hash
+                if (meta.failedMediaCount > 0) err("Backup saved to folder with issues: ${meta.failedMediaCount} media files missing.")
+                else ok("Backup saved to chosen folder.")
+            } catch (e: Exception) {
+                err(e.message ?: "External backup failed.")
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun backup() {
+        val pass = validateBackupKey() ?: return
+        busy = true
+        scope.launch {
+            try {
+                val hash = vm.hooks.hashPassphrase(pass)
+                val saved = vm.savedKeyHash
+                if (saved != null && hash != saved) {
+                    val secs = vm.recordPasscodeFailure()
+                    if (secs > 0) { cooldown = secs; err("Incorrect Encryption Key. Locked for ${secs}s.") } else err("Incorrect Encryption Key.")
+                    return@launch
+                }
+                vm.resetPasscodeFailures()
+                val meta = vm.hooks.performBackup(pass)
                 if (saved == null) vm.savedKeyHash = hash
                 if (meta.failedMediaCount > 0) err("Backup finished with issues: ${meta.failedMediaCount} media files backup me nahi aa payi.")
                 else ok("Backup completed successfully.")
             } catch (e: Exception) { err(e.message ?: "Backup failed.") } finally { busy = false }
+        }
+    }
+
+    fun backupToExternalFolder() {
+        val pass = validateBackupKey() ?: return
+        scope.launch {
+            val hash = vm.hooks.hashPassphrase(pass)
+            val saved = vm.savedKeyHash
+            if (saved != null && hash != saved) {
+                val secs = vm.recordPasscodeFailure()
+                if (secs > 0) { cooldown = secs; err("Incorrect Encryption Key. Locked for ${secs}s.") } else err("Incorrect Encryption Key.")
+                return@launch
+            }
+            safBackupLauncher.launch("likkho-backup-${System.currentTimeMillis()}.lkb")
         }
     }
 
@@ -153,6 +212,7 @@ fun BackupRestoreScreen(vm: AppViewModel) {
             SectionCard(Icons.Outlined.Backup, "Backup") {
                 KeyField("Encryption Key", backupPass, { backupPass = it }, "Enter encryption key", showKeyText, {}, enabled = !cooling)
                 WikiButton(if (cooling) "Wait ${cooldown}s" else if (busy) "Backing up..." else "Backup", { backup() }, Modifier.fillMaxWidth(), BtnKind.PRIMARY, Icons.Outlined.Lock, enabled = !busy && !cooling)
+                WikiButton("Save Backup to Chosen Folder (SAF)", { backupToExternalFolder() }, Modifier.fillMaxWidth(), BtnKind.OUTLINE, Icons.Outlined.FolderOpen, enabled = !busy && !cooling)
             }
             // 3. restore
             SectionCard(Icons.Outlined.Restore, "Restore") {

@@ -125,8 +125,10 @@ fun WorkspaceScreen(vm: AppViewModel) {
     val initialMediaIds = remember(initial?.id) {
         collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
     }
+    var hasSavedDiary by remember(initial?.id) { mutableStateOf(initial != null) }
     var lastSavedMediaIds by remember(initial?.id) { mutableStateOf(initialMediaIds) }
     val sessionImportedMediaIds = remember(initial?.id) { mutableStateListOf<String>() }
+    var showUnsavedMediaExitDialog by remember { mutableStateOf(false) }
 
     DisposableEffect(editorState) {
         editorState.onLockedSpoilerBlocked = { blocked ->
@@ -236,6 +238,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
         val obsoleteMediaIds = (lastSavedMediaIds + sessionImportedMediaIds) - currentMediaIds
         vm.upsertLog(log, false, obsoleteMediaIds) { persistResult ->
             persistResult.onSuccess {
+                hasSavedDiary = true
                 lastSavedMediaIds = currentMediaIds
                 sessionImportedMediaIds.clear()
                 hooks.scheduleReminder(log, reminderAt) { remRes ->
@@ -265,7 +268,23 @@ fun WorkspaceScreen(vm: AppViewModel) {
         vm.navigateTo(Route.HOME)
     }
 
-    BackHandler { if (selImg != null || selAud != null || selVid != null) { selImg = null; selAud = null; selVid = null } else exitWorkspace() }
+    fun requestExitWorkspace() {
+        val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
+        val hasRemovedSavedMedia = hasSavedDiary && (lastSavedMediaIds - currentMediaIds).isNotEmpty()
+        if (hasRemovedSavedMedia) {
+            showUnsavedMediaExitDialog = true
+        } else {
+            exitWorkspace()
+        }
+    }
+
+    BackHandler {
+        if (selImg != null || selAud != null || selVid != null) {
+            selImg = null; selAud = null; selVid = null
+        } else {
+            requestExitWorkspace()
+        }
+    }
 
     Column(
         Modifier
@@ -279,7 +298,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 IconBtn(
                     Icons.AutoMirrored.Outlined.ArrowBack,
                     "Back to Homepage",
-                    { exitWorkspace() },
+                    { requestExitWorkspace() },
                     size = 48.dp,
                     bordered = false,
                     bg = Color.Transparent
@@ -1081,6 +1100,35 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
     }
 
+    if (showUnsavedMediaExitDialog) {
+        WikiDialog(
+            onDismiss = { showUnsavedMediaExitDialog = false },
+            title = "Unsaved Changes",
+            titleIcon = Icons.Outlined.Warning,
+            titleIconTint = w.danger,
+            maxWidth = 340.dp
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Unsaved changes: media diary me rahegi",
+                    style = sansStyle(12.sp, w.text, FontWeight.Medium)
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    WikiButton("Cancel", { showUnsavedMediaExitDialog = false }, height = 36.dp)
+                    Spacer(Modifier.width(8.dp))
+                    WikiButton(
+                        text = "Exit",
+                        onClick = {
+                            showUnsavedMediaExitDialog = false
+                            exitWorkspace()
+                        },
+                        kind = BtnKind.DANGER,
+                        height = 36.dp
+                    )
+                }
+            }
+        }
+    }
     if (showReminder) ReminderDialog(reminderAt, { showReminder = false }) { reminderAt = it }
     if (showPfp) PfpStudioDialog(
         current = pfp,

@@ -323,4 +323,100 @@ class DiaryRepositoryTest {
         val validEntries = repository.listDiaries(testDek)
         assertEquals(setOf("idx_1", "idx_2"), validEntries.map { it.id }.toSet())
     }
+
+    @Test
+    fun orphanCleanup_protectsTrackedUndecodableDiaryMedia_whileDeletingUnrelatedOldOrphans() {
+        var now = 1_700_000_000_000L
+        val clock = object : ClockProvider {
+            override fun elapsedRealtimeMs(): Long = now
+            override fun wallClockMs(): Long = now
+        }
+        val mediaRepo = EncryptedMediaRepository(VaultId.PRIMARY, vaultDir, clock)
+
+        mediaRepo.importMediaBytes("m_corrupt_tracked", "belonged to corrupt".toByteArray(), testDek)
+        mediaRepo.getMediaFile("m_corrupt_tracked").setLastModified(now - (48L * 60 * 60 * 1000))
+
+        mediaRepo.importMediaBytes("m_unrelated_orphan", "orphan bytes".toByteArray(), testDek)
+        mediaRepo.getMediaFile("m_unrelated_orphan").setLastModified(now - (48L * 60 * 60 * 1000))
+
+        // Save diary normally so index.lki tracks its mediaIds, then corrupt its .lkd file
+        val badDiary = sampleDiary("bad_indexed", "Bad Indexed").copy(
+            images = listOf(com.likkho.app.storage.model.CanvasImageRecord(mediaId = "m_corrupt_tracked"))
+        )
+        repository.saveDiary(badDiary, testDek)
+        val badFile = File(repository.diariesDir, "bad_indexed.lkd")
+        val bytes = badFile.readBytes()
+        bytes[bytes.size - 2] = (bytes[bytes.size - 2].toInt() xor 0xFF).toByte()
+        badFile.writeBytes(bytes)
+
+        val cleaned = repository.cleanupOrphanMedia(testDek, mediaRepo)
+        assertEquals("Only the unrelated >24h orphan must be deleted", 1, cleaned)
+        assertFalse("Unrelated old orphan must be deleted", mediaRepo.exists("m_unrelated_orphan"))
+        assertTrue("Media tracked to undecodable diary must still be protected", mediaRepo.exists("m_corrupt_tracked"))
+    }
+
+    @Test
+    fun deleteDiary_unreadableFile_removesRecoveredMedia_orMarksUnknownAsOrphanCandidate() {
+        var now = 1_700_000_000_000L
+        val clock = object : ClockProvider {
+            override fun elapsedRealtimeMs(): Long = now
+            override fun wallClockMs(): Long = now
+        }
+        val mediaRepo = EncryptedMediaRepository(VaultId.PRIMARY, vaultDir, clock)
+
+        // Case A: Diary saved with tracked index entry, then .lkd corrupted -> deleteDiary removes its unreferenced media
+        mediaRepo.importMediaBytes("m_tracked_bad", "tracked".toByteArray(), testDek)
+        repository.saveDiary(
+            sampleDiary("d_tracked_bad", "Tracked Corrupt").copy(
+                images = listOf(com.likkho.app.storage.model.CanvasImageRecord(mediaId = "m_tracked_bad"))
+            ),
+            testDek
+        )
+        val trackedFile = File(repository.diariesDir, "d_tracked_bad.lkd")
+        val trackedBytes = trackedFile.readBytes()
+        trackedBytes[trackedBytes.size - 2] = (trackedBytes[trackedBytes.size - 2].toInt() xor 0xFF).toByte()
+        trackedFile.writeBytes(trackedBytes)
+
+        repository.deleteDiary("d_tracked_bad", testDek, mediaRepo)
+        assertFalse("Recovered media from unreadable diary must be deleted", mediaRepo.exists("m_tracked_bad"))
+
+        // Case B: Unreadable .lkd with NO index/bak record -> deleteDiary marks unreferenced media as orphan candidate
+        mediaRepo.importMediaBytes("m_unknown_orphan", "unknown".toByteArray(), testDek)
+        mediaRepo.getMediaFile("m_unknown_orphan").setLastModified(now)
+        val rawFile = File(repository.diariesDir, "d_raw_bad.lkd")
+        val rawBytes = DiaryFileCodec.encode(sampleDiary("d_raw_bad", "Raw"), testDek)
+        rawBytes[rawBytes.size - 2] = (rawBytes[rawBytes.size - 2].toInt() xor 0xFF).toByte()
+        rawFile.writeBytes(rawBytes)
+
+        repository.deleteDiary("d_raw_bad", testDek, mediaRepo)
+        assertTrue(mediaRepo.loadOrphanCandidates().containsKey("m_unknown_orphan"))
+
+        // Advance clock beyond 24h -> cleanup deletes the orphan candidate
+        now += 25L * 60 * 60 * 1000
+        val cleaned = repository.cleanupOrphanMedia(testDek, mediaRepo)
+        assertEquals(1, cleaned)
+        assertFalse(mediaRepo.exists("m_unknown_orphan"))
+    }
+
+    @Test
+    fun deleteDiary_whenMediaDeleteFails_throwsIOException() {
+        val failingMediaRepo = EncryptedMediaRepository(VaultId.PRIMARY, vaultDir) { _ -> false }
+        failingMediaRepo.importMediaBytes("m_stuck", "stuck".toByteArray(), testDek)
+        repository.saveDiary(
+            sampleDiary("d_stuck", "Stuck").copy(
+                images = listOf(com.likkho.app.storage.model.CanvasImageRecord(mediaId = "m_stuck"))
+            ),
+            testDek
+        )
+
+        var threw = false
+        try {
+            repository.deleteDiary("d_stuck", testDek, failingMediaRepo)
+        } catch (_: java.io.IOException) {
+            threw = true
+        }
+        assertTrue("deleteDiary must throw IOException when media deletion fails after retry", threw)
+        assertTrue(failingMediaRepo.exists("m_stuck"))
+    }
 }
+

@@ -106,7 +106,10 @@ class VaultManager(
     val currentVault: VaultId? get() = activeSession?.vaultId
     val isUnlocked: Boolean get() = activeSession?.isOpen == true
 
+    fun cleanupStaleTempDirs(): Long = backupEngine.cleanupStaleTempDirs()
+
     private fun runUnlockMaintenance(vaultId: VaultId, session: VaultSession) {
+        backupEngine.cleanupStaleTempDirs()
         session.useDek { dek ->
             val diaryRepo = getDiaryRepository(vaultId)
             val mediaRepo = getMediaRepository(vaultId)

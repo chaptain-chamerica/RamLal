@@ -111,7 +111,9 @@ data class IndexEntryRecord(
     val pinned: Boolean = false,
     val flags: Int = 0,
     val plainPreview: String = "",
-    val heading: String = ""
+    val heading: String = "",
+    val mediaIds: List<String> = emptyList(),
+    val hasTrackedMediaIds: Boolean = false
 )
 
 @Serializable

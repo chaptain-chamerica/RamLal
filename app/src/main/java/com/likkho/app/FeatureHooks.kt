@@ -49,10 +49,13 @@ interface FeatureHooks {
     fun deleteSavedWord(word: String, vault: VaultMode): List<WordAnalysisRecord>
     fun loadPasswords(vault: VaultMode): List<SavedPassword>
     fun persistPasswords(vault: VaultMode, items: List<SavedPassword>)
+    suspend fun runStartupStorageCleanup(): Long = 0L
+    suspend fun freeUpSpace(): Long = 0L
 
     // ---- Backup / Restore ----
     suspend fun hashPassphrase(passphrase: String): String
     suspend fun performBackup(passphrase: String): BackupResult
+    suspend fun performBackupToStream(passphrase: String, openOutput: () -> java.io.OutputStream): BackupResult = BackupResult()
     suspend fun performRestore(passphrase: String): RestoreResult      // throws IncorrectKeyException
     suspend fun openBackupVault(passphrase: String): List<DiaryLog>    // throws IncorrectKeyException
     suspend fun deleteFromBackup(log: DiaryLog)
