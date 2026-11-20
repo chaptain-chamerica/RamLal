@@ -32,7 +32,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.File
-import java.io.InputStream
 
 data class PendingUnlock(val log: DiaryLog, val action: UnlockAction)
 enum class UnlockAction { OPEN, EXPORT, DELETE }
@@ -526,25 +525,6 @@ class AppViewModel @JvmOverloads constructor(
         }
     }
 
-    private class CountingInputStream(private val delegate: InputStream) : InputStream() {
-        var bytesRead: Long = 0L
-            private set
-
-        override fun read(): Int {
-            val b = delegate.read()
-            if (b >= 0) bytesRead++
-            return b
-        }
-
-        override fun read(b: ByteArray, off: Int, len: Int): Int {
-            val n = delegate.read(b, off, len)
-            if (n > 0) bytesRead += n
-            return n
-        }
-
-        override fun close() = delegate.close()
-    }
-
     private fun queryUriSize(uri: Uri): Long {
         val app = getApplication<Application>()
         var reportedSize = 0L
@@ -566,8 +546,18 @@ class AppViewModel @JvmOverloads constructor(
         return reportedSize.coerceAtLeast(0L)
     }
 
-    suspend fun importImageUri(uri: Uri, x: Float = 24f, y: Float = 120f): CanvasImage? = withContext(Dispatchers.IO) {
+    suspend fun importImageUri(
+        uri: Uri,
+        x: Float = 24f,
+        y: Float = 120f,
+        isCancelled: (() -> Boolean)? = null,
+        onPhase: ((ImportPhase) -> Unit)? = null,
+        onProgress: ((bytesDone: Long, bytesTotal: Long) -> Unit)? = null,
+    ): CanvasImage? = withContext(Dispatchers.IO) {
         if (!vaultManager.isUnlocked) return@withContext null
+        onPhase?.invoke(ImportPhase.PREPARING)
+        if (isCancelled?.invoke() == true) throw ImportCancelledException()
+
         val app = getApplication<Application>()
         val reportedSize = queryUriSize(uri)
         val orientation = runCatching {
@@ -582,6 +572,8 @@ class AppViewModel @JvmOverloads constructor(
                 BitmapFactory.decodeStream(stream, null, bounds)
             }
         }
+        if (isCancelled?.invoke() == true) throw ImportCancelledException()
+
         val swapDims = isExifDimensionSwapped(orientation)
         val rawW = if (swapDims) bounds.outHeight else bounds.outWidth
         val rawH = if (swapDims) bounds.outWidth else bounds.outHeight
@@ -602,7 +594,14 @@ class AppViewModel @JvmOverloads constructor(
 
         val mediaId = CryptoUtils.randomId("med_")
         val rawStream = app.contentResolver.openInputStream(uri) ?: return@withContext null
-        val importedBytes = CountingInputStream(rawStream).use { counting ->
+        val importedBytes = CountingInputStream(
+            delegate = rawStream,
+            totalBytes = reportedSize,
+            isCancelled = isCancelled,
+            onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
+            onProgress = onProgress,
+            onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
+        ).use { counting ->
             vaultManager.withActiveDek { dek ->
                 vaultManager.activeMediaRepository().importMedia(mediaId, counting, dek, reportedSize)
             }
@@ -612,8 +611,17 @@ class AppViewModel @JvmOverloads constructor(
             vaultManager.activeMediaRepository().deleteMedia(mediaId)
             return@withContext null
         }
+        if (isCancelled?.invoke() == true) {
+            runCatching { vaultManager.activeMediaRepository().deleteMedia(mediaId) }
+            throw ImportCancelledException()
+        }
 
         decodeSampledBitmapFromEncryptedMedia(mediaId)?.let { imageBitmapCache.put(mediaId, it) }
+        if (isCancelled?.invoke() == true) {
+            runCatching { vaultManager.activeMediaRepository().deleteMedia(mediaId) }
+            imageBitmapCache.remove(mediaId)
+            throw ImportCancelledException()
+        }
         CanvasImage(
             id = mediaId,
             source = mediaId,
@@ -625,8 +633,18 @@ class AppViewModel @JvmOverloads constructor(
         )
     }
 
-    suspend fun importVideoUri(uri: Uri, x: Float = 24f, y: Float = 140f): CanvasVideo? = withContext(Dispatchers.IO) {
+    suspend fun importVideoUri(
+        uri: Uri,
+        x: Float = 24f,
+        y: Float = 140f,
+        isCancelled: (() -> Boolean)? = null,
+        onPhase: ((ImportPhase) -> Unit)? = null,
+        onProgress: ((bytesDone: Long, bytesTotal: Long) -> Unit)? = null,
+    ): CanvasVideo? = withContext(Dispatchers.IO) {
         if (!vaultManager.isUnlocked) return@withContext null
+        onPhase?.invoke(ImportPhase.PREPARING)
+        if (isCancelled?.invoke() == true) throw ImportCancelledException()
+
         val app = getApplication<Application>()
         var displayName: String? = null
         var reportedSize: Long = queryUriSize(uri)
@@ -671,11 +689,25 @@ class AppViewModel @JvmOverloads constructor(
                 mmr.release()
             }
         }
+        if (isCancelled?.invoke() == true) throw ImportCancelledException()
+
+        val mediaId = CryptoUtils.randomId("med_")
         val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
-        val mediaId = stream.use { s ->
+        CountingInputStream(
+            delegate = stream,
+            totalBytes = reportedSize,
+            isCancelled = isCancelled,
+            onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
+            onProgress = onProgress,
+            onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
+        ).use { s ->
             vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().importMedia(CryptoUtils.randomId("med_"), s, dek, reportedSize)
+                vaultManager.activeMediaRepository().importMedia(mediaId, s, dek, reportedSize)
             }
+        }
+        if (isCancelled?.invoke() == true) {
+            runCatching { vaultManager.activeMediaRepository().deleteMedia(mediaId) }
+            throw ImportCancelledException()
         }
         val storedSize = if (reportedSize > 0L) reportedSize else vaultManager.activeMediaRepository().getMediaFile(mediaId).length()
         thumbBmp?.let { imageBitmapCache.put("vthumb_$mediaId", it) }
@@ -693,8 +725,18 @@ class AppViewModel @JvmOverloads constructor(
         )
     }
 
-    suspend fun importAudioUri(uri: Uri, x: Float = 24f, y: Float = 160f): CanvasAudio? = withContext(Dispatchers.IO) {
+    suspend fun importAudioUri(
+        uri: Uri,
+        x: Float = 24f,
+        y: Float = 160f,
+        isCancelled: (() -> Boolean)? = null,
+        onPhase: ((ImportPhase) -> Unit)? = null,
+        onProgress: ((bytesDone: Long, bytesTotal: Long) -> Unit)? = null,
+    ): CanvasAudio? = withContext(Dispatchers.IO) {
         if (!vaultManager.isUnlocked) return@withContext null
+        onPhase?.invoke(ImportPhase.PREPARING)
+        if (isCancelled?.invoke() == true) throw ImportCancelledException()
+
         val app = getApplication<Application>()
         var displayName: String? = null
         var reportedSize: Long = queryUriSize(uri)
@@ -718,11 +760,25 @@ class AppViewModel @JvmOverloads constructor(
                 mmr.release()
             }
         }.getOrDefault(1)
+        if (isCancelled?.invoke() == true) throw ImportCancelledException()
+
+        val mediaId = CryptoUtils.randomId("med_")
         val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
-        val mediaId = stream.use { s ->
+        CountingInputStream(
+            delegate = stream,
+            totalBytes = reportedSize,
+            isCancelled = isCancelled,
+            onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
+            onProgress = onProgress,
+            onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
+        ).use { s ->
             vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().importMedia(CryptoUtils.randomId("med_"), s, dek, reportedSize)
+                vaultManager.activeMediaRepository().importMedia(mediaId, s, dek, reportedSize)
             }
+        }
+        if (isCancelled?.invoke() == true) {
+            runCatching { vaultManager.activeMediaRepository().deleteMedia(mediaId) }
+            throw ImportCancelledException()
         }
         val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Audio_${mediaId.take(6)}"
         val ext = cleanName.substringAfterLast('.', "").lowercase().ifBlank { "audio" }

@@ -130,6 +130,45 @@ fun WorkspaceScreen(vm: AppViewModel) {
     val sessionImportedMediaIds = remember(initial?.id) { mutableStateListOf<String>() }
     var showUnsavedMediaExitDialog by remember { mutableStateOf(false) }
 
+    var importingItem by remember { mutableStateOf<ImportingItem?>(null) }
+    var showImportSkeleton by remember { mutableStateOf(false) }
+    var showImportCancelBackDialog by remember { mutableStateOf(false) }
+    val activeCancelFlag = remember { java.util.concurrent.atomic.AtomicReference<java.util.concurrent.atomic.AtomicBoolean?>(null) }
+    val activeImportToken = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    var runningImportToken by remember { mutableStateOf(0L) }
+    val workspaceContext = androidx.compose.ui.platform.LocalContext.current
+
+    fun cancelActiveImport(showBanner: Boolean = false) {
+        activeCancelFlag.get()?.set(true)
+        activeImportToken.incrementAndGet()
+        runningImportToken = 0L
+        importingItem = null
+        showImportSkeleton = false
+        if (showBanner) {
+            vm.showStatus("Import cancelled", BannerKind.INFO)
+        }
+    }
+
+    LaunchedEffect(runningImportToken, importingItem != null) {
+        if (importingItem != null && runningImportToken != 0L) {
+            showImportSkeleton = false
+            delay(IMPORT_SKELETON_DELAY_MS)
+            if (importingItem != null && activeImportToken.get() == runningImportToken) {
+                showImportSkeleton = true
+            }
+        } else {
+            showImportSkeleton = false
+            showImportCancelBackDialog = false
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            activeCancelFlag.get()?.set(true)
+            activeImportToken.incrementAndGet()
+        }
+    }
+
     DisposableEffect(editorState) {
         editorState.onLockedSpoilerBlocked = { blocked ->
             vm.showStatus("Enter spoiler passcode to edit, delete, or copy.", BannerKind.ERROR)
@@ -150,55 +189,175 @@ fun WorkspaceScreen(vm: AppViewModel) {
         return sx.coerceAtLeast(0f) to sy.coerceAtLeast(0f)
     }
 
+    fun <R> launchSingleCanvasImport(
+        kind: ImportingMediaKind,
+        defaultName: String,
+        defaultWidth: Float,
+        defaultHeight: Float,
+        uri: android.net.Uri,
+        failMessage: String,
+        performImport: suspend (
+            sx: Float,
+            sy: Float,
+            isCancelled: () -> Boolean,
+            onPhase: (ImportPhase) -> Unit,
+            onProgress: (Long, Long) -> Unit
+        ) -> R?,
+        onImported: (R) -> Unit,
+    ) {
+        if (importingItem != null) {
+            vm.showStatus("Ek import chal raha hai", BannerKind.INFO)
+            return
+        }
+        val (displayName, reportedSize) = queryUriDisplayAndSize(workspaceContext, uri, defaultName)
+        val (sx, sy) = currentSpawnCoords()
+        val token = activeImportToken.incrementAndGet()
+        val cancelFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+        val lastUiProgressMs = java.util.concurrent.atomic.AtomicLong(0L)
+        activeCancelFlag.set(cancelFlag)
+        runningImportToken = token
+        importingItem = ImportingItem(
+            kind = kind,
+            name = displayName,
+            x = sx,
+            y = sy,
+            width = defaultWidth,
+            height = defaultHeight,
+            phase = ImportPhase.PREPARING,
+            bytesDone = 0L,
+            bytesTotal = reportedSize,
+        )
+
+        val onPhase: (ImportPhase) -> Unit = { newPhase ->
+            scope.launch {
+                if (activeImportToken.get() == token && !cancelFlag.get()) {
+                    importingItem = importingItem?.let { cur ->
+                        val monotonicPhase = if (cur.phase == ImportPhase.VERIFYING && newPhase == ImportPhase.ENCRYPTING) {
+                            ImportPhase.VERIFYING
+                        } else newPhase
+                        cur.copy(phase = monotonicPhase)
+                    }
+                }
+            }
+        }
+        val onProgress: (Long, Long) -> Unit = { bytesDone, bytesTotal ->
+            val nowMs = System.nanoTime() / 1_000_000L
+            val prevMs = lastUiProgressMs.get()
+            if (prevMs == 0L || nowMs - prevMs >= 90L) {
+                lastUiProgressMs.set(nowMs)
+                scope.launch {
+                    if (activeImportToken.get() == token && !cancelFlag.get()) {
+                        importingItem = importingItem?.let { cur ->
+                            if (cur.phase == ImportPhase.VERIFYING) cur
+                            else cur.copy(
+                                phase = ImportPhase.ENCRYPTING,
+                                bytesDone = bytesDone,
+                                bytesTotal = if (bytesTotal > 0L) bytesTotal else cur.bytesTotal
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        scope.launch {
+            try {
+                val result = performImport(sx, sy, { cancelFlag.get() }, onPhase, onProgress)
+                if (cancelFlag.get() || activeImportToken.get() != token) {
+                    return@launch
+                }
+                if (result != null) {
+                    onImported(result)
+                } else {
+                    vm.showStatus(failMessage, BannerKind.ERROR)
+                }
+            } catch (_: ImportCancelledException) {
+                if (activeImportToken.get() == token) {
+                    vm.showStatus("Import cancelled", BannerKind.INFO)
+                }
+            } catch (_: Throwable) {
+                if (activeImportToken.get() == token) {
+                    if (cancelFlag.get()) {
+                        vm.showStatus("Import cancelled", BannerKind.INFO)
+                    } else {
+                        vm.showStatus(failMessage, BannerKind.ERROR)
+                    }
+                }
+            } finally {
+                activeCancelFlag.compareAndSet(cancelFlag, null)
+                if (activeImportToken.get() == token) {
+                    runningImportToken = 0L
+                    importingItem = null
+                    showImportSkeleton = false
+                }
+            }
+        }
+    }
+
     val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            scope.launch {
-                val (sx, sy) = currentSpawnCoords()
-                val imported = vm.importImageUri(uri, sx, sy)
-                if (imported != null) {
+            launchSingleCanvasImport(
+                kind = ImportingMediaKind.IMAGE,
+                defaultName = "Image",
+                defaultWidth = 160f,
+                defaultHeight = 120f,
+                uri = uri,
+                failMessage = "Could not import image.",
+                performImport = { sx, sy, isCancelled, onPhase, onProgress ->
+                    vm.importImageUri(uri, sx, sy, isCancelled, onPhase, onProgress)
+                },
+                onImported = { imported ->
                     sessionImportedMediaIds.add(imported.id)
                     images = images + imported
                     selImg = imported.id
                     selAud = null
                     selVid = null
-                } else {
-                    vm.showStatus("Could not import image.", BannerKind.ERROR)
                 }
-            }
+            )
         }
     }
     val videoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            scope.launch {
-                val (sx, sy) = currentSpawnCoords()
-                val imported = vm.importVideoUri(uri, sx, sy)
-                if (imported != null) {
+            launchSingleCanvasImport(
+                kind = ImportingMediaKind.VIDEO,
+                defaultName = "Video",
+                defaultWidth = 240f,
+                defaultHeight = 150f,
+                uri = uri,
+                failMessage = "Could not import video.",
+                performImport = { sx, sy, isCancelled, onPhase, onProgress ->
+                    vm.importVideoUri(uri, sx, sy, isCancelled, onPhase, onProgress)
+                },
+                onImported = { imported ->
                     sessionImportedMediaIds.add(imported.id)
                     videos = videos + imported
                     selVid = imported.id
                     selImg = null
                     selAud = null
-                } else {
-                    vm.showStatus("Could not import video.", BannerKind.ERROR)
                 }
-            }
+            )
         }
     }
     val audioPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            scope.launch {
-                val (sx, sy) = currentSpawnCoords()
-                val imported = vm.importAudioUri(uri, sx, sy)
-                if (imported != null) {
+            launchSingleCanvasImport(
+                kind = ImportingMediaKind.AUDIO,
+                defaultName = "Audio",
+                defaultWidth = 270f,
+                defaultHeight = 56f,
+                uri = uri,
+                failMessage = "Could not import audio.",
+                performImport = { sx, sy, isCancelled, onPhase, onProgress ->
+                    vm.importAudioUri(uri, sx, sy, isCancelled, onPhase, onProgress)
+                },
+                onImported = { imported ->
                     sessionImportedMediaIds.add(imported.audioUri ?: imported.id)
                     audios = audios + imported
                     selAud = imported.id
                     selImg = null
                     selVid = null
-                } else {
-                    vm.showStatus("Could not import audio.", BannerKind.ERROR)
                 }
-            }
+            )
         }
     }
     val bgPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -269,6 +428,10 @@ fun WorkspaceScreen(vm: AppViewModel) {
     }
 
     fun requestExitWorkspace() {
+        if (importingItem != null) {
+            showImportCancelBackDialog = true
+            return
+        }
         val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
         val hasRemovedSavedMedia = hasSavedDiary && (lastSavedMediaIds - currentMediaIds).isNotEmpty()
         if (hasRemovedSavedMedia) {
@@ -320,7 +483,29 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 }
                 Spacer(Modifier.width(4.dp))
                 if (reading) WikiButton("Edit", { reading = false }, kind = BtnKind.PRIMARY, icon = Icons.Outlined.Edit, height = 40.dp)
-                else WikiButton(if (saved) "Saved" else "Save", { save() }, kind = if (saved) BtnKind.SUCCESS else BtnKind.PRIMARY, icon = if (saved) Icons.Outlined.Check else Icons.Outlined.Save, height = 40.dp)
+                else WikiButton(
+                    text = if (saved) "Saved" else "Save",
+                    onClick = { save() },
+                    modifier = Modifier.testTag("workspace_save_button"),
+                    kind = if (saved) BtnKind.SUCCESS else BtnKind.PRIMARY,
+                    icon = if (saved) Icons.Outlined.Check else Icons.Outlined.Save,
+                    enabled = canSaveDiary(importingItem),
+                    height = 40.dp
+                )
+            }
+            if (importingItem != null && !reading) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 12.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Media import chal raha hai",
+                        style = sansStyle(10.sp, w.muted, FontWeight.Medium)
+                    )
+                }
             }
             Box(Modifier.fillMaxWidth().height(0.5.dp).background(w.border))
         }
@@ -464,17 +649,21 @@ fun WorkspaceScreen(vm: AppViewModel) {
             val viewportHPx = with(density) { viewportH.toPx() }
             val writingHeightDp = with(density) { writingBlockHeightPx.toDp() }
 
+            val skeletonRightDp = if (showImportSkeleton) importingItem?.let { it.x + it.width } ?: 0f else 0f
+            val skeletonBottomDp = if (showImportSkeleton) importingItem?.let { it.y + it.height } ?: 0f else 0f
             val mediaMaxRightDp = maxOf(
                 images.maxOfOrNull { it.x + it.width } ?: 0f,
                 audios.maxOfOrNull { it.x + it.width } ?: 0f,
                 videos.maxOfOrNull { it.x + it.width } ?: 0f,
-                activeDragBoundsDp?.first ?: 0f
+                activeDragBoundsDp?.first ?: 0f,
+                skeletonRightDp
             )
             val mediaMaxBottomDp = maxOf(
                 images.maxOfOrNull { it.y + it.height } ?: 0f,
                 audios.maxOfOrNull { it.y + it.height } ?: 0f,
                 videos.maxOfOrNull { it.y + it.height } ?: 0f,
-                activeDragBoundsDp?.second ?: 0f
+                activeDragBoundsDp?.second ?: 0f,
+                skeletonBottomDp
             )
             val contentNeedW = if (mediaMaxRightDp > viewportW.value - 32f || activeDragBoundsDp != null || hScroll.value > 0) {
                 maxOf(viewportW, (mediaMaxRightDp + 240f).dp)
@@ -1053,6 +1242,14 @@ fun WorkspaceScreen(vm: AppViewModel) {
                             )
                         }
                     }
+                    if (showImportSkeleton) {
+                        importingItem?.let { skel ->
+                            ImportSkeletonCard(
+                                item = skel,
+                                onCancel = { cancelActiveImport(showBanner = true) }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1090,6 +1287,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
             },
             onSpoiler = { hooks.applySpoiler(it) },
             editorState = editorState,
+            mediaImportBusy = importingItem != null,
         )
         if (!reading) {
             val density = LocalDensity.current
@@ -1100,6 +1298,42 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
     }
 
+    if (showImportCancelBackDialog) {
+        WikiDialog(
+            onDismiss = { showImportCancelBackDialog = false },
+            title = "Import chal raha hai",
+            titleIcon = Icons.Outlined.Warning,
+            titleIconTint = w.danger,
+            maxWidth = 340.dp
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Back jaane par import cancel ho jayega.",
+                    style = sansStyle(12.sp, w.text, FontWeight.Medium)
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    WikiButton("Wapas", { showImportCancelBackDialog = false }, height = 36.dp)
+                    Spacer(Modifier.width(8.dp))
+                    WikiButton(
+                        text = "Cancel import aur Back",
+                        onClick = {
+                            showImportCancelBackDialog = false
+                            cancelActiveImport(showBanner = false)
+                            val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
+                            val hasRemovedSavedMedia = hasSavedDiary && (lastSavedMediaIds - currentMediaIds).isNotEmpty()
+                            if (hasRemovedSavedMedia) {
+                                showUnsavedMediaExitDialog = true
+                            } else {
+                                exitWorkspace()
+                            }
+                        },
+                        kind = BtnKind.DANGER,
+                        height = 36.dp
+                    )
+                }
+            }
+        }
+    }
     if (showUnsavedMediaExitDialog) {
         WikiDialog(
             onDismiss = { showUnsavedMediaExitDialog = false },

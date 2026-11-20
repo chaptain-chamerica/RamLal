@@ -45,6 +45,7 @@ fun RichToolbar(
     onBgOpacity: (Float) -> Unit, onPickBg: () -> Unit, onRemoveBg: () -> Unit, onEditBg: () -> Unit,
     onInsertText: (String) -> Unit, onSpoiler: (String) -> Unit,
     editorState: RichTextEditorState? = null,
+    mediaImportBusy: Boolean = false,
 ) {
     val w = wiki(); val hooks = vm.hooks; val scope = rememberCoroutineScope()
     var pop by remember { mutableStateOf(Pop.NONE) }
@@ -210,9 +211,16 @@ fun RichToolbar(
                     modifier = Modifier.padding(bottom = 6.dp)
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WikiButton("Image", { pop = Pop.NONE; onAddImage() }, Modifier.weight(1f), icon = Icons.Outlined.AddPhotoAlternate)
-                    WikiButton("Video", { pop = Pop.NONE; onAddVideo() }, Modifier.weight(1f), icon = Icons.Outlined.VideoLibrary)
-                    WikiButton("Audio", { pop = Pop.NONE; onAddAudio() }, Modifier.weight(1f), icon = Icons.Outlined.AudioFile)
+                    WikiButton("Image", { pop = Pop.NONE; onAddImage() }, Modifier.weight(1f), icon = Icons.Outlined.AddPhotoAlternate, enabled = !mediaImportBusy)
+                    WikiButton("Video", { pop = Pop.NONE; onAddVideo() }, Modifier.weight(1f), icon = Icons.Outlined.VideoLibrary, enabled = !mediaImportBusy)
+                    WikiButton("Audio", { pop = Pop.NONE; onAddAudio() }, Modifier.weight(1f), icon = Icons.Outlined.AudioFile, enabled = !mediaImportBusy)
+                }
+                if (mediaImportBusy) {
+                    Text(
+                        "Ek import chal raha hai",
+                        style = sansStyle(10.sp, w.muted, FontWeight.Medium),
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
                 }
             }
             Pop.LINK -> Pop1 {
