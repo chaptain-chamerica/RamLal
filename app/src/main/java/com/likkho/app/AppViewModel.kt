@@ -293,9 +293,18 @@ class AppViewModel @JvmOverloads constructor(
         if (i >= 0) logs[i] = summary else logs.add(0, summary)
         val persistPayload = logs.map { if (it.id == updated.id) updated else it }
         editingLog = if (exitAfterSave) null else updated
+        val savedMediaIds = collectCanvasMediaIds(
+            updated.pfp,
+            updated.canvasBgSource,
+            updated.canvasImages,
+            updated.audioAttachments,
+            updated.videoAttachments
+        )
         hooks.persistLogs(persistPayload, obsoleteMediaIds) { result ->
             viewModelScope.launch {
-                result.onFailure { err ->
+                result.onSuccess {
+                    vaultManager.clearSavedSessionMedia(savedMediaIds + obsoleteMediaIds)
+                }.onFailure { err ->
                     val st = storageFailureBanner("Save failed", err)
                     showStatus(st.message, st.kind, 5000)
                 }
@@ -307,6 +316,7 @@ class AppViewModel @JvmOverloads constructor(
 
     fun cleanupUnusedSessionMedia(candidateIds: Set<String>) {
         if (candidateIds.isNotEmpty()) {
+            vaultManager.unprotectSessionMedia(candidateIds)
             hooks.deleteUnreferencedMedia(candidateIds) { result ->
                 result.onFailure { err ->
                     viewModelScope.launch {
@@ -593,44 +603,52 @@ class AppViewModel @JvmOverloads constructor(
         }
 
         val mediaId = CryptoUtils.randomId("med_")
-        val rawStream = app.contentResolver.openInputStream(uri) ?: return@withContext null
-        val importedBytes = CountingInputStream(
-            delegate = rawStream,
-            totalBytes = reportedSize,
-            isCancelled = isCancelled,
-            onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
-            onProgress = onProgress,
-            onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
-        ).use { counting ->
-            vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().importMedia(mediaId, counting, dek, reportedSize)
+        try {
+            val rawStream = app.contentResolver.openInputStream(uri) ?: return@withContext null
+            val importedBytes = CountingInputStream(
+                delegate = rawStream,
+                totalBytes = reportedSize,
+                isCancelled = isCancelled,
+                onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
+                onProgress = onProgress,
+                onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
+            ).use { counting ->
+                vaultManager.withActiveDek { dek ->
+                    vaultManager.activeMediaRepository().importMedia(mediaId, counting, dek, reportedSize)
+                }
+                counting.bytesRead
             }
-            counting.bytesRead
-        }
-        if (importedBytes <= 0L) {
-            vaultManager.activeMediaRepository().deleteMedia(mediaId)
-            return@withContext null
-        }
-        if (isCancelled?.invoke() == true) {
-            runCatching { vaultManager.activeMediaRepository().deleteMedia(mediaId) }
-            throw ImportCancelledException()
-        }
+            if (importedBytes <= 0L) {
+                vaultManager.activeMediaRepository().deleteMedia(mediaId)
+                vaultManager.unprotectSessionMedia(setOf(mediaId))
+                return@withContext null
+            }
+            if (isCancelled?.invoke() == true) {
+                throw ImportCancelledException()
+            }
 
-        decodeSampledBitmapFromEncryptedMedia(mediaId)?.let { imageBitmapCache.put(mediaId, it) }
-        if (isCancelled?.invoke() == true) {
-            runCatching { vaultManager.activeMediaRepository().deleteMedia(mediaId) }
+            decodeSampledBitmapFromEncryptedMedia(mediaId)?.let { imageBitmapCache.put(mediaId, it) }
+            if (isCancelled?.invoke() == true) {
+                throw ImportCancelledException()
+            }
+            vaultManager.recordSessionImportedMedia(mediaId)
+            CanvasImage(
+                id = mediaId,
+                source = mediaId,
+                x = x.coerceAtLeast(0f),
+                y = y.coerceAtLeast(0f),
+                width = initW,
+                height = initH,
+                sizeBytes = if (reportedSize > 0L) reportedSize else importedBytes
+            )
+        } catch (t: Throwable) {
+            runCatching {
+                vaultManager.activeMediaRepository().deleteMedia(mediaId)
+                vaultManager.unprotectSessionMedia(setOf(mediaId))
+            }
             imageBitmapCache.remove(mediaId)
-            throw ImportCancelledException()
+            throw t
         }
-        CanvasImage(
-            id = mediaId,
-            source = mediaId,
-            x = x.coerceAtLeast(0f),
-            y = y.coerceAtLeast(0f),
-            width = initW,
-            height = initH,
-            sizeBytes = if (reportedSize > 0L) reportedSize else importedBytes
-        )
     }
 
     suspend fun importVideoUri(
@@ -692,37 +710,49 @@ class AppViewModel @JvmOverloads constructor(
         if (isCancelled?.invoke() == true) throw ImportCancelledException()
 
         val mediaId = CryptoUtils.randomId("med_")
-        val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
-        CountingInputStream(
-            delegate = stream,
-            totalBytes = reportedSize,
-            isCancelled = isCancelled,
-            onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
-            onProgress = onProgress,
-            onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
-        ).use { s ->
-            vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().importMedia(mediaId, s, dek, reportedSize)
+        try {
+            val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
+            CountingInputStream(
+                delegate = stream,
+                totalBytes = reportedSize,
+                isCancelled = isCancelled,
+                onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
+                onProgress = onProgress,
+                onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
+            ).use { s ->
+                vaultManager.withActiveDek { dek ->
+                    vaultManager.activeMediaRepository().importMedia(mediaId, s, dek, reportedSize)
+                }
             }
+            if (isCancelled?.invoke() == true) {
+                throw ImportCancelledException()
+            }
+            val storedSize = if (reportedSize > 0L) reportedSize else vaultManager.activeMediaRepository().getMediaFile(mediaId).length()
+            thumbBmp?.let { imageBitmapCache.put("vthumb_$mediaId", it) }
+            if (isCancelled?.invoke() == true) {
+                throw ImportCancelledException()
+            }
+            val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Video_${mediaId.take(6)}"
+            vaultManager.recordSessionImportedMedia(mediaId)
+            CanvasVideo(
+                id = mediaId,
+                name = cleanName,
+                source = mediaId,
+                durationSec = durationSec,
+                x = x.coerceAtLeast(0f),
+                y = y.coerceAtLeast(0f),
+                width = initW,
+                height = initH,
+                sizeBytes = storedSize
+            )
+        } catch (t: Throwable) {
+            runCatching {
+                vaultManager.activeMediaRepository().deleteMedia(mediaId)
+                vaultManager.unprotectSessionMedia(setOf(mediaId))
+            }
+            imageBitmapCache.remove("vthumb_$mediaId")
+            throw t
         }
-        if (isCancelled?.invoke() == true) {
-            runCatching { vaultManager.activeMediaRepository().deleteMedia(mediaId) }
-            throw ImportCancelledException()
-        }
-        val storedSize = if (reportedSize > 0L) reportedSize else vaultManager.activeMediaRepository().getMediaFile(mediaId).length()
-        thumbBmp?.let { imageBitmapCache.put("vthumb_$mediaId", it) }
-        val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Video_${mediaId.take(6)}"
-        CanvasVideo(
-            id = mediaId,
-            name = cleanName,
-            source = mediaId,
-            durationSec = durationSec,
-            x = x.coerceAtLeast(0f),
-            y = y.coerceAtLeast(0f),
-            width = initW,
-            height = initH,
-            sizeBytes = storedSize
-        )
     }
 
     suspend fun importAudioUri(
@@ -763,34 +793,42 @@ class AppViewModel @JvmOverloads constructor(
         if (isCancelled?.invoke() == true) throw ImportCancelledException()
 
         val mediaId = CryptoUtils.randomId("med_")
-        val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
-        CountingInputStream(
-            delegate = stream,
-            totalBytes = reportedSize,
-            isCancelled = isCancelled,
-            onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
-            onProgress = onProgress,
-            onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
-        ).use { s ->
-            vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().importMedia(mediaId, s, dek, reportedSize)
+        try {
+            val stream = app.contentResolver.openInputStream(uri) ?: return@withContext null
+            CountingInputStream(
+                delegate = stream,
+                totalBytes = reportedSize,
+                isCancelled = isCancelled,
+                onFirstRead = { onPhase?.invoke(ImportPhase.ENCRYPTING) },
+                onProgress = onProgress,
+                onEof = { onPhase?.invoke(ImportPhase.VERIFYING) }
+            ).use { s ->
+                vaultManager.withActiveDek { dek ->
+                    vaultManager.activeMediaRepository().importMedia(mediaId, s, dek, reportedSize)
+                }
             }
+            if (isCancelled?.invoke() == true) {
+                throw ImportCancelledException()
+            }
+            val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Audio_${mediaId.take(6)}"
+            val ext = cleanName.substringAfterLast('.', "").lowercase().ifBlank { "audio" }
+            vaultManager.recordSessionImportedMedia(mediaId)
+            CanvasAudio(
+                id = mediaId,
+                name = cleanName,
+                format = ext,
+                audioUri = mediaId,
+                durationSec = durationSec,
+                x = x.coerceAtLeast(0f),
+                y = y.coerceAtLeast(0f)
+            )
+        } catch (t: Throwable) {
+            runCatching {
+                vaultManager.activeMediaRepository().deleteMedia(mediaId)
+                vaultManager.unprotectSessionMedia(setOf(mediaId))
+            }
+            throw t
         }
-        if (isCancelled?.invoke() == true) {
-            runCatching { vaultManager.activeMediaRepository().deleteMedia(mediaId) }
-            throw ImportCancelledException()
-        }
-        val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Audio_${mediaId.take(6)}"
-        val ext = cleanName.substringAfterLast('.', "").lowercase().ifBlank { "audio" }
-        CanvasAudio(
-            id = mediaId,
-            name = cleanName,
-            format = ext,
-            audioUri = mediaId,
-            durationSec = durationSec,
-            x = x.coerceAtLeast(0f),
-            y = y.coerceAtLeast(0f)
-        )
     }
 
     suspend fun importMediaUri(uri: Uri): String? = withContext(Dispatchers.IO) {
@@ -798,19 +836,30 @@ class AppViewModel @JvmOverloads constructor(
         val app = getApplication<Application>()
         val reportedSize = queryUriSize(uri)
         val mediaId = CryptoUtils.randomId("med_")
-        val rawStream = app.contentResolver.openInputStream(uri) ?: return@withContext null
-        val importedBytes = CountingInputStream(rawStream).use { counting ->
-            vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().importMedia(mediaId, counting, dek, reportedSize)
+        try {
+            val rawStream = app.contentResolver.openInputStream(uri) ?: return@withContext null
+            val importedBytes = CountingInputStream(rawStream).use { counting ->
+                vaultManager.withActiveDek { dek ->
+                    vaultManager.activeMediaRepository().importMedia(mediaId, counting, dek, reportedSize)
+                }
+                counting.bytesRead
             }
-            counting.bytesRead
+            if (importedBytes <= 0L) {
+                vaultManager.activeMediaRepository().deleteMedia(mediaId)
+                vaultManager.unprotectSessionMedia(setOf(mediaId))
+                return@withContext null
+            }
+            decodeSampledBitmapFromEncryptedMedia(mediaId)?.let { imageBitmapCache.put(mediaId, it) }
+            vaultManager.recordSessionImportedMedia(mediaId)
+            mediaId
+        } catch (t: Throwable) {
+            runCatching {
+                vaultManager.activeMediaRepository().deleteMedia(mediaId)
+                vaultManager.unprotectSessionMedia(setOf(mediaId))
+            }
+            imageBitmapCache.remove(mediaId)
+            throw t
         }
-        if (importedBytes <= 0L) {
-            vaultManager.activeMediaRepository().deleteMedia(mediaId)
-            return@withContext null
-        }
-        decodeSampledBitmapFromEncryptedMedia(mediaId)?.let { imageBitmapCache.put(mediaId, it) }
-        mediaId
     }
 
     suspend fun openDecryptedMediaDataSource(mediaId: String): MediaDataSource? = withContext(Dispatchers.IO) {

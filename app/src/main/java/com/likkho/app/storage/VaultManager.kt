@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import com.likkho.app.storage.backup.BackupEngine
 import com.likkho.app.storage.migration.DiaryMigrator
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.AEADBadTagException
 
 sealed class UnlockResult {
@@ -27,8 +28,14 @@ class VaultManager(
     val keyStoreProvider: KeyStoreProvider = AndroidKeyStoreProvider(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val pbkdf2Iterations: Int = CryptoUtils.DEFAULT_PBKDF2_ITERATIONS,
-    val clockProvider: ClockProvider = DefaultClockProvider
+    val clockProvider: ClockProvider = DefaultClockProvider,
+    val processStartTimeMs: Long = PROCESS_START_TIME_MS
 ) {
+    companion object {
+        val PROCESS_START_TIME_MS: Long = System.currentTimeMillis()
+    }
+
+    private val sessionProtectedMediaIds = ConcurrentHashMap.newKeySet<String>()
     private val mutexV1 = Mutex()
     private val mutexV2 = Mutex()
 
@@ -106,16 +113,63 @@ class VaultManager(
     val currentVault: VaultId? get() = activeSession?.vaultId
     val isUnlocked: Boolean get() = activeSession?.isOpen == true
 
+    fun currentSessionProtectedMediaIds(): Set<String> = sessionProtectedMediaIds.toSet()
+
+    fun recordSessionImportedMedia(mediaId: String, vaultId: VaultId? = currentVault) {
+        if (mediaId.isBlank()) return
+        sessionProtectedMediaIds.add(mediaId)
+        val targetVault = vaultId ?: return
+        getMediaRepository(targetVault).recordPendingSessionImport(mediaId)
+    }
+
+    fun unprotectSessionMedia(mediaIds: Set<String>) {
+        if (mediaIds.isEmpty()) return
+        sessionProtectedMediaIds.removeAll(mediaIds)
+    }
+
+    fun clearSavedSessionMedia(mediaIds: Set<String>, vaultId: VaultId? = currentVault) {
+        if (mediaIds.isEmpty()) return
+        sessionProtectedMediaIds.removeAll(mediaIds)
+        val targetVault = vaultId ?: return
+        getMediaRepository(targetVault).clearPendingSessionImports(mediaIds)
+    }
+
+    fun cleanupVaultOrphans(
+        vaultId: VaultId,
+        dek: ByteArray,
+        olderThanMs: Long = EncryptedMediaRepository.ORPHAN_AGE_THRESHOLD_MS
+    ): Int {
+        val diaryRepo = getDiaryRepository(vaultId)
+        val mediaRepo = getMediaRepository(vaultId)
+        val protectedIds = sessionProtectedMediaIds.toSet()
+        val forcedOrphans = mediaRepo.loadPendingSessionImports().keys - protectedIds
+        return diaryRepo.cleanupOrphanMedia(
+            dek = dek,
+            mediaRepo = mediaRepo,
+            olderThanMs = olderThanMs,
+            processStartTimeMs = processStartTimeMs,
+            protectedMediaIds = protectedIds,
+            forcedOrphanIds = forcedOrphans
+        )
+    }
+
+    fun cleanupActiveVaultOrphans(
+        dek: ByteArray,
+        olderThanMs: Long = EncryptedMediaRepository.ORPHAN_AGE_THRESHOLD_MS
+    ): Int {
+        val vault = currentVault ?: throw IllegalStateException("No active vault unlocked")
+        return cleanupVaultOrphans(vault, dek, olderThanMs)
+    }
+
     fun cleanupStaleTempDirs(): Long = backupEngine.cleanupStaleTempDirs()
 
     private fun runUnlockMaintenance(vaultId: VaultId, session: VaultSession) {
         backupEngine.cleanupStaleTempDirs()
         session.useDek { dek ->
             val diaryRepo = getDiaryRepository(vaultId)
-            val mediaRepo = getMediaRepository(vaultId)
             val report = diaryRepo.scanAndRecover(dek, dekVerified = true)
             lastRecoveryReport = report
-            diaryRepo.cleanupOrphanMedia(dek, mediaRepo)
+            cleanupVaultOrphans(vaultId, dek)
         }
     }
 
@@ -433,6 +487,7 @@ class VaultManager(
      */
     suspend fun clearAllData() = withContext(dispatcher) {
         lock()
+        sessionProtectedMediaIds.clear()
         mutexV1.withLock { envelopeV1.shred() }
         mutexV2.withLock { envelopeV2.shred() }
         wrongPinCounter.clear()

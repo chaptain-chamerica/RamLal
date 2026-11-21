@@ -307,5 +307,93 @@ class EncryptedMediaRepositoryTest {
         assertEquals(2, hardFailAttempts)
         assertTrue(failingRepo.exists("m_always_fail"))
     }
+
+    @Test
+    fun cleanupOrphans_protectsActiveImportTmpAndLkmFiles() {
+        mediaRepository.ensureDirs()
+        val activeId = "med_active_streaming"
+        val staleId = "med_stale_abandoned"
+        val activeTmp = File(mediaRepository.mediaDir, "$activeId.lkm.tmp").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val staleTmp = File(mediaRepository.mediaDir, "$staleId.lkm.tmp").apply { writeBytes(byteArrayOf(4, 5, 6)) }
+
+        mediaRepository.importMediaBytes(staleId, "stale".toByteArray(), testDek)
+        mediaRepository.getMediaFile(staleId).setLastModified(fakeCurrentTime - 60_000L)
+
+        var cleanedDuringActiveImport = -1
+        mediaRepository.runWithActiveImportForTest(activeId) {
+            assertTrue(mediaRepository.isImportActive(activeId))
+            cleanedDuringActiveImport = mediaRepository.cleanupOrphans(
+                referencedMediaIds = emptySet(),
+                olderThanMs = 0L
+            )
+            assertTrue("Active import .tmp must never be deleted by concurrent cleanup", activeTmp.exists())
+        }
+        assertFalse(mediaRepository.isImportActive(activeId))
+        assertFalse("Abandoned .tmp must be deleted when not active", staleTmp.exists())
+        assertEquals(1, cleanedDuringActiveImport)
+    }
+
+    @Test
+    fun pendingSessionImports_corruptJsonSafelyIgnored_andPrunedOnClear() {
+        mediaRepository.pendingSessionImportsFile.writeText("{corrupt json !!! truncated")
+        assertTrue(
+            "Corrupt pending_session_imports.json must safely yield empty map",
+            mediaRepository.loadPendingSessionImports().isEmpty()
+        )
+
+        mediaRepository.recordPendingSessionImport("med_p1")
+        mediaRepository.recordPendingSessionImport("med_p2")
+        val loaded = mediaRepository.loadPendingSessionImports()
+        assertEquals(setOf("med_p1", "med_p2"), loaded.keys)
+
+        mediaRepository.clearPendingSessionImports(setOf("med_p1"))
+        assertEquals(setOf("med_p2"), mediaRepository.loadPendingSessionImports().keys)
+
+        mediaRepository.clearPendingSessionImports(setOf("med_p2"))
+        assertFalse(mediaRepository.pendingSessionImportsFile.exists())
+    }
+
+    @Test
+    fun cleanupOrphans_processStartRuleDeletesPreProcessImmediately_andRespectsUndecodableGuard() {
+        val preProcessOrphan = "pre_proc_orphan"
+        val inProcessProtected = "in_proc_protected"
+        val forcedPendingKill = "forced_pending_kill"
+
+        mediaRepository.importMediaBytes(preProcessOrphan, "pre".toByteArray(), testDek)
+        mediaRepository.importMediaBytes(inProcessProtected, "prot".toByteArray(), testDek)
+        mediaRepository.importMediaBytes(forcedPendingKill, "kill".toByteArray(), testDek)
+
+        val processStart = fakeCurrentTime
+        // Only 10 seconds old (well under 24h), yet before processStart
+        mediaRepository.getMediaFile(preProcessOrphan).setLastModified(processStart - 10_000L)
+        // Imported after processStart
+        mediaRepository.getMediaFile(inProcessProtected).setLastModified(processStart + 5_000L)
+        mediaRepository.getMediaFile(forcedPendingKill).setLastModified(processStart + 5_000L)
+
+        // Undecodable guard must still block deletion of un-tracked media
+        val blockedCount = mediaRepository.cleanupOrphans(
+            referencedMediaIds = emptySet(),
+            hasUndecodableOrQuarantined = true,
+            processStartTimeMs = processStart,
+            protectedMediaIds = setOf(inProcessProtected),
+            forcedOrphanIds = setOf(forcedPendingKill)
+        )
+        assertEquals(0, blockedCount)
+        assertTrue(mediaRepository.exists(preProcessOrphan))
+        assertTrue(mediaRepository.exists(forcedPendingKill))
+
+        // Without undecodable blocker, preProcessOrphan + forcedPendingKill delete immediately while inProcessProtected stays
+        val cleaned = mediaRepository.cleanupOrphans(
+            referencedMediaIds = emptySet(),
+            hasUndecodableOrQuarantined = false,
+            processStartTimeMs = processStart,
+            protectedMediaIds = setOf(inProcessProtected),
+            forcedOrphanIds = setOf(forcedPendingKill)
+        )
+        assertEquals(2, cleaned)
+        assertFalse(mediaRepository.exists(preProcessOrphan))
+        assertFalse(mediaRepository.exists(forcedPendingKill))
+        assertTrue(mediaRepository.exists(inProcessProtected))
+    }
 }
 

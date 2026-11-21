@@ -122,12 +122,12 @@ fun WorkspaceScreen(vm: AppViewModel) {
     var spoilerUnlockPrompt by remember { mutableStateOf<SpanStyle.Spoiler?>(null) }
     var recording by remember { mutableStateOf(false) }
 
-    val initialMediaIds = remember(initial?.id) {
+    val initialMediaIds = remember {
         collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
     }
-    var hasSavedDiary by remember(initial?.id) { mutableStateOf(initial != null) }
-    var lastSavedMediaIds by remember(initial?.id) { mutableStateOf(initialMediaIds) }
-    val sessionImportedMediaIds = remember(initial?.id) { mutableStateListOf<String>() }
+    var hasSavedDiary by remember { mutableStateOf(initial != null) }
+    var lastSavedMediaIds by remember { mutableStateOf(initialMediaIds) }
+    val sessionImportedMediaIds = remember { mutableStateListOf<String>() }
     var showUnsavedMediaExitDialog by remember { mutableStateOf(false) }
 
     var importingItem by remember { mutableStateOf<ImportingItem?>(null) }
@@ -137,6 +137,15 @@ fun WorkspaceScreen(vm: AppViewModel) {
     val activeImportToken = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     var runningImportToken by remember { mutableStateOf(0L) }
     val workspaceContext = androidx.compose.ui.platform.LocalContext.current
+
+    fun cleanupUnsavedSessionMedia() {
+        cleanupAbandonedSessionMedia(
+            sessionImportedMediaIds = sessionImportedMediaIds,
+            savedMediaIds = lastSavedMediaIds,
+            onCleanup = { discarded -> vm.cleanupUnusedSessionMedia(discarded) }
+        )
+    }
+    val currentCleanupUnsavedSessionMedia by rememberUpdatedState { cleanupUnsavedSessionMedia() }
 
     fun cancelActiveImport(showBanner: Boolean = false) {
         activeCancelFlag.get()?.set(true)
@@ -166,6 +175,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
         onDispose {
             activeCancelFlag.get()?.set(true)
             activeImportToken.incrementAndGet()
+            currentCleanupUnsavedSessionMedia()
         }
     }
 
@@ -196,6 +206,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
         defaultHeight: Float,
         uri: android.net.Uri,
         failMessage: String,
+        extractMediaId: (R) -> String?,
         performImport: suspend (
             sx: Float,
             sy: Float,
@@ -263,14 +274,17 @@ fun WorkspaceScreen(vm: AppViewModel) {
         scope.launch {
             try {
                 val result = performImport(sx, sy, { cancelFlag.get() }, onPhase, onProgress)
-                if (cancelFlag.get() || activeImportToken.get() != token) {
-                    return@launch
-                }
-                if (result != null) {
-                    onImported(result)
-                } else {
-                    vm.showStatus(failMessage, BannerKind.ERROR)
-                }
+                handleCompletedImportOutcome(
+                    result = result,
+                    cancelled = cancelFlag.get() || activeImportToken.get() != token,
+                    failMessage = failMessage,
+                    extractMediaId = extractMediaId,
+                    onImported = onImported,
+                    onCleanupCancelledMedia = { orphanId ->
+                        vm.cleanupUnusedSessionMedia(setOf(orphanId))
+                    },
+                    onFailStatus = { msg -> vm.showStatus(msg, BannerKind.ERROR) }
+                )
             } catch (_: ImportCancelledException) {
                 if (activeImportToken.get() == token) {
                     vm.showStatus("Import cancelled", BannerKind.INFO)
@@ -303,6 +317,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 defaultHeight = 120f,
                 uri = uri,
                 failMessage = "Could not import image.",
+                extractMediaId = { it.id },
                 performImport = { sx, sy, isCancelled, onPhase, onProgress ->
                     vm.importImageUri(uri, sx, sy, isCancelled, onPhase, onProgress)
                 },
@@ -325,6 +340,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 defaultHeight = 150f,
                 uri = uri,
                 failMessage = "Could not import video.",
+                extractMediaId = { it.source.ifBlank { it.id } },
                 performImport = { sx, sy, isCancelled, onPhase, onProgress ->
                     vm.importVideoUri(uri, sx, sy, isCancelled, onPhase, onProgress)
                 },
@@ -347,6 +363,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 defaultHeight = 56f,
                 uri = uri,
                 failMessage = "Could not import audio.",
+                extractMediaId = { it.audioUri ?: it.id },
                 performImport = { sx, sy, isCancelled, onPhase, onProgress ->
                     vm.importAudioUri(uri, sx, sy, isCancelled, onPhase, onProgress)
                 },
@@ -419,11 +436,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
     }
 
     fun exitWorkspace() {
-        val discardedMediaIds = sessionImportedMediaIds.toSet() - lastSavedMediaIds
-        if (discardedMediaIds.isNotEmpty()) {
-            vm.cleanupUnusedSessionMedia(discardedMediaIds)
-        }
-        sessionImportedMediaIds.clear()
+        cleanupUnsavedSessionMedia()
         vm.navigateTo(Route.HOME)
     }
 
@@ -1488,6 +1501,41 @@ internal fun collectCanvasMediaIds(
         (v.source.takeIf { it.isNotBlank() } ?: v.id.takeIf { it.isNotBlank() })?.let { ids.add(it) }
     }
     return ids
+}
+
+internal fun cleanupAbandonedSessionMedia(
+    sessionImportedMediaIds: MutableCollection<String>,
+    savedMediaIds: Set<String>,
+    onCleanup: (Set<String>) -> Unit,
+): Set<String> {
+    val discardedMediaIds = sessionImportedMediaIds.toSet() - savedMediaIds
+    sessionImportedMediaIds.clear()
+    if (discardedMediaIds.isNotEmpty()) {
+        onCleanup(discardedMediaIds)
+    }
+    return discardedMediaIds
+}
+
+internal fun <R> handleCompletedImportOutcome(
+    result: R?,
+    cancelled: Boolean,
+    failMessage: String,
+    extractMediaId: (R) -> String?,
+    onImported: (R) -> Unit,
+    onCleanupCancelledMedia: (String) -> Unit,
+    onFailStatus: (String) -> Unit,
+) {
+    if (cancelled) {
+        if (result != null) {
+            extractMediaId(result)?.takeIf { it.isNotBlank() }?.let(onCleanupCancelledMedia)
+        }
+        return
+    }
+    if (result != null) {
+        onImported(result)
+    } else {
+        onFailStatus(failMessage)
+    }
 }
 
 internal suspend fun <T> importPfpForSession(

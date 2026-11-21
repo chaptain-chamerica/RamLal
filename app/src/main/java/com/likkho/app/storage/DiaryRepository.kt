@@ -525,13 +525,19 @@ class DiaryRepository(
     fun cleanupOrphanMedia(
         dek: ByteArray,
         mediaRepo: EncryptedMediaRepository,
-        olderThanMs: Long = EncryptedMediaRepository.ORPHAN_AGE_THRESHOLD_MS
+        olderThanMs: Long = EncryptedMediaRepository.ORPHAN_AGE_THRESHOLD_MS,
+        processStartTimeMs: Long = 0L,
+        protectedMediaIds: Set<String> = emptySet(),
+        forcedOrphanIds: Set<String> = emptySet()
     ): Int {
         val scan = scanReferencedMediaIds(dek)
         return mediaRepo.cleanupOrphans(
             referencedMediaIds = scan.referencedIds,
             hasUndecodableOrQuarantined = scan.hasUndecodableOrQuarantined,
-            olderThanMs = olderThanMs
+            olderThanMs = olderThanMs,
+            processStartTimeMs = processStartTimeMs,
+            protectedMediaIds = protectedMediaIds,
+            forcedOrphanIds = forcedOrphanIds
         )
     }
 

@@ -53,11 +53,24 @@ class RealFeatureHooks(
 ) : FeatureHooks {
 
     private val writeMutex = Mutex()
-    private val backupDir = File(baseStorageDir, "backups").apply { mkdirs() }
+    val backupRootDir = File(baseStorageDir, "backups").apply { mkdirs() }
     val shareCacheDir = File(cacheStorageDir, "shares")
     val exportCacheDir = File(cacheStorageDir, "exports")
     private val legacyShareDir = File(baseStorageDir, "shares")
     private val legacyExportDir = File(baseStorageDir, "exports")
+
+    fun backupDirFor(vaultId: VaultId): File = File(backupRootDir, vaultId.backupDirName)
+
+    private fun activeBackupDir(): File {
+        val vaultId = vaultManager.currentVault ?: VaultId.PRIMARY
+        return backupDirFor(vaultId)
+    }
+
+    fun listLegacySharedBackupFiles(): List<File> {
+        if (!backupRootDir.exists()) return emptyList()
+        return (backupRootDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray())
+            .sortedByDescending { it.lastModified() }
+    }
 
     @Volatile
     private var lastUsedPassphrase: String? = null
@@ -142,10 +155,8 @@ class RealFeatureHooks(
             startupOrphanCleanupDone = true
             runCatching {
                 vaultManager.withActiveDek { dek ->
-                    val repo = vaultManager.activeDiaryRepository()
-                    val mediaRepo = vaultManager.activeMediaRepository()
                     val countBefore = measureManagedStorageBytes()
-                    repo.cleanupOrphanMedia(dek, mediaRepo)
+                    vaultManager.cleanupActiveVaultOrphans(dek)
                     val countAfter = measureManagedStorageBytes()
                     freed += (countBefore - countAfter).coerceAtLeast(0L)
                 }
@@ -154,21 +165,642 @@ class RealFeatureHooks(
         freed
     }
 
-    override suspend fun freeUpSpace(): Long = withContext(dispatcher) {
-        writeMutex.withLock {
-            val beforeBytes = measureManagedStorageBytes()
-            cleanupExportAndShareCaches()
-            vaultManager.cleanupStaleTempDirs()
-            vaultManager.backupEngine.pruneOldBackups(backupDir, keepCount = 1)
-            if (vaultManager.isUnlocked) {
-                vaultManager.withActiveDek { dek ->
-                    val diaryRepo = vaultManager.activeDiaryRepository()
-                    val mediaRepo = vaultManager.activeMediaRepository()
-                    diaryRepo.cleanupOrphanMedia(dek, mediaRepo, olderThanMs = 0L)
+    override suspend fun freeUpSpace(): Long {
+        val preview = previewFreeUpSpace()
+        return executeFreeUpSpace(preview)
+    }
+
+    private fun canonicalPathKey(file: File): String =
+        runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+
+    private fun collectFilesRecursively(dir: File, out: MutableList<File>) {
+        if (!dir.exists()) return
+        if (dir.isFile) {
+            out.add(dir)
+            return
+        }
+        val children = dir.listFiles() ?: return
+        for (child in children) {
+            if (child.isFile) {
+                out.add(child)
+            } else if (child.isDirectory) {
+                collectFilesRecursively(child, out)
+            }
+        }
+    }
+
+    private fun pruneEmptySubdirectories(root: File) {
+        if (!root.exists() || !root.isDirectory) return
+        val children = root.listFiles() ?: return
+        for (child in children) {
+            if (child.isDirectory) {
+                pruneEmptySubdirectories(child)
+                if (child.listFiles()?.isEmpty() == true) {
+                    child.delete()
                 }
             }
-            val afterBytes = measureManagedStorageBytes()
-            (beforeBytes - afterBytes).coerceAtLeast(0L)
+        }
+    }
+
+    private fun collectTemporaryPreviewItems(vaultId: VaultId?): List<FreeUpPreviewItem> {
+        val items = mutableListOf<FreeUpPreviewItem>()
+        val seenPaths = HashSet<String>()
+
+        fun addTempFile(file: File, label: String) {
+            if (!file.exists() || !file.isFile) return
+            val key = canonicalPathKey(file)
+            if (!seenPaths.add(key)) return
+            items.add(
+                FreeUpPreviewItem(
+                    id = key,
+                    name = file.name,
+                    categoryLabel = label,
+                    type = FreeUpItemType.TEMPORARY_FILE,
+                    sizeBytes = file.length(),
+                    modifiedAtMs = file.lastModified(),
+                    filePath = file.absolutePath
+                )
+            )
+        }
+
+        val cacheRoots = listOf(
+            exportCacheDir to "Export cache",
+            shareCacheDir to "Share cache",
+            legacyExportDir to "Legacy export",
+            legacyShareDir to "Legacy share"
+        )
+        for ((dir, label) in cacheRoots) {
+            val files = mutableListOf<File>()
+            collectFilesRecursively(dir, files)
+            for (f in files) addTempFile(f, label)
+        }
+
+        if (!vaultManager.backupEngine.isOperationActive()) {
+            val tmpFiles = mutableListOf<File>()
+            collectFilesRecursively(vaultManager.backupEngine.tempDir, tmpFiles)
+            for (f in tmpFiles) addTempFile(f, "Temp stage")
+        }
+
+        if (vaultId != null) {
+            val bDir = backupDirFor(vaultId)
+            if (bDir.exists() && !vaultManager.backupEngine.isOperationActive()) {
+                (bDir.listFiles { f ->
+                    f.isFile && (f.name.endsWith(".tmp") || f.name.endsWith(".bak"))
+                } ?: emptyArray()).forEach { addTempFile(it, "Incomplete backup") }
+            }
+
+            val mediaRepo = vaultManager.getMediaRepository(vaultId)
+            if (mediaRepo.mediaDir.exists()) {
+                (mediaRepo.mediaDir.listFiles { f -> f.isFile && f.name.endsWith(".tmp") } ?: emptyArray())
+                    .forEach { tmp ->
+                        val tmpId = tmp.name
+                            .removeSuffix(".${com.likkho.app.storage.EncryptedMediaRepository.MEDIA_EXTENSION}.tmp")
+                            .removeSuffix(".tmp")
+                        if (!mediaRepo.isImportActive(tmpId)) {
+                            addTempFile(tmp, "Incomplete import")
+                        }
+                    }
+            }
+
+            val diaryRepo = vaultManager.getDiaryRepository(vaultId)
+            if (diaryRepo.diariesDir.exists()) {
+                (diaryRepo.diariesDir.listFiles { f -> f.isFile && f.name.endsWith(".tmp") } ?: emptyArray())
+                    .forEach { addTempFile(it, "Temp diary") }
+            }
+            if (diaryRepo.quarantineDir.exists()) {
+                (diaryRepo.quarantineDir.listFiles { f -> f.isFile && f.name.endsWith(".tmp") } ?: emptyArray())
+                    .forEach { addTempFile(it, "Temp file") }
+            }
+        }
+
+        return items.sortedByDescending { it.modifiedAtMs }
+    }
+
+    private fun buildFreeUpPreview(
+        items: List<FreeUpPreviewItem>,
+        keptBackupName: String?
+    ): FreeUpPreview {
+        val oldBackups = items.filter { it.type == FreeUpItemType.OLD_BACKUP }
+        val unusedMedia = items.filter { it.type == FreeUpItemType.UNUSED_MEDIA }
+        val tempFiles = items.filter { it.type == FreeUpItemType.TEMPORARY_FILE }
+
+        val categories = buildList {
+            if (oldBackups.isNotEmpty()) {
+                add(
+                    FreeUpCategorySummary(
+                        type = FreeUpItemType.OLD_BACKUP,
+                        title = "Old backups",
+                        count = oldBackups.size,
+                        bytes = oldBackups.sumOf { it.sizeBytes },
+                        items = oldBackups
+                    )
+                )
+            }
+            if (unusedMedia.isNotEmpty()) {
+                add(
+                    FreeUpCategorySummary(
+                        type = FreeUpItemType.UNUSED_MEDIA,
+                        title = "Unused media",
+                        count = unusedMedia.size,
+                        bytes = unusedMedia.sumOf { it.sizeBytes },
+                        items = unusedMedia
+                    )
+                )
+            }
+            if (tempFiles.isNotEmpty()) {
+                add(
+                    FreeUpCategorySummary(
+                        type = FreeUpItemType.TEMPORARY_FILE,
+                        title = "Temporary files",
+                        count = tempFiles.size,
+                        bytes = tempFiles.sumOf { it.sizeBytes },
+                        items = tempFiles
+                    )
+                )
+            }
+        }
+
+        return FreeUpPreview(
+            items = items,
+            categories = categories,
+            deletedBackupNames = oldBackups.map { it.name },
+            keptBackupName = keptBackupName,
+            unusedMediaCount = unusedMedia.size,
+            unusedMediaBytes = unusedMedia.sumOf { it.sizeBytes },
+            temporaryFilesCount = tempFiles.size,
+            temporaryFilesBytes = tempFiles.sumOf { it.sizeBytes },
+            totalBytes = items.sumOf { it.sizeBytes }
+        )
+    }
+
+    private data class EligibleFreeUpSnapshot(
+        val eligibleItems: List<FreeUpPreviewItem>,
+        val keptBackupName: String?,
+        val keptBackupPath: String?,
+        val referencedIds: Set<String>,
+        val protectedIds: Set<String>,
+        val hasUndecodableOrQuarantined: Boolean,
+        val orphanCandidateIds: Set<String>
+    )
+
+    private fun collectEligibleFreeUpSnapshot(vaultId: VaultId?, dek: ByteArray?): EligibleFreeUpSnapshot {
+        val eligibleItems = mutableListOf<FreeUpPreviewItem>()
+        var keptBackupName: String? = null
+        var keptBackupPath: String? = null
+        var referencedIds: Set<String> = emptySet()
+        var protectedIds: Set<String> = emptySet()
+        var hasUndecodable = false
+        var candidateIds: Set<String> = emptySet()
+
+        if (vaultId != null && dek != null) {
+            val vBackupDir = backupDirFor(vaultId)
+            val lkbFiles = if (vBackupDir.exists()) {
+                (vBackupDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray())
+                    .sortedWith(compareByDescending<File> { it.lastModified() }.thenByDescending { it.name })
+            } else {
+                emptyList()
+            }
+            val latest = lkbFiles.firstOrNull()
+            keptBackupName = latest?.name
+            keptBackupPath = latest?.let { canonicalPathKey(it) }
+            if (!vaultManager.backupEngine.isOperationActive()) {
+                for (oldFile in lkbFiles.drop(1)) {
+                    eligibleItems.add(
+                        FreeUpPreviewItem(
+                            id = oldFile.name,
+                            name = oldFile.name,
+                            categoryLabel = "Old backup",
+                            type = FreeUpItemType.OLD_BACKUP,
+                            sizeBytes = oldFile.length(),
+                            modifiedAtMs = oldFile.lastModified(),
+                            filePath = oldFile.absolutePath
+                        )
+                    )
+                }
+            }
+
+            val diaryRepo = vaultManager.getDiaryRepository(vaultId)
+            val mediaRepo = vaultManager.getMediaRepository(vaultId)
+            val scan = diaryRepo.scanReferencedMediaIds(dek)
+            referencedIds = scan.referencedIds
+            hasUndecodable = scan.hasUndecodableOrQuarantined
+            protectedIds = vaultManager.currentSessionProtectedMediaIds()
+            candidateIds = mediaRepo.loadOrphanCandidates().keys
+
+            val mediaFiles = if (mediaRepo.mediaDir.exists()) {
+                (mediaRepo.mediaDir.listFiles { f ->
+                    f.isFile && f.name.endsWith(".${com.likkho.app.storage.EncryptedMediaRepository.MEDIA_EXTENSION}")
+                } ?: emptyArray()).sortedByDescending { it.lastModified() }
+            } else {
+                emptyList()
+            }
+
+            for (mFile in mediaFiles) {
+                val mId = mFile.name.removeSuffix(".${com.likkho.app.storage.EncryptedMediaRepository.MEDIA_EXTENSION}")
+                val isEligible = !referencedIds.contains(mId) &&
+                    !protectedIds.contains(mId) &&
+                    !mediaRepo.isImportActive(mId) &&
+                    (!hasUndecodable || candidateIds.contains(mId))
+                if (isEligible) {
+                    eligibleItems.add(
+                        FreeUpPreviewItem(
+                            id = mId,
+                            name = "Unused media (${mId.take(10)})",
+                            categoryLabel = "Unused media",
+                            type = FreeUpItemType.UNUSED_MEDIA,
+                            sizeBytes = mFile.length(),
+                            modifiedAtMs = mFile.lastModified(),
+                            filePath = mFile.absolutePath
+                        )
+                    )
+                }
+            }
+        }
+
+        eligibleItems.addAll(collectTemporaryPreviewItems(vaultId))
+        return EligibleFreeUpSnapshot(
+            eligibleItems = eligibleItems,
+            keptBackupName = keptBackupName,
+            keptBackupPath = keptBackupPath,
+            referencedIds = referencedIds,
+            protectedIds = protectedIds,
+            hasUndecodableOrQuarantined = hasUndecodable,
+            orphanCandidateIds = candidateIds
+        )
+    }
+
+    private fun runFreeUpPlan(preview: FreeUpPreview?, dryRun: Boolean): Pair<FreeUpPreview, Long> {
+        val vaultId = vaultManager.currentVault
+        val snapshot = if (vaultId != null && vaultManager.isUnlocked) {
+            vaultManager.withActiveDek { dek ->
+                collectEligibleFreeUpSnapshot(vaultId, dek)
+            }
+        } else {
+            collectEligibleFreeUpSnapshot(null, null)
+        }
+
+        if (dryRun) {
+            return buildFreeUpPreview(snapshot.eligibleItems, snapshot.keptBackupName) to 0L
+        }
+
+        val targetPreview = preview ?: buildFreeUpPreview(snapshot.eligibleItems, snapshot.keptBackupName)
+        val eligibleByPath = snapshot.eligibleItems.associateBy { canonicalPathKey(File(it.filePath)) }
+        val mediaRepo = vaultId?.let { vaultManager.getMediaRepository(it) }
+        var freedBytes = 0L
+
+        for (item in targetPreview.items) {
+            val file = File(item.filePath)
+            if (!file.exists() || !file.isFile) continue
+            val pathKey = canonicalPathKey(file)
+            if (!eligibleByPath.containsKey(pathKey)) continue
+
+            when (item.type) {
+                FreeUpItemType.OLD_BACKUP -> {
+                    if (vaultManager.backupEngine.isOperationActive()) continue
+                    if (pathKey == snapshot.keptBackupPath) continue
+                    val len = file.length()
+                    if (file.delete()) {
+                        freedBytes += len
+                    }
+                }
+                FreeUpItemType.UNUSED_MEDIA -> {
+                    val repo = mediaRepo ?: continue
+                    val liveProtected = vaultManager.currentSessionProtectedMediaIds()
+                    val stillEligible = !snapshot.referencedIds.contains(item.id) &&
+                        !liveProtected.contains(item.id) &&
+                        !repo.isImportActive(item.id) &&
+                        (!snapshot.hasUndecodableOrQuarantined || snapshot.orphanCandidateIds.contains(item.id))
+                    if (!stillEligible) continue
+                    val len = file.length()
+                    if (repo.deleteMedia(item.id)) {
+                        freedBytes += len
+                    }
+                }
+                FreeUpItemType.TEMPORARY_FILE -> {
+                    if (pathKey.startsWith(canonicalPathKey(vaultManager.backupEngine.tempDir)) &&
+                        vaultManager.backupEngine.isOperationActive()
+                    ) {
+                        continue
+                    }
+                    val len = file.length()
+                    if (file.delete()) {
+                        freedBytes += len
+                    }
+                }
+            }
+        }
+
+        // Prune now-empty temporary directories without touching active vault media/backups
+        pruneEmptySubdirectories(exportCacheDir)
+        pruneEmptySubdirectories(shareCacheDir)
+        pruneEmptySubdirectories(legacyExportDir)
+        if (legacyExportDir.exists() && legacyExportDir.listFiles()?.isEmpty() == true) legacyExportDir.delete()
+        pruneEmptySubdirectories(legacyShareDir)
+        if (legacyShareDir.exists() && legacyShareDir.listFiles()?.isEmpty() == true) legacyShareDir.delete()
+        if (!vaultManager.backupEngine.isOperationActive()) {
+            pruneEmptySubdirectories(vaultManager.backupEngine.tempDir)
+        }
+
+        return targetPreview to freedBytes
+    }
+
+    override suspend fun previewFreeUpSpace(): FreeUpPreview = withContext(dispatcher) {
+        writeMutex.withLock {
+            runFreeUpPlan(preview = null, dryRun = true).first
+        }
+    }
+
+    override suspend fun executeFreeUpSpace(preview: FreeUpPreview): Long = withContext(dispatcher) {
+        writeMutex.withLock {
+            runFreeUpPlan(preview = preview, dryRun = false).second
+        }
+    }
+
+    override suspend fun deleteDamagedCopies(): Long = withContext(dispatcher) {
+        writeMutex.withLock {
+            val vaultId = vaultManager.currentVault ?: return@withLock 0L
+            if (!vaultManager.isUnlocked) return@withLock 0L
+            val qDir = vaultManager.getDiaryRepository(vaultId).quarantineDir
+            if (!qDir.exists()) return@withLock 0L
+            var freed = 0L
+            val children = qDir.listFiles() ?: return@withLock 0L
+            for (child in children) {
+                val sz = com.likkho.app.storage.StorageMetrics.directorySizeBytes(child)
+                if (child.deleteRecursively()) {
+                    freed += sz
+                }
+            }
+            freed
+        }
+    }
+
+    override suspend fun deleteOlderSharedBackups(fileNames: List<String>): Long = withContext(dispatcher) {
+        if (fileNames.isEmpty()) return@withContext 0L
+        writeMutex.withLock {
+            if (!backupRootDir.exists()) return@withLock 0L
+            val allowedNames = fileNames.toSet()
+            var freed = 0L
+            val rootFiles = backupRootDir.listFiles { f ->
+                f.isFile && f.name.endsWith(".lkb") && allowedNames.contains(f.name)
+            } ?: return@withLock 0L
+            for (f in rootFiles) {
+                val len = f.length()
+                if (f.delete()) {
+                    freed += len
+                }
+            }
+            freed
+        }
+    }
+
+    override suspend fun getStorageReport(): StorageReport = withContext(dispatcher) {
+        val vaultId = vaultManager.currentVault
+        if (vaultId == null || !vaultManager.isUnlocked) {
+            return@withContext StorageReport()
+        }
+
+        vaultManager.withActiveDek { dek ->
+            val diaryRepo = vaultManager.activeDiaryRepository()
+            val mediaRepo = vaultManager.activeMediaRepository()
+            val scan = diaryRepo.scanReferencedMediaIds(dek)
+            val protectedIds = vaultManager.currentSessionProtectedMediaIds()
+            val candidateIds = mediaRepo.loadOrphanCandidates().keys
+
+            val diaryItems = mutableListOf<StorageItemInfo>()
+            val photoItems = mutableListOf<StorageItemInfo>()
+            val audioItems = mutableListOf<StorageItemInfo>()
+            val videoItems = mutableListOf<StorageItemInfo>()
+            val seenMediaIds = HashSet<String>()
+            var unreadableCount = 0
+
+            val lkdFiles = if (diaryRepo.diariesDir.exists()) {
+                (diaryRepo.diariesDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray())
+                    .sortedByDescending { it.lastModified() }
+            } else {
+                emptyList()
+            }
+
+            for (lkdFile in lkdFiles) {
+                val diaryId = lkdFile.name.removeSuffix(".lkd")
+                val decodedRecord = runCatching {
+                    com.likkho.app.storage.DiaryFileCodec.decode(lkdFile.readBytes(), dek, diaryId).record
+                }.getOrNull()
+
+                if (decodedRecord == null) {
+                    unreadableCount++
+                    diaryItems.add(
+                        StorageItemInfo(
+                            id = diaryId,
+                            name = "Unreadable Diary",
+                            category = StorageCategory.DIARIES,
+                            sizeBytes = lkdFile.length(),
+                            modifiedAtMs = lkdFile.lastModified()
+                        )
+                    )
+                    continue
+                }
+
+                val diaryTs = decodedRecord.updatedAt.takeIf { it > 0L } ?: lkdFile.lastModified()
+                diaryItems.add(
+                    StorageItemInfo(
+                        id = decodedRecord.id,
+                        name = decodedRecord.heading.ifBlank { "Untitled Diary" },
+                        category = StorageCategory.DIARIES,
+                        sizeBytes = lkdFile.length(),
+                        modifiedAtMs = diaryTs
+                    )
+                )
+
+                fun addMedia(mediaId: String?, category: StorageCategory, label: String, itemTs: Long) {
+                    if (mediaId.isNullOrBlank() || !seenMediaIds.add(mediaId)) return
+                    val mFile = mediaRepo.getMediaFile(mediaId)
+                    if (!mFile.exists() || !mFile.isFile) return
+                    val item = StorageItemInfo(
+                        id = mediaId,
+                        name = label,
+                        category = category,
+                        sizeBytes = mFile.length(),
+                        modifiedAtMs = mFile.lastModified().takeIf { it > 0L } ?: itemTs
+                    )
+                    when (category) {
+                        StorageCategory.PHOTOS -> photoItems.add(item)
+                        StorageCategory.AUDIO -> audioItems.add(item)
+                        StorageCategory.VIDEOS -> videoItems.add(item)
+                        else -> Unit
+                    }
+                }
+
+                for (img in decodedRecord.images) {
+                    addMedia(img.mediaId, StorageCategory.PHOTOS, "Photo", diaryTs)
+                }
+                addMedia(decodedRecord.pfp?.sourceMediaId, StorageCategory.PHOTOS, "Profile Photo", diaryTs)
+                addMedia(decodedRecord.background?.mediaId, StorageCategory.PHOTOS, "Background Photo", diaryTs)
+                for (aud in decodedRecord.audios) {
+                    addMedia(aud.mediaId, StorageCategory.AUDIO, aud.name.ifBlank { "Audio" }, diaryTs)
+                }
+                for (vid in decodedRecord.videos) {
+                    addMedia(vid.mediaId, StorageCategory.VIDEOS, vid.name.ifBlank { "Video" }, diaryTs)
+                }
+            }
+
+            // Unused media (orphans belonging ONLY to active vault)
+            val unusedItems = mutableListOf<StorageItemInfo>()
+            val allMediaFiles = if (mediaRepo.mediaDir.exists()) {
+                (mediaRepo.mediaDir.listFiles { f ->
+                    f.isFile && f.name.endsWith(".${com.likkho.app.storage.EncryptedMediaRepository.MEDIA_EXTENSION}")
+                } ?: emptyArray()).sortedByDescending { it.lastModified() }
+            } else {
+                emptyList()
+            }
+            for (mFile in allMediaFiles) {
+                val mId = mFile.name.removeSuffix(".${com.likkho.app.storage.EncryptedMediaRepository.MEDIA_EXTENSION}")
+                if (seenMediaIds.contains(mId) || scan.referencedIds.contains(mId)) continue
+                if (protectedIds.contains(mId) || mediaRepo.isImportActive(mId)) continue
+                if (scan.hasUndecodableOrQuarantined && !candidateIds.contains(mId)) continue
+                unusedItems.add(
+                    StorageItemInfo(
+                        id = mId,
+                        name = "Unused media (${mId.take(10)})",
+                        category = StorageCategory.UNUSED_MEDIA,
+                        sizeBytes = mFile.length(),
+                        modifiedAtMs = mFile.lastModified()
+                    )
+                )
+            }
+
+            // Backups in active vault's folder ONLY
+            val vBackupDir = backupDirFor(vaultId)
+            val vaultBackups = if (vBackupDir.exists()) {
+                (vBackupDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray())
+                    .sortedWith(compareByDescending<File> { it.lastModified() }.thenByDescending { it.name })
+                    .map { f ->
+                        StorageItemInfo(
+                            id = f.name,
+                            name = f.name,
+                            category = StorageCategory.BACKUPS,
+                            sizeBytes = f.length(),
+                            modifiedAtMs = f.lastModified()
+                        )
+                    }
+            } else {
+                emptyList()
+            }
+
+            // Legacy shared root backups (read-only notice; never auto-deleted)
+            val olderBackupItems = listLegacySharedBackupFiles().map { f ->
+                StorageItemInfo(
+                    id = f.name,
+                    name = f.name,
+                    category = StorageCategory.OLDER_BACKUPS,
+                    sizeBytes = f.length(),
+                    modifiedAtMs = f.lastModified()
+                )
+            }
+
+            // Temporary files (global export/share caches + vaults/tmp + active vault temp)
+            val tempItems = collectTemporaryPreviewItems(vaultId).map { t ->
+                StorageItemInfo(
+                    id = t.id,
+                    name = t.name,
+                    category = StorageCategory.TEMPORARY,
+                    sizeBytes = t.sizeBytes,
+                    modifiedAtMs = t.modifiedAtMs,
+                    detail = t.categoryLabel
+                )
+            }
+
+            // Damaged diary copies in active vault quarantine/ ONLY
+            val quarantineItems = if (diaryRepo.quarantineDir.exists()) {
+                (diaryRepo.quarantineDir.listFiles { f -> f.isFile && f.name.endsWith(".lkd") } ?: emptyArray())
+                    .sortedByDescending { it.lastModified() }
+                    .map { f ->
+                        StorageItemInfo(
+                            id = f.name,
+                            name = "Damaged copy (${f.name.removeSuffix(".lkd")})",
+                            category = StorageCategory.DAMAGED_COPIES,
+                            sizeBytes = f.length(),
+                            modifiedAtMs = f.lastModified()
+                        )
+                    }
+            } else {
+                emptyList()
+            }
+
+            StorageReport(
+                diaries = StorageSection(
+                    category = StorageCategory.DIARIES,
+                    title = "Diaries",
+                    count = diaryItems.size,
+                    bytes = diaryItems.sumOf { it.sizeBytes },
+                    latestDateMs = diaryItems.maxOfOrNull { it.modifiedAtMs },
+                    items = diaryItems
+                ),
+                photos = StorageSection(
+                    category = StorageCategory.PHOTOS,
+                    title = "Photos",
+                    count = photoItems.size,
+                    bytes = photoItems.sumOf { it.sizeBytes },
+                    latestDateMs = photoItems.maxOfOrNull { it.modifiedAtMs },
+                    items = photoItems
+                ),
+                audio = StorageSection(
+                    category = StorageCategory.AUDIO,
+                    title = "Audio",
+                    count = audioItems.size,
+                    bytes = audioItems.sumOf { it.sizeBytes },
+                    latestDateMs = audioItems.maxOfOrNull { it.modifiedAtMs },
+                    items = audioItems
+                ),
+                videos = StorageSection(
+                    category = StorageCategory.VIDEOS,
+                    title = "Videos",
+                    count = videoItems.size,
+                    bytes = videoItems.sumOf { it.sizeBytes },
+                    latestDateMs = videoItems.maxOfOrNull { it.modifiedAtMs },
+                    items = videoItems
+                ),
+                backups = StorageSection(
+                    category = StorageCategory.BACKUPS,
+                    title = "Backups in app storage",
+                    count = vaultBackups.size,
+                    bytes = vaultBackups.sumOf { it.sizeBytes },
+                    latestDateMs = vaultBackups.maxOfOrNull { it.modifiedAtMs },
+                    items = vaultBackups
+                ),
+                olderBackups = StorageSection(
+                    category = StorageCategory.OLDER_BACKUPS,
+                    title = "Older backups",
+                    count = olderBackupItems.size,
+                    bytes = olderBackupItems.sumOf { it.sizeBytes },
+                    latestDateMs = olderBackupItems.maxOfOrNull { it.modifiedAtMs },
+                    items = olderBackupItems
+                ),
+                temporaryFiles = StorageSection(
+                    category = StorageCategory.TEMPORARY,
+                    title = "Temporary files",
+                    count = tempItems.size,
+                    bytes = tempItems.sumOf { it.sizeBytes },
+                    latestDateMs = tempItems.maxOfOrNull { it.modifiedAtMs },
+                    items = tempItems
+                ),
+                unusedMedia = StorageSection(
+                    category = StorageCategory.UNUSED_MEDIA,
+                    title = "Unused media",
+                    count = unusedItems.size,
+                    bytes = unusedItems.sumOf { it.sizeBytes },
+                    latestDateMs = unusedItems.maxOfOrNull { it.modifiedAtMs },
+                    items = unusedItems
+                ),
+                damagedCopies = StorageSection(
+                    category = StorageCategory.DAMAGED_COPIES,
+                    title = "Damaged diary copies",
+                    count = quarantineItems.size,
+                    bytes = quarantineItems.sumOf { it.sizeBytes },
+                    latestDateMs = quarantineItems.maxOfOrNull { it.modifiedAtMs },
+                    items = quarantineItems
+                ),
+                unreadableDiaryCount = unreadableCount
+            )
         }
     }
 
@@ -310,7 +942,7 @@ class RealFeatureHooks(
     override suspend fun clearAllData() {
         withContext(dispatcher) {
             vaultManager.clearAllData()
-            backupDir.deleteRecursively(); backupDir.mkdirs()
+            backupRootDir.deleteRecursively(); backupRootDir.mkdirs()
             cleanupExportAndShareCaches()
         }
     }
@@ -375,9 +1007,10 @@ class RealFeatureHooks(
         vaultManager.withActiveDek { dek ->
             val diaryRepo = vaultManager.activeDiaryRepository()
             val mediaRepo = vaultManager.activeMediaRepository()
-            var targetFile = File(backupDir, "backup_${System.currentTimeMillis()}.lkb")
+            val vaultBackupDir = activeBackupDir().apply { mkdirs() }
+            var targetFile = File(vaultBackupDir, "backup_${System.currentTimeMillis()}.lkb")
             if (targetFile.exists()) {
-                targetFile = File(backupDir, "backup_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(4)}.lkb")
+                targetFile = File(vaultBackupDir, "backup_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(4)}.lkb")
             }
             val res = vaultManager.backupEngine.createBackup(
                 targetFile = targetFile,
@@ -386,8 +1019,8 @@ class RealFeatureHooks(
                 mediaRepo = mediaRepo,
                 vaultDek = dek
             )
-            // Delete older backups ONLY AFTER the newly written backup passed full verification.
-            vaultManager.backupEngine.pruneOldBackups(backupDir, keepCount = 1, protectedFile = targetFile)
+            // Delete older backups ONLY in the active vault folder AFTER verification passes.
+            vaultManager.backupEngine.pruneOldBackups(vaultBackupDir, keepCount = 1, protectedFile = targetFile)
             BackupResult(failedMediaCount = res.failedMediaCount)
         }
     }
@@ -489,7 +1122,9 @@ class RealFeatureHooks(
     }
 
     private fun findLatestBackupFile(): File? {
-        return backupDir.listFiles { file -> file.extension == "lkb" }?.maxByOrNull { it.lastModified() }
+        val vaultBackupDir = activeBackupDir()
+        if (!vaultBackupDir.exists()) return null
+        return vaultBackupDir.listFiles { file -> file.isFile && file.extension == "lkb" }?.maxByOrNull { it.lastModified() }
     }
 
     // =========================================================================
@@ -523,9 +1158,13 @@ class RealFeatureHooks(
 
                         val currentIndex = repo.loadIndex(dek)
                         val indexMap = currentIndex.entries.associateBy { it.id }
+                        val savedMediaIds = mutableSetOf<String>()
                         for (log in snapshot) {
                             val existing = indexMap[log.id]
                             if (log.isContentLoaded) {
+                                savedMediaIds.addAll(
+                                    com.likkho.app.storage.DiaryRepository.extractRecordMediaIds(log.toDiaryRecord())
+                                )
                                 val expectedFlags = (if (log.diaryLockPin != null) 1 else 0) or
                                     (if (log.audioAttachments.isNotEmpty()) 2 else 0) or
                                     (if (log.canvasImages.isNotEmpty()) 4 else 0) or
@@ -540,6 +1179,7 @@ class RealFeatureHooks(
                                     repo.saveDiary(log.toDiaryRecord(), dek)
                                 }
                             } else {
+                                existing?.mediaIds?.let { savedMediaIds.addAll(it) }
                                 val lockBit = if (log.diaryLockPin != null) 1 else 0
                                 val metaChanged = existing == null ||
                                     existing.updatedAt != log.updatedAt ||
@@ -565,10 +1205,19 @@ class RealFeatureHooks(
                             }
                         }
 
+                        if (savedMediaIds.isNotEmpty()) {
+                            vaultManager.clearSavedSessionMedia(savedMediaIds, boundVaultId)
+                        }
+
                         if (cleanupSnapshot.isNotEmpty()) {
+                            vaultManager.unprotectSessionMedia(cleanupSnapshot)
                             val scan = repo.scanReferencedMediaIds(dek)
                             if (!scan.hasUndecodableOrQuarantined) {
                                 val delRes = mediaRepo.deleteUnreferencedMediaForDiaryChecked(cleanupSnapshot, scan.referencedIds)
+                                val cleared = cleanupSnapshot - delRes.failedIds.toSet()
+                                if (cleared.isNotEmpty()) {
+                                    mediaRepo.clearPendingSessionImports(cleared)
+                                }
                                 if (delRes.failedIds.isNotEmpty()) {
                                     throw java.io.IOException("Failed to delete unused media: ${delRes.failedIds.joinToString()}")
                                 }
@@ -630,9 +1279,14 @@ class RealFeatureHooks(
                     vaultManager.withActiveDek { dek ->
                         val repo = vaultManager.getDiaryRepository(boundVaultId)
                         val mediaRepo = vaultManager.getMediaRepository(boundVaultId)
+                        vaultManager.unprotectSessionMedia(snapshot)
                         val scan = repo.scanReferencedMediaIds(dek)
                         if (!scan.hasUndecodableOrQuarantined) {
                             val delRes = mediaRepo.deleteUnreferencedMediaForDiaryChecked(snapshot, scan.referencedIds)
+                            val cleared = snapshot - delRes.failedIds.toSet()
+                            if (cleared.isNotEmpty()) {
+                                mediaRepo.clearPendingSessionImports(cleared)
+                            }
                             if (delRes.failedIds.isNotEmpty()) {
                                 throw java.io.IOException("Failed to delete unused media: ${delRes.failedIds.joinToString()}")
                             }
@@ -692,6 +1346,7 @@ class RealFeatureHooks(
         val mediaId = vaultManager.withActiveDek { dek ->
             vaultManager.activeMediaRepository().importMedia(ByteArrayInputStream(sample), dek)
         }
+        vaultManager.recordSessionImportedMedia(mediaId)
         CanvasImage(
             id = mediaId,
             source = mediaId,
@@ -709,6 +1364,7 @@ class RealFeatureHooks(
         val mediaId = vaultManager.withActiveDek { dek ->
             vaultManager.activeMediaRepository().importMedia(ByteArrayInputStream(sample), dek)
         }
+        vaultManager.recordSessionImportedMedia(mediaId)
         CanvasAudio(
             id = mediaId,
             name = "Audio_${mediaId.take(6)}.wav",
@@ -723,9 +1379,11 @@ class RealFeatureHooks(
     override suspend fun pickBackgroundImage(): String? = withContext(dispatcher) {
         if (!vaultManager.isUnlocked) return@withContext null
         val sample = "BG_IMAGE".toByteArray(Charsets.UTF_8)
-        vaultManager.withActiveDek { dek ->
+        val mediaId = vaultManager.withActiveDek { dek ->
             vaultManager.activeMediaRepository().importMedia(ByteArrayInputStream(sample), dek)
         }
+        vaultManager.recordSessionImportedMedia(mediaId)
+        mediaId
     }
 
     override suspend fun pickFont(lang: String): CustomFont? = withContext(dispatcher) {
@@ -734,6 +1392,7 @@ class RealFeatureHooks(
         val mediaId = vaultManager.withActiveDek { dek ->
             vaultManager.activeMediaRepository().importMedia(ByteArrayInputStream(sample), dek)
         }
+        vaultManager.recordSessionImportedMedia(mediaId)
         CustomFont(mediaId, if (lang == "hi") "Custom Hindi Font" else "Custom English Font", lang)
     }
 
@@ -749,6 +1408,7 @@ class RealFeatureHooks(
         val mediaId = vaultManager.withActiveDek { dek ->
             vaultManager.activeMediaRepository().importMedia(ByteArrayInputStream(sample), dek)
         }
+        vaultManager.recordSessionImportedMedia(mediaId)
         CanvasAudio(
             id = mediaId,
             name = "Voice (${fmtDateTimeShort(System.currentTimeMillis())}).wav",

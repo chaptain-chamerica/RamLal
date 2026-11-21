@@ -97,6 +97,7 @@ fun SettingsScreen(vm: AppViewModel) {
     var showSavedWords by remember { mutableStateOf(false) }
     var showPasswords by remember { mutableStateOf(false) }
     var showBackedUp by remember { mutableStateOf(false) }
+    var showStorage by remember { mutableStateOf(false) }
     var showMic by remember { mutableStateOf(false) }
     var showPasscodeModal by remember { mutableStateOf(false) }
     var configuringSecondary by remember { mutableStateOf(false) }
@@ -104,7 +105,6 @@ fun SettingsScreen(vm: AppViewModel) {
     var pinError by remember { mutableStateOf("") }
     var manualUpdate by remember { mutableStateOf<AppUpdateInfo?>(null) }
     var checkingUpdate by remember { mutableStateOf(false) }
-    var freeingSpace by remember { mutableStateOf(false) }
     var passwordCount by remember { mutableStateOf(hooks.loadPasswords(vm.vaultMode).size) }
 
     val activePin = if (vm.vaultMode == VaultMode.DECOY) vm.secondaryPasscode else vm.savedPasscode
@@ -112,6 +112,7 @@ fun SettingsScreen(vm: AppViewModel) {
     // ---------- sub pages ----------
     when {
         showBackedUp -> { BackedUpDiariesScreen(vm, onClose = { showBackedUp = false }); return }
+        showStorage -> { StoragePage(vm, onBack = { showStorage = false }); return }
         showLegal -> { LegalPage(vm, toast, ::showToast) { showLegal = false }; return }
         showSavedWords -> { SavedWordsPage(vm) { showSavedWords = false }; return }
         showPasswords -> { PasswordsPage(vm, toast, ::showToast) { showPasswords = false; passwordCount = hooks.loadPasswords(vm.vaultMode).size }; return }
@@ -224,22 +225,13 @@ fun SettingsScreen(vm: AppViewModel) {
                 SettingsRow(Icons.Outlined.Description, title = "Legal, About & Data Notice", subtitle = "Privacy Policy, Terms, About, Licenses, Export & Clear Data",
                     trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = w.muted) }, onClick = { showLegal = true })
                 HairlineDivider()
-                // 7b free up space
+                // 7b storage
                 SettingsRow(
                     icon = Icons.Outlined.DeleteSweep,
-                    title = "Free up space",
-                    subtitle = if (freeingSpace) "Cleaning unused media, exports & temp..." else "Clean orphan media, old backups, exports & temp files",
+                    title = "Storage",
+                    subtitle = "See what uses space",
                     trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = w.muted) },
-                    enabled = !freeingSpace,
-                    onClick = {
-                        freeingSpace = true
-                        scope.launch {
-                            val freedBytes = runCatching { hooks.freeUpSpace() }.getOrDefault(0L)
-                            val freedMb = freedBytes.toDouble() / (1024.0 * 1024.0)
-                            freeingSpace = false
-                            showToast("Freed ${String.format(java.util.Locale.US, "%.2f", freedMb)} MB")
-                        }
-                    },
+                    onClick = { showStorage = true },
                 )
                 HairlineDivider()
                 // 8 update

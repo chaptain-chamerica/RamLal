@@ -101,3 +101,42 @@ fun wiki(): WikiColors = LocalWiki.current
 fun parseHex(hex: String): Color? = try {
     if (hex == "default" || hex == "transparent") null else Color(android.graphics.Color.parseColor(hex))
 } catch (e: Exception) { null }
+
+data class StoragePalette(
+    val diaries: Color,
+    val photos: Color,
+    val audio: Color,
+    val videos: Color,
+    val backups: Color,
+    val temporary: Color,
+    val unused: Color,
+    val damaged: Color,
+)
+
+@Composable
+fun storagePalette(): StoragePalette {
+    val w = wiki()
+    return if (w.isDark) {
+        StoragePalette(
+            diaries = Color(0xFF6699FF),
+            photos = Color(0xFF2AA189),
+            audio = Color(0xFF9F7AEA),
+            videos = Color(0xFFE09F3E),
+            backups = Color(0xFF38BDF8),
+            temporary = w.muted,
+            unused = Color(0xFFFB923C),
+            damaged = Color(0xFFE05252),
+        )
+    } else {
+        StoragePalette(
+            diaries = w.accent,
+            photos = w.success,
+            audio = Color(0xFF6B4BA1),
+            videos = Color(0xFFAC6600),
+            backups = Color(0xFF0E7490),
+            temporary = w.muted,
+            unused = Color(0xFFD97706),
+            damaged = w.danger,
+        )
+    }
+}

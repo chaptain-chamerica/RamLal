@@ -255,5 +255,91 @@ class VaultManagerTest {
         assertTrue(res is UnlockResult.Success)
         assertFalse("Unlock maintenance must clean stale vaults/tmp folders", staleDir.exists())
     }
+
+    @Test
+    fun processKillSimulation_pendingSessionImportDeletedImmediatelyOnNextUnlock_whileSavedMediaPreserved() =
+        runTest(testDispatcher) {
+            vaultManager.ensurePrimaryVaultInitialized()
+            val unsavedVideoId = "med_unsaved_kill_vid"
+            val savedImageId = "med_saved_img"
+
+            vaultManager.withActiveDek { dek ->
+                val mediaRepo = vaultManager.primaryMediaRepo
+                mediaRepo.importMediaBytes(unsavedVideoId, ByteArray(16 * 1024) { 7 }, dek)
+                mediaRepo.importMediaBytes(savedImageId, ByteArray(8 * 1024) { 3 }, dek)
+
+                // Simulate Workspace session import tracking for both media items
+                vaultManager.recordSessionImportedMedia(unsavedVideoId, VaultId.PRIMARY)
+                vaultManager.recordSessionImportedMedia(savedImageId, VaultId.PRIMARY)
+
+                // User saves only savedImageId into a diary (never saves unsavedVideoId)
+                vaultManager.primaryDiaryRepo.saveDiary(
+                    com.likkho.app.storage.model.DiaryRecord(
+                        id = "saved_diary_1",
+                        heading = "Kept Diary",
+                        images = listOf(com.likkho.app.storage.model.CanvasImageRecord(mediaId = savedImageId))
+                    ),
+                    dek
+                )
+                vaultManager.clearSavedSessionMedia(setOf(savedImageId), VaultId.PRIMARY)
+            }
+
+            // Simulate sudden OS process kill (no exitWorkspace / cleanup called) and fresh VaultManager on next launch
+            val restartedVm = VaultManager(
+                baseDir = baseDir,
+                keyStoreProvider = keyStoreProvider,
+                dispatcher = testDispatcher,
+                pbkdf2Iterations = 5000,
+                clockProvider = fakeClock,
+                processStartTimeMs = System.currentTimeMillis() + 60_000L
+            )
+            val unlockRes = restartedVm.unlockNoPasscode()
+            assertTrue(unlockRes is UnlockResult.Success)
+
+            assertFalse(
+                "Abandonment from killed process must delete unsaved video immediately without 24h wait",
+                restartedVm.primaryMediaRepo.exists(unsavedVideoId)
+            )
+            assertTrue(
+                "Saved diary media must NEVER be deleted across process restart",
+                restartedVm.primaryMediaRepo.exists(savedImageId)
+            )
+            assertTrue(
+                "pending_session_imports must be cleaned after unlock reconciliation",
+                restartedVm.primaryMediaRepo.loadPendingSessionImports().isEmpty()
+            )
+        }
+
+    @Test
+    fun unlockMaintenance_protectsCurrentProcessSessionMedia_whileCleaningPreProcessOrphans() =
+        runTest(testDispatcher) {
+            val processStart = System.currentTimeMillis()
+            val vm = VaultManager(
+                baseDir = tempFolder.newFolder("proc_start_vault"),
+                keyStoreProvider = keyStoreProvider,
+                dispatcher = testDispatcher,
+                pbkdf2Iterations = 5000,
+                clockProvider = fakeClock,
+                processStartTimeMs = processStart
+            )
+            vm.ensurePrimaryVaultInitialized()
+
+            val preProcOrphan = "pre_proc_orphan"
+            val activeSessionUnsaved = "active_session_unsaved"
+            vm.withActiveDek { dek ->
+                vm.primaryMediaRepo.importMediaBytes(preProcOrphan, "old".toByteArray(), dek)
+                vm.primaryMediaRepo.getMediaFile(preProcOrphan).setLastModified(processStart - 5_000L)
+
+                vm.primaryMediaRepo.importMediaBytes(activeSessionUnsaved, "new".toByteArray(), dek)
+                vm.primaryMediaRepo.getMediaFile(activeSessionUnsaved).setLastModified(processStart + 5_000L)
+                vm.recordSessionImportedMedia(activeSessionUnsaved, VaultId.PRIMARY)
+            }
+            vm.lock()
+
+            val reUnlock = vm.unlockNoPasscode()
+            assertTrue(reUnlock is UnlockResult.Success)
+            assertFalse("Pre-process unreferenced media must be deleted immediately", vm.primaryMediaRepo.exists(preProcOrphan))
+            assertTrue("Current-process session media must remain protected", vm.primaryMediaRepo.exists(activeSessionUnsaved))
+        }
 }
 

@@ -166,7 +166,7 @@ class StorageBloatEndToEndTest {
         Thread.sleep(5)
         hooks.performBackup(pass)
 
-        val backupsDir = File(filesDir, "backups")
+        val backupsDir = File(filesDir, "backups/a")
         val remainingLkbs = backupsDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray()
         assertEquals("Only latest 1 .lkb must remain after 3 backups", 1, remainingLkbs.size)
 

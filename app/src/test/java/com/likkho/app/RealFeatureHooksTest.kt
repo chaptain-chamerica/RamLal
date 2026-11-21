@@ -663,7 +663,7 @@ class RealFeatureHooksTest {
     fun performBackup_threeBackups_keepsOnlyLatestValidLkb() = runTest(testDispatcher) {
         vaultManager.ensurePrimaryVaultInitialized()
         val pass = "BackupPass123!"
-        val backupsDir = File(filesDir, "backups")
+        val backupsDir = hooks.backupDirFor(VaultId.PRIMARY)
 
         hooks.persistLogs(listOf(DiaryLog(id = "d_b1", heading = "First State")))
         hooks.performBackup(pass)
@@ -688,7 +688,7 @@ class RealFeatureHooksTest {
     fun performBackup_failedNewBackup_preservesExistingValidBackup() = runTest(testDispatcher) {
         vaultManager.ensurePrimaryVaultInitialized()
         val goodPass = "BackupPass123!"
-        val backupsDir = File(filesDir, "backups")
+        val backupsDir = hooks.backupDirFor(VaultId.PRIMARY)
 
         hooks.persistLogs(listOf(DiaryLog(id = "d_keep", heading = "Surviving Entry")))
         hooks.performBackup(goodPass)
@@ -723,7 +723,7 @@ class RealFeatureHooksTest {
         assertEquals(0, result.failedMediaCount)
         assertTrue(externalSafFile.exists() && externalSafFile.length() > 0L)
 
-        val backupsDir = File(filesDir, "backups")
+        val backupsDir = hooks.backupDirFor(VaultId.PRIMARY)
         val internalLkbs = backupsDir.listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray()
         assertEquals("SAF backup must not leave .lkb files in app-private backups/", 0, internalLkbs.size)
         val leftoverSafTemp = vaultManager.backupEngine.tempDir.listFiles { f -> f.name.startsWith("saf_backup_") } ?: emptyArray()
@@ -782,7 +782,7 @@ class RealFeatureHooksTest {
         )
 
         // Create 2 backups manually (simulating stale extra backups) + export cache + vaults/tmp bloat
-        val backupsDir = File(filesDir, "backups").apply { mkdirs() }
+        val backupsDir = hooks.backupDirFor(VaultId.PRIMARY).apply { mkdirs() }
         val oldLkb = File(backupsDir, "backup_1000.lkb").apply {
             writeBytes(ByteArray(128 * 1024))
             setLastModified(1_000_000L)
@@ -805,6 +805,102 @@ class RealFeatureHooksTest {
         assertTrue("Latest backup must remain", newLkb.exists())
         assertEquals(0, hooks.exportCacheDir.listFiles()?.size ?: 0)
         assertEquals(0, vaultManager.backupEngine.tempDir.listFiles()?.size ?: 0)
+    }
+
+    @Test
+    fun freeUpSpace_removesAbandonedProcessKillMediaUnder24h_preservingSavedAndActiveSessionMedia() =
+        runTest(testDispatcher) {
+            vaultManager.ensurePrimaryVaultInitialized()
+
+            // Saved media in diary
+            val savedMedia = vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().importMediaBytes("m_saved_keep", ByteArray(20 * 1024) { 1 }, dek)
+            }
+            hooks.persistLogs(
+                listOf(
+                    DiaryLog(
+                        id = "saved_log_1",
+                        heading = "Saved",
+                        canvasImages = listOf(CanvasImage(id = savedMedia, source = savedMedia, width = 100f, height = 100f))
+                    )
+                )
+            )
+
+            // Active current-process session media (protected in this process)
+            val activeSessionMedia = vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().importMediaBytes("m_session_keep", ByteArray(24 * 1024) { 2 }, dek)
+            }
+            vaultManager.recordSessionImportedMedia(activeSessionMedia)
+
+            // Simulated killed-process pending import (<24h old, on disk in pending_session_imports.json, NOT in this process's protected set)
+            val abandonedKillMedia = vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().importMediaBytes("m_kill_drop", ByteArray(64 * 1024) { 3 }, dek)
+            }
+            vaultManager.activeMediaRepository().recordPendingSessionImport(abandonedKillMedia)
+
+            val freed = hooks.freeUpSpace()
+            assertTrue("Expected at least 64KB freed, got $freed", freed >= 64L * 1024L)
+            assertFalse("Abandoned process-kill media (<24h) must be removed by Free up space", vaultManager.activeMediaRepository().exists(abandonedKillMedia))
+            assertTrue("Saved diary media must NEVER be deleted by Free up space", vaultManager.activeMediaRepository().exists(savedMedia))
+            assertTrue("Active current-session protected media must stay safe during Free up space", vaultManager.activeMediaRepository().exists(activeSessionMedia))
+        }
+
+    @Test
+    fun perVaultBackups_useNeutralFolders_neverDeleteLegacySharedBackups_andIsolateVaults() = runTest(testDispatcher) {
+        val primaryPin = "1111".toCharArray()
+        val decoyPin = "2222".toCharArray()
+        vaultManager.ensurePrimaryVaultInitialized()
+        vaultManager.setPrimaryPasscode(primaryPin)
+        vaultManager.setDecoyPasscode(decoyPin, primaryPin)
+
+        // Neutral backup folder names check
+        assertEquals("a", VaultId.PRIMARY.backupDirName)
+        assertEquals("b", VaultId.DECOY.backupDirName)
+        assertFalse(VaultId.DECOY.backupDirName.contains("decoy", ignoreCase = true))
+
+        // Put a legacy shared .lkb file directly in backups/ root
+        val legacyRootLkb1 = File(hooks.backupRootDir, "legacy_shared_1.lkb").apply {
+            writeBytes(ByteArray(32 * 1024))
+            setLastModified(1_000L)
+        }
+        val legacyRootLkb2 = File(hooks.backupRootDir, "legacy_shared_2.lkb").apply {
+            writeBytes(ByteArray(32 * 1024))
+            setLastModified(2_000L)
+        }
+
+        // Create backup in Primary vault -> goes strictly to backups/a/
+        hooks.persistLogs(listOf(DiaryLog(id = "p_entry", heading = "Primary Diary")))
+        hooks.performBackup("PrimaryPass123!")
+        val primaryLkbs = hooks.backupDirFor(VaultId.PRIMARY).listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray()
+        assertEquals(1, primaryLkbs.size)
+        assertTrue(legacyRootLkb1.exists() && legacyRootLkb2.exists())
+
+        // Switch to Decoy vault -> create backups -> goes strictly to backups/b/, never touches backups/a/ or legacy root .lkbs
+        vaultManager.lock()
+        vaultManager.unlockWithPin(decoyPin)
+        hooks.persistLogs(listOf(DiaryLog(id = "d_entry", heading = "Decoy Diary")))
+        hooks.performBackup("DecoyPass123!")
+        hooks.performBackup("DecoyPass123!")
+
+        val decoyLkbs = hooks.backupDirFor(VaultId.DECOY).listFiles { f -> f.isFile && f.name.endsWith(".lkb") } ?: emptyArray()
+        assertEquals(1, decoyLkbs.size)
+        assertTrue("Primary backup must stay untouched when Decoy runs backup & prune", primaryLkbs[0].exists())
+        assertTrue("Legacy shared backups must never be auto-deleted by backups/prune", legacyRootLkb1.exists() && legacyRootLkb2.exists())
+
+        // openBackupVault in Decoy sees ONLY Decoy's diary, never Primary's
+        val decoyContents = hooks.openBackupVault("DecoyPass123!")
+        assertEquals(listOf("d_entry"), decoyContents.map { it.id })
+
+        // Free up space in Decoy never touches legacy root .lkbs or Primary backups
+        val extraPrimaryLkb = File(hooks.backupDirFor(VaultId.PRIMARY), "backup_extra_p.lkb").apply {
+            writeBytes(ByteArray(64 * 1024))
+            setLastModified(100L)
+        }
+        hooks.runStartupStorageCleanup()
+        hooks.freeUpSpace()
+        assertTrue("Legacy root backups must never be auto-deleted by Free up space", legacyRootLkb1.exists() && legacyRootLkb2.exists())
+        assertTrue("Primary extra backup must NEVER be pruned while unlocked in Decoy", extraPrimaryLkb.exists())
+        assertTrue("Primary latest backup must remain untouched", primaryLkbs[0].exists())
     }
 }
 

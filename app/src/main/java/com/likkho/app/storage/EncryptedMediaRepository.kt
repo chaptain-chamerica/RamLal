@@ -16,6 +16,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Manages encrypted media storage (images, audio, fonts, pfp, background)
@@ -39,6 +40,9 @@ class EncryptedMediaRepository @JvmOverloads constructor(
 ) {
     val mediaDir = File(vaultDir, "media")
     val orphanCandidatesFile = File(vaultDir, "orphan_candidates.json")
+    val pendingSessionImportsFile = File(vaultDir, "pending_session_imports.json")
+    private val activeImportIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val metadataLock = Any()
 
     companion object {
         const val MEDIA_EXTENSION = "lkm"
@@ -72,17 +76,26 @@ class EncryptedMediaRepository @JvmOverloads constructor(
 
     fun getMediaFile(mediaId: String): File = File(mediaDir, "$mediaId.$MEDIA_EXTENSION")
 
+    fun isImportActive(mediaId: String): Boolean = activeImportIds.contains(mediaId)
+
+    internal fun runWithActiveImportForTest(mediaId: String, block: () -> Unit) {
+        activeImportIds.add(mediaId)
+        try {
+            block()
+        } finally {
+            activeImportIds.remove(mediaId)
+        }
+    }
+
     /**
      * Atomically imports an input stream into an encrypted media file.
      * Enforces free space check, writes to .tmp, fsyncs, verifies decryption, and atomically renames.
      */
-    @Synchronized
     fun importMedia(inputStream: InputStream, dek: ByteArray): String {
         val mediaId = CryptoUtils.randomId("med_")
         return importMedia(mediaId, inputStream, dek)
     }
 
-    @Synchronized
     fun importMedia(
         mediaId: String,
         inputStream: InputStream,
@@ -90,7 +103,6 @@ class EncryptedMediaRepository @JvmOverloads constructor(
         estimatedSizeBytes: Long = 0L
     ): String = importMediaInternal(mediaId, inputStream, dek, estimatedSizeBytes, afterEncryptHook = null)
 
-    @Synchronized
     internal fun importMediaInternal(
         mediaId: String,
         inputStream: InputStream,
@@ -98,95 +110,103 @@ class EncryptedMediaRepository @JvmOverloads constructor(
         estimatedSizeBytes: Long = 0L,
         afterEncryptHook: ((File) -> Unit)? = null
     ): String {
-        ensureDirs()
-
-        // 1. Free space check
-        val requiredBytes = estimatedSizeBytes + SafeStorageWriter.MIN_FREE_SPACE_BYTES
-        val usable = mediaDir.usableSpace
-        if (usable in 1 until requiredBytes) {
-            throw InsufficientStorageException(
-                "Insufficient storage for media import: required $requiredBytes bytes, available $usable bytes"
-            )
-        }
-
+        activeImportIds.add(mediaId)
         val targetFile = getMediaFile(mediaId)
         val tmpFile = File(mediaDir, "$mediaId.$MEDIA_EXTENSION.tmp")
-        if (tmpFile.exists()) {
-            tmpFile.delete()
-        }
-
-        val streamingAead = createStreamingAead(dek)
-        val aad = buildAad(mediaId, vaultId)
-
-        // 2. Encrypt stream directly to .tmp file; on failure delete .tmp and do NOT finalize stream
+        var completed = false
         try {
-            FileOutputStream(tmpFile).use { fos ->
-                val nonClosingOut = object : FilterOutputStream(fos) {
-                    override fun write(b: Int) = fos.write(b)
-                    override fun write(b: ByteArray, off: Int, len: Int) = fos.write(b, off, len)
-                    override fun flush() = fos.flush()
-                    override fun close() = fos.flush()
-                }
-                val encryptingStream: OutputStream = streamingAead.newEncryptingStream(nonClosingOut, aad)
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    encryptingStream.write(buffer, 0, bytesRead)
-                }
-                // Fsync open FileChannel before closing encrypting stream, then finalize & fsync FD before fos closes
-                fos.flush()
-                if (fos.channel.isOpen) {
-                    fos.channel.force(true)
-                }
-                encryptingStream.close()
-                fos.flush()
-                if (fos.channel.isOpen) {
-                    fos.channel.force(true)
-                }
-                if (fos.fd.valid()) {
-                    fos.fd.sync()
-                }
+            ensureDirs()
+
+            // 1. Free space check
+            val requiredBytes = estimatedSizeBytes + SafeStorageWriter.MIN_FREE_SPACE_BYTES
+            val usable = mediaDir.usableSpace
+            if (usable in 1 until requiredBytes) {
+                throw InsufficientStorageException(
+                    "Insufficient storage for media import: required $requiredBytes bytes, available $usable bytes"
+                )
             }
-        } catch (e: Exception) {
-            tmpFile.delete()
-            throw e
-        }
 
-        afterEncryptHook?.invoke(tmpFile)
+            if (tmpFile.exists()) {
+                tmpFile.delete()
+            }
 
-        // 3. Verify read-back by draining the ENTIRE decrypting stream to EOF
-        try {
-            FileInputStream(tmpFile).use { fis ->
-                streamingAead.newDecryptingStream(fis, aad).use { decryptingStream ->
-                    val verifyBuffer = ByteArray(8192)
-                    while (decryptingStream.read(verifyBuffer) != -1) {
-                        // Drain all segments and verify every GCM tag to EOF
+            val streamingAead = createStreamingAead(dek)
+            val aad = buildAad(mediaId, vaultId)
+
+            // 2. Encrypt stream directly to .tmp file; on failure delete .tmp and do NOT finalize stream
+            try {
+                FileOutputStream(tmpFile).use { fos ->
+                    val nonClosingOut = object : FilterOutputStream(fos) {
+                        override fun write(b: Int) = fos.write(b)
+                        override fun write(b: ByteArray, off: Int, len: Int) = fos.write(b, off, len)
+                        override fun flush() = fos.flush()
+                        override fun close() = fos.flush()
+                    }
+                    val encryptingStream: OutputStream = streamingAead.newEncryptingStream(nonClosingOut, aad)
+                    val buffer = ByteArray(8192)
+                    var bytesRead: Int
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        encryptingStream.write(buffer, 0, bytesRead)
+                    }
+                    // Fsync open FileChannel before closing encrypting stream, then finalize & fsync FD before fos closes
+                    fos.flush()
+                    if (fos.channel.isOpen) {
+                        fos.channel.force(true)
+                    }
+                    encryptingStream.close()
+                    fos.flush()
+                    if (fos.channel.isOpen) {
+                        fos.channel.force(true)
+                    }
+                    if (fos.fd.valid()) {
+                        fos.fd.sync()
                     }
                 }
+            } catch (e: Throwable) {
+                tmpFile.delete()
+                throw e
             }
-        } catch (e: Exception) {
-            tmpFile.delete()
-            throw StorageVerificationException("Media verification failed after encrypting: ${e.message}", e)
-        }
 
-        // 4. Atomic rename to target file
-        if (targetFile.exists()) {
-            targetFile.delete()
-        }
-        val renamed = tmpFile.renameTo(targetFile)
-        if (!renamed) {
-            tmpFile.delete()
-            throw IOException("Failed to rename temporary media file to ${targetFile.name}")
-        }
-        SafeStorageWriter.fsyncDirectory(mediaDir)
+            afterEncryptHook?.invoke(tmpFile)
 
-        return mediaId
+            // 3. Verify read-back by draining the ENTIRE decrypting stream to EOF
+            try {
+                FileInputStream(tmpFile).use { fis ->
+                    streamingAead.newDecryptingStream(fis, aad).use { decryptingStream ->
+                        val verifyBuffer = ByteArray(8192)
+                        while (decryptingStream.read(verifyBuffer) != -1) {
+                            // Drain all segments and verify every GCM tag to EOF
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                tmpFile.delete()
+                throw StorageVerificationException("Media verification failed after encrypting: ${e.message}", e)
+            }
+
+            // 4. Atomic rename to target file
+            if (targetFile.exists()) {
+                targetFile.delete()
+            }
+            val renamed = tmpFile.renameTo(targetFile)
+            if (!renamed) {
+                tmpFile.delete()
+                throw IOException("Failed to rename temporary media file to ${targetFile.name}")
+            }
+            SafeStorageWriter.fsyncDirectory(mediaDir)
+            completed = true
+            return mediaId
+        } finally {
+            if (!completed && tmpFile.exists()) {
+                tmpFile.delete()
+            }
+            activeImportIds.remove(mediaId)
+        }
     }
 
     /**
      * Convenience method to import in-memory byte array (e.g. avatar, font, image preview).
      */
-    @Synchronized
     fun importMediaBytes(mediaId: String, data: ByteArray, dek: ByteArray): String {
         return importMedia(mediaId, data.inputStream(), dek, data.size.toLong())
     }
@@ -298,18 +318,19 @@ class EncryptedMediaRepository @JvmOverloads constructor(
      * Deletes media file and any associated temporary files.
      * Logs a warning and retries once if file deletion fails.
      */
-    @Synchronized
-    fun deleteMedia(mediaId: String): Boolean {
+    fun deleteMedia(mediaId: String): Boolean = synchronized(metadataLock) {
         val file = getMediaFile(mediaId)
         val tmpFile = File(mediaDir, "$mediaId.$MEDIA_EXTENSION.tmp")
-        if (tmpFile.exists()) tmpFile.delete()
+        if (tmpFile.exists() && !activeImportIds.contains(mediaId)) tmpFile.delete()
         if (!file.exists()) {
             removeOrphanCandidates(setOf(mediaId))
-            return true
+            clearPendingSessionImports(setOf(mediaId))
+            return@synchronized true
         }
         if (fileDeleter(file)) {
             removeOrphanCandidates(setOf(mediaId))
-            return true
+            clearPendingSessionImports(setOf(mediaId))
+            return@synchronized true
         }
         runCatching { Log.w(TAG, "Failed to delete media $mediaId; retrying once.") }
         val retryOk = fileDeleter(file)
@@ -317,8 +338,9 @@ class EncryptedMediaRepository @JvmOverloads constructor(
             runCatching { Log.e(TAG, "Retry failed deleting media $mediaId at ${file.absolutePath}") }
         } else {
             removeOrphanCandidates(setOf(mediaId))
+            clearPendingSessionImports(setOf(mediaId))
         }
-        return retryOk
+        return@synchronized retryOk
     }
 
     /**
@@ -326,7 +348,6 @@ class EncryptedMediaRepository @JvmOverloads constructor(
      */
     fun exists(mediaId: String): Boolean = getMediaFile(mediaId).exists()
 
-    @Synchronized
     fun listMediaIdsOnDisk(): Set<String> {
         if (!mediaDir.exists()) return emptySet()
         return (mediaDir.listFiles { f -> f.isFile && f.name.endsWith(".$MEDIA_EXTENSION") } ?: emptyArray())
@@ -334,10 +355,9 @@ class EncryptedMediaRepository @JvmOverloads constructor(
             .toSet()
     }
 
-    @Synchronized
-    fun loadOrphanCandidates(): Map<String, Long> {
-        if (!orphanCandidatesFile.exists()) return emptyMap()
-        return runCatching {
+    fun loadOrphanCandidates(): Map<String, Long> = synchronized(metadataLock) {
+        if (!orphanCandidatesFile.exists()) return@synchronized emptyMap()
+        return@synchronized runCatching {
             json.decodeFromString(candidatesSerializer, orphanCandidatesFile.readText(Charsets.UTF_8))
         }.getOrDefault(emptyMap())
     }
@@ -351,9 +371,8 @@ class EncryptedMediaRepository @JvmOverloads constructor(
         orphanCandidatesFile.writeText(json.encodeToString(candidatesSerializer, map), Charsets.UTF_8)
     }
 
-    @Synchronized
-    fun markOrphanCandidates(mediaIds: Set<String>) {
-        if (mediaIds.isEmpty()) return
+    fun markOrphanCandidates(mediaIds: Set<String>) = synchronized(metadataLock) {
+        if (mediaIds.isEmpty()) return@synchronized
         val now = clockProvider.wallClockMs()
         val updated = loadOrphanCandidates().toMutableMap()
         var changed = false
@@ -366,9 +385,8 @@ class EncryptedMediaRepository @JvmOverloads constructor(
         if (changed) saveOrphanCandidates(updated)
     }
 
-    @Synchronized
-    fun removeOrphanCandidates(mediaIds: Set<String>) {
-        if (mediaIds.isEmpty() || !orphanCandidatesFile.exists()) return
+    fun removeOrphanCandidates(mediaIds: Set<String>) = synchronized(metadataLock) {
+        if (mediaIds.isEmpty() || !orphanCandidatesFile.exists()) return@synchronized
         val updated = loadOrphanCandidates().toMutableMap()
         var changed = false
         for (id in mediaIds) {
@@ -377,15 +395,58 @@ class EncryptedMediaRepository @JvmOverloads constructor(
         if (changed) saveOrphanCandidates(updated)
     }
 
+    fun loadPendingSessionImports(): Map<String, Long> = synchronized(metadataLock) {
+        if (!pendingSessionImportsFile.exists()) return@synchronized emptyMap()
+        return@synchronized runCatching {
+            json.decodeFromString(candidatesSerializer, pendingSessionImportsFile.readText(Charsets.UTF_8))
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun savePendingSessionImports(map: Map<String, Long>) {
+        if (map.isEmpty()) {
+            if (pendingSessionImportsFile.exists()) pendingSessionImportsFile.delete()
+            File(vaultDir, "${pendingSessionImportsFile.name}.tmp").delete()
+            return
+        }
+        vaultDir.mkdirs()
+        val tmp = File(vaultDir, "${pendingSessionImportsFile.name}.tmp")
+        tmp.writeText(json.encodeToString(candidatesSerializer, map), Charsets.UTF_8)
+        if (!tmp.renameTo(pendingSessionImportsFile)) {
+            pendingSessionImportsFile.writeText(json.encodeToString(candidatesSerializer, map), Charsets.UTF_8)
+            tmp.delete()
+        }
+    }
+
+    fun recordPendingSessionImport(mediaId: String) = synchronized(metadataLock) {
+        if (mediaId.isBlank()) return@synchronized
+        val updated = loadPendingSessionImports().toMutableMap()
+        updated[mediaId] = clockProvider.wallClockMs()
+        savePendingSessionImports(updated)
+    }
+
+    fun clearPendingSessionImports(mediaIds: Set<String>) = synchronized(metadataLock) {
+        if (mediaIds.isEmpty() || !pendingSessionImportsFile.exists()) return@synchronized
+        val current = loadPendingSessionImports()
+        if (current.isEmpty()) {
+            pendingSessionImportsFile.delete()
+            return@synchronized
+        }
+        val updated = current.toMutableMap()
+        var changed = false
+        for (id in mediaIds) {
+            if (updated.remove(id) != null) changed = true
+        }
+        if (changed) savePendingSessionImports(updated)
+    }
+
     /**
      * Deletes media files that are referenced only by the specified diary and not referenced
      * by any other diary in the vault, returning deleted count and any failed media IDs.
      */
-    @Synchronized
     fun deleteUnreferencedMediaForDiaryChecked(
         deletedDiaryMediaIds: Set<String>,
         remainingReferencedMediaIds: Set<String>
-    ): MediaDeleteResult {
+    ): MediaDeleteResult = synchronized(metadataLock) {
         var deletedCount = 0
         val failedIds = mutableListOf<String>()
         for (mediaId in deletedDiaryMediaIds) {
@@ -397,14 +458,13 @@ class EncryptedMediaRepository @JvmOverloads constructor(
                 }
             }
         }
-        return MediaDeleteResult(deletedCount = deletedCount, failedIds = failedIds)
+        return@synchronized MediaDeleteResult(deletedCount = deletedCount, failedIds = failedIds)
     }
 
     /**
      * Deletes media files that are referenced only by the specified diary and not referenced
      * by any other diary in the vault.
      */
-    @Synchronized
     fun deleteUnreferencedMediaForDiary(
         deletedDiaryMediaIds: Set<String>,
         remainingReferencedMediaIds: Set<String>
@@ -413,39 +473,59 @@ class EncryptedMediaRepository @JvmOverloads constructor(
     }
 
     /**
-     * Cleans up orphaned media per STORAGE_SPEC Section 6:
-     * - Media files not referenced in any diary (including recovered undecodable diary refs) AND older than [olderThanMs] are removed.
-     * - Newly imported media (< 24 hours old) are kept to prevent race conditions during import.
-     * - If an undecodable/quarantined diary exists whose media IDs could NOT be recovered from index/.bak/quarantine,
-     *   unknown media files are preserved; explicit orphan_candidates (from deleted unreadable diaries) can still be cleaned.
+     * Cleans up orphaned media per STORAGE_SPEC Section 6 and the process-start abandonment rules:
+     * - Protects `.tmp` and `.lkm` files belonging to [activeImportIds] or [protectedMediaIds].
+     * - Protects any media referenced in saved/recoverable diaries ([referencedMediaIds]).
+     * - Respects [hasUndecodableOrQuarantined] guard when unknown-ID undecodable diaries exist.
+     * - Immediately deletes unreferenced media (without 24h wait) if:
+     *   (a) [processStartTimeMs] > 0 and file.lastModified() < [processStartTimeMs], or
+     *   (b) mediaId is in [forcedOrphanIds] (e.g., pending session import left behind by killed process), or
+     *   (c) [olderThanMs] <= 0.
+     * - Otherwise falls back to standard >24h ([olderThanMs]) orphan threshold.
      */
-    @Synchronized
     fun cleanupOrphans(
         referencedMediaIds: Set<String>,
         hasUndecodableOrQuarantined: Boolean = false,
-        olderThanMs: Long = ORPHAN_AGE_THRESHOLD_MS
-    ): Int {
-        if (!mediaDir.exists()) return 0
+        olderThanMs: Long = ORPHAN_AGE_THRESHOLD_MS,
+        processStartTimeMs: Long = 0L,
+        protectedMediaIds: Set<String> = emptySet(),
+        forcedOrphanIds: Set<String> = emptySet()
+    ): Int = synchronized(metadataLock) {
+        if (!mediaDir.exists()) return@synchronized 0
 
-        // Always clean abandoned .tmp files
+        // Clean abandoned .tmp files only when not actively importing
         val tmpFiles = mediaDir.listFiles { f -> f.name.endsWith(".tmp") } ?: emptyArray()
         for (tmp in tmpFiles) {
-            tmp.delete()
+            val tmpMediaId = tmp.name.removeSuffix(".$MEDIA_EXTENSION.tmp").removeSuffix(".tmp")
+            if (!activeImportIds.contains(tmpMediaId)) {
+                tmp.delete()
+            }
         }
 
         val candidates = loadOrphanCandidates()
-        if (hasUndecodableOrQuarantined && candidates.isEmpty()) {
-            return 0
+        val files = mediaDir.listFiles { f -> f.name.endsWith(".$MEDIA_EXTENSION") } ?: emptyArray()
+        val diskIds = files.map { it.name.removeSuffix(".$MEDIA_EXTENSION") }.toSet()
+
+        // Prune pending session import entries for IDs that are already referenced or missing from disk
+        if (pendingSessionImportsFile.exists()) {
+            val stalePending = loadPendingSessionImports().keys.filter { id ->
+                referencedMediaIds.contains(id) || (!diskIds.contains(id) && !activeImportIds.contains(id))
+            }.toSet()
+            if (stalePending.isNotEmpty()) {
+                clearPendingSessionImports(stalePending)
+            }
         }
 
-        val files = mediaDir.listFiles { f -> f.name.endsWith(".$MEDIA_EXTENSION") } ?: emptyArray()
+        if (hasUndecodableOrQuarantined && candidates.isEmpty()) {
+            return@synchronized 0
+        }
+
         val now = clockProvider.wallClockMs()
         var deletedCount = 0
         val remainingCandidates = candidates.toMutableMap()
         var candidatesChanged = false
 
         // Prune candidates that became referenced or no longer exist on disk
-        val diskIds = files.map { it.name.removeSuffix(".$MEDIA_EXTENSION") }.toSet()
         for (candId in candidates.keys) {
             if (referencedMediaIds.contains(candId) || !diskIds.contains(candId)) {
                 remainingCandidates.remove(candId)
@@ -453,9 +533,11 @@ class EncryptedMediaRepository @JvmOverloads constructor(
             }
         }
 
+        val deletedForcedIds = mutableSetOf<String>()
         for (file in files) {
             val mediaId = file.name.removeSuffix(".$MEDIA_EXTENSION")
             if (referencedMediaIds.contains(mediaId)) continue
+            if (protectedMediaIds.contains(mediaId) || activeImportIds.contains(mediaId)) continue
 
             val candidateTs = remainingCandidates[mediaId]
             if (hasUndecodableOrQuarantined && candidateTs == null) {
@@ -464,20 +546,28 @@ class EncryptedMediaRepository @JvmOverloads constructor(
 
             val refTimestamp = if (candidateTs != null) minOf(file.lastModified(), candidateTs) else file.lastModified()
             val age = now - refTimestamp
-            val eligibleByAge = olderThanMs <= 0L || age > olderThanMs
-            if (eligibleByAge) {
+            val olderThanProcessStart = processStartTimeMs > 0L && file.lastModified() < processStartTimeMs
+            val isForcedAbandoned = forcedOrphanIds.contains(mediaId)
+            val eligible = olderThanMs <= 0L || isForcedAbandoned || olderThanProcessStart || age > olderThanMs
+            if (eligible) {
                 if (deleteMedia(mediaId)) {
                     deletedCount++
                     if (remainingCandidates.remove(mediaId) != null) {
                         candidatesChanged = true
                     }
+                    if (isForcedAbandoned) {
+                        deletedForcedIds.add(mediaId)
+                    }
                 }
             }
         }
 
+        if (deletedForcedIds.isNotEmpty()) {
+            clearPendingSessionImports(deletedForcedIds)
+        }
         if (candidatesChanged) {
             saveOrphanCandidates(remainingCandidates)
         }
-        return deletedCount
+        return@synchronized deletedCount
     }
 }

@@ -355,7 +355,7 @@ fun BackedUpDiariesScreen(vm: AppViewModel, onClose: () -> Unit) {
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Backed-up Diaries", style = serifStyle(20.sp, w.text))
-                        Text("Vault Folder: ${if (vm.vaultMode == VaultMode.DECOY) ".ramlal_decoy_backups" else ".ramlal_backups"} (${bundle.size} entries)", style = monoStyle(10.sp, w.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("Backup Vault: ${if (vm.vaultMode == VaultMode.DECOY) "backups/b" else "backups/a"} (${bundle.size} entries)", style = monoStyle(10.sp, w.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     IconBtn(Icons.Outlined.Search, "Search Backed-up Diaries", { searchOpen = true })
                 }

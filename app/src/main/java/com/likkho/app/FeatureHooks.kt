@@ -30,6 +30,87 @@ data class RestoreResult(
     val failedDiaries: List<com.likkho.app.storage.FailedDiaryEntry> = emptyList()
 )
 
+enum class StorageCategory {
+    DIARIES,
+    PHOTOS,
+    AUDIO,
+    VIDEOS,
+    BACKUPS,
+    OLDER_BACKUPS,
+    TEMPORARY,
+    UNUSED_MEDIA,
+    DAMAGED_COPIES
+}
+
+data class StorageItemInfo(
+    val id: String,
+    val name: String,
+    val category: StorageCategory,
+    val sizeBytes: Long,
+    val modifiedAtMs: Long,
+    val detail: String = ""
+)
+
+data class StorageSection(
+    val category: StorageCategory,
+    val title: String,
+    val count: Int,
+    val bytes: Long,
+    val latestDateMs: Long? = null,
+    val items: List<StorageItemInfo> = emptyList()
+)
+
+data class StorageReport(
+    val diaries: StorageSection = StorageSection(StorageCategory.DIARIES, "Diaries", 0, 0L),
+    val photos: StorageSection = StorageSection(StorageCategory.PHOTOS, "Photos", 0, 0L),
+    val audio: StorageSection = StorageSection(StorageCategory.AUDIO, "Audio", 0, 0L),
+    val videos: StorageSection = StorageSection(StorageCategory.VIDEOS, "Videos", 0, 0L),
+    val backups: StorageSection = StorageSection(StorageCategory.BACKUPS, "Backups in app storage", 0, 0L),
+    val olderBackups: StorageSection = StorageSection(StorageCategory.OLDER_BACKUPS, "Older backups", 0, 0L),
+    val temporaryFiles: StorageSection = StorageSection(StorageCategory.TEMPORARY, "Temporary files", 0, 0L),
+    val unusedMedia: StorageSection = StorageSection(StorageCategory.UNUSED_MEDIA, "Unused media", 0, 0L),
+    val damagedCopies: StorageSection = StorageSection(StorageCategory.DAMAGED_COPIES, "Damaged diary copies", 0, 0L),
+    val unreadableDiaryCount: Int = 0
+) {
+    val activeVaultTotalBytes: Long
+        get() = diaries.bytes + photos.bytes + audio.bytes + videos.bytes +
+            backups.bytes + temporaryFiles.bytes + unusedMedia.bytes + damagedCopies.bytes
+}
+
+enum class FreeUpItemType { OLD_BACKUP, UNUSED_MEDIA, TEMPORARY_FILE }
+
+data class FreeUpPreviewItem(
+    val id: String,
+    val name: String,
+    val categoryLabel: String,
+    val type: FreeUpItemType,
+    val sizeBytes: Long,
+    val modifiedAtMs: Long,
+    val filePath: String
+)
+
+data class FreeUpCategorySummary(
+    val type: FreeUpItemType,
+    val title: String,
+    val count: Int,
+    val bytes: Long,
+    val items: List<FreeUpPreviewItem> = emptyList()
+)
+
+data class FreeUpPreview(
+    val items: List<FreeUpPreviewItem> = emptyList(),
+    val categories: List<FreeUpCategorySummary> = emptyList(),
+    val deletedBackupNames: List<String> = emptyList(),
+    val keptBackupName: String? = null,
+    val unusedMediaCount: Int = 0,
+    val unusedMediaBytes: Long = 0L,
+    val temporaryFilesCount: Int = 0,
+    val temporaryFilesBytes: Long = 0L,
+    val totalBytes: Long = 0L
+) {
+    val isEmpty: Boolean get() = items.isEmpty() || totalBytes <= 0L
+}
+
 interface FeatureHooks {
     // ---- App update (GitHub releases) ----
     suspend fun checkForUpdate(manual: Boolean): UpdateCheck
@@ -51,6 +132,11 @@ interface FeatureHooks {
     fun persistPasswords(vault: VaultMode, items: List<SavedPassword>)
     suspend fun runStartupStorageCleanup(): Long = 0L
     suspend fun freeUpSpace(): Long = 0L
+    suspend fun getStorageReport(): StorageReport = StorageReport()
+    suspend fun previewFreeUpSpace(): FreeUpPreview = FreeUpPreview()
+    suspend fun executeFreeUpSpace(preview: FreeUpPreview): Long = 0L
+    suspend fun deleteDamagedCopies(): Long = 0L
+    suspend fun deleteOlderSharedBackups(fileNames: List<String>): Long = 0L
 
     // ---- Backup / Restore ----
     suspend fun hashPassphrase(passphrase: String): String
