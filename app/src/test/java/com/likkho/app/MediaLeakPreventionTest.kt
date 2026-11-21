@@ -98,8 +98,9 @@ class MediaLeakPreventionTest {
 
             val res = relaunchedVm.unlockNoPasscode()
             assertTrue(res is com.likkho.app.storage.UnlockResult.Success)
+            relaunchedVm.runPostUnlockMaintenance(com.likkho.app.storage.VaultId.PRIMARY)
             assertFalse(
-                "Aborted video from killed process must be deleted immediately on next unlock",
+                "Aborted video from killed process must be deleted after post-unlock maintenance",
                 relaunchedVm.primaryMediaRepo.exists(leakedVidId)
             )
             assertTrue(

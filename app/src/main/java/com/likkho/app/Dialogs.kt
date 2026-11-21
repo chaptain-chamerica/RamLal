@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.TimeZone
 
@@ -57,31 +58,40 @@ import java.util.TimeZone
 fun UnlockDiaryDialog(vm: AppViewModel) {
     val pending = vm.pendingUnlock ?: return
     val w = wiki()
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var input by remember(pending) { mutableStateOf("") }
     var error by remember(pending) { mutableStateOf<String?>(null) }
+    var busy by remember(pending) { mutableStateOf(false) }
     var cooldown by remember(pending) { mutableStateOf(vm.remainingCooldownSeconds()) }
     LaunchedEffect(pending) { while (true) { cooldown = vm.remainingCooldownSeconds(); delay(500) } }
 
     fun submit() {
+        if (busy) return
         val rem = vm.remainingCooldownSeconds()
         if (rem > 0) { cooldown = rem; error = "Too many wrong attempts. Wait ${rem}s."; return }
-        if (vm.checkDiaryLockPin(pending.log, input.trim())) {
-            vm.resetPasscodeFailures(); cooldown = 0
-            val log = pending.log; val act = pending.action
-            vm.pendingUnlock = null
-            when (act) {
-                UnlockAction.OPEN -> vm.openUnlockedLog(log)
-                UnlockAction.EXPORT -> vm.openUnlockedExport(log)
-                UnlockAction.DELETE -> vm.pendingDeleteLog = log
+        busy = true
+        val pinAttempt = input.trim()
+        scope.launch {
+            val ok = vm.verifyDiaryLockPin(pending.log, pinAttempt)
+            busy = false
+            if (ok) {
+                vm.resetPasscodeFailures(); cooldown = 0
+                val log = pending.log; val act = pending.action
+                vm.pendingUnlock = null
+                when (act) {
+                    UnlockAction.OPEN -> vm.openUnlockedLog(log)
+                    UnlockAction.EXPORT -> vm.openUnlockedExport(log)
+                    UnlockAction.DELETE -> vm.pendingDeleteLog = log
+                }
+            } else {
+                val secs = vm.recordPasscodeFailure()
+                if (secs > 0) { cooldown = secs; error = "Incorrect passcode. Locked for ${secs}s." } else error = "Incorrect diary passcode."
             }
-        } else {
-            val secs = vm.recordPasscodeFailure()
-            if (secs > 0) { cooldown = secs; error = "Incorrect passcode. Locked for ${secs}s." } else error = "Incorrect diary passcode."
         }
     }
 
     WikiDialog(
-        onDismiss = { vm.pendingUnlock = null },
+        onDismiss = { if (!busy) vm.pendingUnlock = null },
         title = "Unlock \"${pending.log.heading}\"",
         titleIcon = Icons.Outlined.Lock, titleIconTint = w.danger, maxWidth = 320.dp,
     ) {
@@ -90,12 +100,12 @@ fun UnlockDiaryDialog(vm: AppViewModel) {
             else if (error != null) Text(error!!, style = sansStyle(12.sp, w.danger, FontWeight.Medium))
             Column {
                 FieldLabel("Enter Diary Passcode")
-                WikiTextField(input, { input = it; error = null }, Modifier.fillMaxWidth(), "Passcode...", password = true, enabled = cooldown == 0, onDone = { submit() })
+                WikiTextField(input, { input = it; error = null }, Modifier.fillMaxWidth(), "Passcode...", password = true, enabled = cooldown == 0 && !busy, onDone = { submit() })
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                WikiButton("Cancel", { vm.pendingUnlock = null }, height = 36.dp)
+                WikiButton("Cancel", { vm.pendingUnlock = null }, enabled = !busy, height = 36.dp)
                 Spacer(Modifier.width(8.dp))
-                WikiButton(if (cooldown > 0) "Wait ${cooldown}s" else "Unlock", { submit() }, kind = BtnKind.PRIMARY, enabled = cooldown == 0, height = 36.dp)
+                WikiButton(if (cooldown > 0) "Wait ${cooldown}s" else if (busy) "Verifying…" else "Unlock", { submit() }, kind = BtnKind.PRIMARY, enabled = cooldown == 0 && !busy, height = 36.dp)
             }
         }
     }

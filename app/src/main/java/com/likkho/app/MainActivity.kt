@@ -5,7 +5,6 @@ import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
-import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -16,30 +15,48 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.LockOpen
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val vm: AppViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
+        vm.hooks.attachActivity(this)
 
         applySystemBars(darkMode = vm.darkMode, fullScreen = vm.fullScreen)
 
@@ -66,6 +83,11 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent { LikkhoTheme(vm.darkMode) { Root(vm) } }
+    }
+
+    override fun onDestroy() {
+        vm.hooks.attachActivity(null)
+        super.onDestroy()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -119,11 +141,20 @@ fun Root(vm: AppViewModel) {
     val view = LocalView.current
     val activity = view.context as? MainActivity
 
-    // lock whenever app goes to background (if passcode set)
+    DisposableEffect(activity) {
+        vm.hooks.attachActivity(activity)
+        onDispose {
+            if (activity != null) vm.hooks.attachActivity(null)
+        }
+    }
+
+    // Lock and zeroize DEK whenever app goes to background (if passcode set)
     DisposableEffect(Unit) {
         val obs = object : DefaultLifecycleObserver {
             override fun onStop(owner: LifecycleOwner) {
-                if (vm.effectivePrimaryPin.isNotEmpty()) vm.isLocked = true
+                if (vm.effectivePrimaryPin.isNotEmpty()) {
+                    vm.handleInstantLock()
+                }
             }
         }
         ProcessLifecycleOwner.get().lifecycle.addObserver(obs)
@@ -169,6 +200,34 @@ fun Root(vm: AppViewModel) {
         ExportDialog(vm)
         ShareDiaryDialog(vm)
         vm.availableUpdate?.let { UpdateDialog(it, vm.hooks) { vm.availableUpdate = null } }
+
+        // Lightweight Wiki loader when app has no passcode and is finishing cold-start Keystore unwrap + index load
+        AnimatedVisibility(
+            visible = !vm.isLocked && vm.isVaultChecking,
+            enter = fadeIn(animationSpec = tween(durationMillis = 120)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 180))
+        ) {
+            Column(
+                Modifier.fillMaxSize().background(w.bg),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Box(Modifier.size(56.dp).background(w.surface).wikiBorder(w.border), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.LockOpen, null, tint = w.accent, modifier = Modifier.size(24.dp))
+                }
+                Spacer(Modifier.height(14.dp))
+                Text("Likkho", style = serifStyle(24.sp, w.text))
+                Spacer(Modifier.height(14.dp))
+                LinearProgressIndicator(
+                    modifier = Modifier.widthIn(max = 180.dp).fillMaxWidth().height(3.dp),
+                    color = w.accent,
+                    trackColor = w.hairline,
+                    strokeCap = StrokeCap.Butt
+                )
+                Spacer(Modifier.height(6.dp))
+                Text("Loading…", style = sansStyle(11.sp, w.muted, FontWeight.Medium))
+            }
+        }
 
         AnimatedVisibility(
             visible = vm.isLocked && vm.effectivePrimaryPin.isNotEmpty(),

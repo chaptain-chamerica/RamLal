@@ -23,9 +23,12 @@ import androidx.compose.material.icons.outlined.Fingerprint
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,19 +41,96 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.likkho.app.storage.UnlockResult
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+
+/**
+ * Coordinates PIN verification attempts on the lock screen:
+ * - Only displays the verifying loader if verification exceeds [loaderDelayMs] (150ms default).
+ * - Cancels prior verification and ignores stale results when user enters or deletes digits.
+ * - Identical behavior for Primary and Decoy vaults.
+ */
+class PasscodeAttemptController(
+    private val scope: CoroutineScope,
+    private val loaderDelayMs: Long = 150L,
+    private val attemptUnlock: suspend (String) -> UnlockResult
+) {
+    private val _showLoader = MutableStateFlow(false)
+    val showLoader: StateFlow<Boolean> = _showLoader.asStateFlow()
+
+    private val _isVerifying = MutableStateFlow(false)
+    val isVerifying: StateFlow<Boolean> = _isVerifying.asStateFlow()
+
+    private var currentToken: Long = 0L
+    private var activeJob: Job? = null
+    private var loaderTimerJob: Job? = null
+
+    fun cancelCurrent() {
+        currentToken++
+        activeJob?.cancel()
+        activeJob = null
+        loaderTimerJob?.cancel()
+        loaderTimerJob = null
+        _isVerifying.value = false
+        _showLoader.value = false
+    }
+
+    fun submit(pin: String, onOutcome: (UnlockResult) -> Unit) {
+        currentToken++
+        val token = currentToken
+        activeJob?.cancel()
+        loaderTimerJob?.cancel()
+
+        _isVerifying.value = true
+        _showLoader.value = false
+
+        loaderTimerJob = scope.launch {
+            delay(loaderDelayMs)
+            if (isActive && currentToken == token) {
+                _showLoader.value = true
+            }
+        }
+
+        activeJob = scope.launch {
+            val res = try {
+                attemptUnlock(pin)
+            } catch (_: CancellationException) {
+                return@launch
+            } catch (t: Throwable) {
+                UnlockResult.Error(t.message ?: "Unlock error")
+            }
+            if (!isActive || currentToken != token) {
+                return@launch
+            }
+            loaderTimerJob?.cancel()
+            loaderTimerJob = null
+            _isVerifying.value = false
+            _showLoader.value = false
+            onOutcome(res)
+        }
+    }
+}
 
 /**
  * Lock screen (same as PasscodeScreen.tsx).
  * - dots = length of primary PIN (or secondary if no primary)
- * - PIN auto-checks when typed length hits the PIN length: primary => PRIMARY vault, secondary => DECOY vault
+ * - PIN auto-checks when typed length hits registered lengths: primary => PRIMARY vault, secondary => DECOY vault
+ * - loader shows below dots ONLY when verification takes >150ms (or cold start >150ms)
  * - wrong => red dots + "Incorrect passcode" + vibrate + clears after 350ms; 5th wrong => cooldown (30s), 6th+ 30s*n
  * - biometric key shown only if enabled; prompt is auto-shown ONCE when screen opens
  */
@@ -67,66 +147,98 @@ fun PasscodeScreen(vm: AppViewModel) {
     var error by remember { mutableStateOf(false) }
     var bioMessage by remember { mutableStateOf("") }
     var cooldown by remember { mutableStateOf(vm.remainingCooldownSeconds()) }
+    var showColdStartLoader by remember { mutableStateOf(false) }
+    var anyDigitTyped by remember { mutableStateOf(false) }
     val isCooling = cooldown > 0
+
+    val attemptController = remember(vm) {
+        PasscodeAttemptController(scope, loaderDelayMs = 150L) { pin -> vm.attemptUnlock(pin) }
+    }
+    val showPinLoader by attemptController.showLoader.collectAsState()
+
+    DisposableEffect(attemptController) {
+        onDispose { attemptController.cancelCurrent() }
+    }
 
     LaunchedEffect(Unit) {
         while (true) { cooldown = vm.remainingCooldownSeconds(); delay(500) }
     }
 
+    LaunchedEffect(vm.isVaultChecking) {
+        if (vm.isVaultChecking) {
+            delay(150)
+            if (vm.isVaultChecking) showColdStartLoader = true
+        } else {
+            showColdStartLoader = false
+        }
+    }
+
     fun triggerBiometric() {
         if (vm.remainingCooldownSeconds() > 0) return
         bioMessage = ""
-        scope.launch {
-            val res = vm.attemptBiometricUnlock()
+        vm.lockBiometricMessage = null
+        vm.startBiometricUnlock { res ->
             when (res) {
-                is com.likkho.app.storage.UnlockResult.Success -> {
+                is UnlockResult.Success -> {
                     cooldown = 0
                     error = false
                     entered = ""
                 }
-                is com.likkho.app.storage.UnlockResult.InCooldown -> {
+                is UnlockResult.InCooldown -> {
                     cooldown = res.remainingSeconds
                 }
-                is com.likkho.app.storage.UnlockResult.Error -> {
+                is UnlockResult.BiometricInvalidated -> {
                     bioMessage = res.message
                 }
+                is UnlockResult.Error -> {
+                    bioMessage = res.message
+                }
+                UnlockResult.Cancelled -> Unit
                 else -> {}
             }
         }
     }
 
-    // auto prompt ONCE when lock screen opens
-    LaunchedEffect(Unit) {
-        if (vm.biometricsEnabled && vm.remainingCooldownSeconds() == 0) { delay(220); triggerBiometric() }
+    // auto prompt ONCE when lock screen opens and vault metadata check completed
+    LaunchedEffect(vm.biometricsEnabled) {
+        if (!anyDigitTyped && vm.biometricsEnabled && vm.remainingCooldownSeconds() == 0) {
+            delay(220)
+            if (!anyDigitTyped && vm.biometricsEnabled && vm.remainingCooldownSeconds() == 0) {
+                triggerBiometric()
+            }
+        }
     }
 
     fun onDigit(d: String) {
         val cd = vm.remainingCooldownSeconds()
         if (cd > 0) { cooldown = cd; return }
+        anyDigitTyped = true
         vm.hooks.cancelBiometricPrompt()
-        error = false; bioMessage = ""
+        attemptController.cancelCurrent()
+        error = false; bioMessage = ""; vm.lockBiometricMessage = null
         val next = (entered + d).take(maxPinLen)
         entered = next
 
         if (vm.isPinLengthApplicable(next.length)) {
-            scope.launch {
-                val res = vm.attemptUnlock(next)
+            attemptController.submit(next) { res ->
                 when (res) {
-                    is com.likkho.app.storage.UnlockResult.Success -> {
+                    is UnlockResult.Success -> {
                         cooldown = 0
                         error = false
                         entered = ""
                     }
-                    is com.likkho.app.storage.UnlockResult.WrongPin -> {
+                    is UnlockResult.WrongPin -> {
                         if (res.isMaxApplicableLength || !vm.hasLargerApplicableLength(next.length)) {
                             error = true
                             if (res.cooldownTriggeredSeconds > 0) cooldown = res.cooldownTriggeredSeconds
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            delay(350)
-                            entered = ""
+                            scope.launch {
+                                delay(350)
+                                if (entered == next) entered = ""
+                            }
                         }
                     }
-                    is com.likkho.app.storage.UnlockResult.InCooldown -> {
+                    is UnlockResult.InCooldown -> {
                         cooldown = res.remainingSeconds
                         entered = ""
                     }
@@ -138,16 +250,23 @@ fun PasscodeScreen(vm: AppViewModel) {
             val secs = vm.recordPasscodeFailure()
             if (secs > 0) cooldown = secs
             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-            scope.launch { delay(350); entered = "" }
+            scope.launch {
+                delay(350)
+                if (entered == next) entered = ""
+            }
         }
     }
 
     fun onBackspace() {
         if (vm.remainingCooldownSeconds() > 0) return
         vm.hooks.cancelBiometricPrompt()
-        error = false
+        attemptController.cancelCurrent()
+        error = false; bioMessage = ""; vm.lockBiometricMessage = null
         entered = entered.dropLast(1)
     }
+
+    val effectiveBioMessage = bioMessage.ifEmpty { vm.lockBiometricMessage.orEmpty() }
+    val showLoaderBar = (showPinLoader || showColdStartLoader) && !error && !isCooling
 
     Column(
         Modifier.fillMaxSize().background(w.bg).padding(horizontal = 24.dp, vertical = 40.dp),
@@ -172,7 +291,7 @@ fun PasscodeScreen(vm: AppViewModel) {
             )
         }
 
-        // ---- dots ----
+        // ---- dots & verifying loader ----
         Column(Modifier.padding(vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 repeat(maxOf(dotCount, entered.length)) { i ->
@@ -201,10 +320,20 @@ fun PasscodeScreen(vm: AppViewModel) {
                     Spacer(Modifier.size(4.dp))
                     Text("Incorrect passcode", style = sansStyle(12.sp, w.danger, FontWeight.Medium))
                 }
+            } else if (showLoaderBar) {
+                Spacer(Modifier.height(14.dp))
+                LinearProgressIndicator(
+                    modifier = Modifier.widthIn(max = 180.dp).fillMaxWidth().height(3.dp),
+                    color = w.accent,
+                    trackColor = w.hairline,
+                    strokeCap = StrokeCap.Butt
+                )
+                Spacer(Modifier.height(6.dp))
+                Text("Verifying…", style = sansStyle(11.sp, w.muted, FontWeight.Medium))
             }
-            if (bioMessage.isNotEmpty() && !error && !isCooling) {
+            if (effectiveBioMessage.isNotEmpty() && !error && !isCooling) {
                 Spacer(Modifier.height(12.dp))
-                Text(bioMessage, style = sansStyle(12.sp, w.muted, FontWeight.Normal), textAlign = TextAlign.Center)
+                Text(effectiveBioMessage, style = sansStyle(12.sp, w.muted, FontWeight.Normal), textAlign = TextAlign.Center)
             }
         }
 

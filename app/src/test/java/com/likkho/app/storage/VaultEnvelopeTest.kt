@@ -99,18 +99,29 @@ class VaultEnvelopeTest {
     }
 
     @Test
-    fun biometricWrap_allowsUnwrapViaBiometricKey() {
+    fun biometricWrap_allowsUnwrapViaCryptoObjectCipher_andRejectsDirectDecrypt() {
         val pin = "1234".toCharArray()
         val dek = envelope.createVault(pin)
         assertFalse(envelope.hasBiometric())
 
-        envelope.enableBiometric(dek, pin)
+        val encCipher = envelope.prepareBiometricEncryptCipher()
+        envelope.enableBiometricWithCipher(dek, encCipher)
         assertTrue(envelope.hasBiometric())
 
-        val bioDek = envelope.unwrapWithBiometric()
+        // Direct KeyStore decrypt without CryptoObject must be blocked
+        var directBlocked = false
+        try {
+            keyStoreProvider.decrypt(envelope.biometricKeystoreAlias, ByteArray(48), "aad".toByteArray())
+        } catch (_: SecurityException) {
+            directBlocked = true
+        }
+        assertTrue("Biometric Keystore key must forbid direct decrypt without BiometricPrompt", directBlocked)
+
+        val decCipher = envelope.prepareBiometricDecryptCipher()
+        val bioDek = envelope.unwrapWithBiometricCipher(decCipher)
         assertArrayEquals(dek, bioDek)
 
-        envelope.disableBiometric(dek, pin)
+        envelope.clearBiometricKeyAndEnvelope()
         assertFalse(envelope.hasBiometric())
     }
 }

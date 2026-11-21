@@ -177,21 +177,46 @@ fun SettingsScreen(vm: AppViewModel) {
                 HairlineDivider()
                 // 3 biometric (hidden in secondary vault)
                 if (vm.vaultMode == VaultMode.PRIMARY) {
+                    val bioAvailability = remember(vm.vaultMode, vm.biometricsEnabled) {
+                        hooks.checkBiometricAvailability()
+                    }
+                    var bioBusy by remember { mutableStateOf(false) }
+                    val bioHint = when (bioAvailability) {
+                        BiometricAvailability.Available -> null
+                        is BiometricAvailability.NotEnrolled -> bioAvailability.hint
+                        is BiometricAvailability.Unavailable -> bioAvailability.hint
+                    }
+                    val rowEnabled = !bioBusy && (bioAvailability is BiometricAvailability.Available || vm.biometricsEnabled)
+                    val subtitleText = when {
+                        bioHint != null && !vm.biometricsEnabled -> bioHint
+                        vm.biometricsEnabled -> "Fingerprint / Face unlock enabled"
+                        else -> "Use device biometrics with passcode"
+                    }
                     SettingsRow(
                         icon = Icons.Outlined.Fingerprint, title = "Biometric Unlock",
-                        subtitle = if (vm.biometricsEnabled) "Fingerprint / Face unlock enabled" else "Use device biometrics with passcode",
+                        subtitle = subtitleText,
                         trailing = { WikiSwitch(vm.biometricsEnabled) },
+                        enabled = rowEnabled,
                         onClick = {
                             if (vm.savedPasscode == null) {
                                 configuringSecondary = false; pinInput = ""
                                 pinError = "Please set a Passcode first to enable Biometric unlock."
                                 showPasscodeModal = true
                             } else if (!vm.biometricsEnabled) {
-                                hooks.authenticateBiometric(false) { ok, _ ->
-                                    if (ok) { vm.biometricsEnabled = true; showToast("Biometric unlock enabled.") }
-                                    else showToast("Biometric verification cancelled.")
+                                bioBusy = true
+                                hooks.enableBiometric { _, msg ->
+                                    bioBusy = false
+                                    vm.refreshBiometricState()
+                                    showToast(msg ?: "Biometric status updated.")
                                 }
-                            } else { vm.biometricsEnabled = false; showToast("Biometric unlock disabled.") }
+                            } else {
+                                bioBusy = true
+                                hooks.disableBiometric { _, msg ->
+                                    bioBusy = false
+                                    vm.refreshBiometricState()
+                                    showToast(msg ?: "Biometric unlock disabled.")
+                                }
+                            }
                         },
                     )
                     HairlineDivider()

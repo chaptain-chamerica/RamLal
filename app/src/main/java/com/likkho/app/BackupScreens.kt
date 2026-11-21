@@ -323,8 +323,16 @@ fun BackedUpDiariesScreen(vm: AppViewModel, onClose: () -> Unit) {
                         )
                         if (vm.biometricsEnabled) {
                             IconBtn(Icons.Outlined.Fingerprint, "Unlock with Biometrics", {
-                                // TODO(StudioAI): biometric => reuse stored key to open vault
-                                vm.hooks.authenticateBiometric(true) { _, m -> if (!m.isNullOrBlank()) error = m }
+                                vm.hooks.unlockWithBiometricPrompt { res ->
+                                    error = when (res) {
+                                        is com.likkho.app.storage.UnlockResult.Error -> res.message
+                                        is com.likkho.app.storage.UnlockResult.BiometricInvalidated -> {
+                                            vm.refreshBiometricState()
+                                            res.message
+                                        }
+                                        else -> "Enter your backup encryption key to unlock backups."
+                                    }
+                                }
                             }, size = 44.dp, tint = w.accent, enabled = !busy)
                         }
                     }

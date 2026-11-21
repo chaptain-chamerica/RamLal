@@ -111,6 +111,12 @@ data class FreeUpPreview(
     val isEmpty: Boolean get() = items.isEmpty() || totalBytes <= 0L
 }
 
+sealed class BiometricAvailability {
+    object Available : BiometricAvailability()
+    data class NotEnrolled(val hint: String = "No biometrics enrolled on this device.") : BiometricAvailability()
+    data class Unavailable(val hint: String = "Strong biometric unlock unavailable on this device.") : BiometricAvailability()
+}
+
 interface FeatureHooks {
     // ---- App update (GitHub releases) ----
     suspend fun checkForUpdate(manual: Boolean): UpdateCheck
@@ -121,9 +127,14 @@ interface FeatureHooks {
     suspend fun shareDiaryAsArchive(log: DiaryLog, passphrase: String = ""): String     // returns success message
     suspend fun exportDiary(log: DiaryLog, format: ExportFormat): String
 
-    // ---- Settings ----
-    fun authenticateBiometric(forUnlock: Boolean, onResult: (success: Boolean, message: String?) -> Unit)
+    // ---- Settings & Auth ----
+    fun attachActivity(activity: androidx.fragment.app.FragmentActivity?) {}
+    fun checkBiometricAvailability(): BiometricAvailability = BiometricAvailability.Unavailable()
+    fun enableBiometric(onResult: (success: Boolean, message: String?) -> Unit)
+    fun disableBiometric(onResult: (success: Boolean, message: String?) -> Unit)
+    fun unlockWithBiometricPrompt(onResult: (com.likkho.app.storage.UnlockResult) -> Unit)
     fun cancelBiometricPrompt()
+    suspend fun runPostUnlockMaintenance(vaultId: com.likkho.app.storage.VaultId): com.likkho.app.storage.RecoveryReport? = null
     suspend fun exportAllDataZip(): String
     suspend fun clearAllData()
     fun loadSavedWords(vault: VaultMode): List<WordAnalysisRecord>

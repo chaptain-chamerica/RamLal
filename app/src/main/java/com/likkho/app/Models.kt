@@ -62,6 +62,8 @@ data class Pfp(
     val textScale: Float = 1f,
 )
 
+const val INDEX_LOCKED_MARKER = "__INDEX_LOCKED__"
+
 /** Same fields as React `DiaryLog`. contentHtml: Studio AI can store real rich text here. */
 data class DiaryLog(
     val id: String,

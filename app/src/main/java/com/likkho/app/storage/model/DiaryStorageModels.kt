@@ -113,7 +113,9 @@ data class IndexEntryRecord(
     val plainPreview: String = "",
     val heading: String = "",
     val mediaIds: List<String> = emptyList(),
-    val hasTrackedMediaIds: Boolean = false
+    val hasTrackedMediaIds: Boolean = false,
+    val reminderAt: Long? = null,
+    val pfp: PfpRecord? = null
 )
 
 @Serializable

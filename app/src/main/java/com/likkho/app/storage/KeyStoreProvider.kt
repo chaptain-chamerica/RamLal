@@ -11,6 +11,20 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
+class BiometricKeyInvalidatedException(cause: Throwable? = null) :
+    RuntimeException("Biometrics changed. Unlock with PIN and enable again.", cause)
+
+fun isBiometricInvalidationError(t: Throwable?): Boolean {
+    var cur = t
+    while (cur != null) {
+        if (cur is BiometricKeyInvalidatedException) return true
+        val name = cur.javaClass.simpleName
+        if (name == "KeyPermanentlyInvalidatedException") return true
+        cur = cur.cause
+    }
+    return false
+}
+
 /**
  * Abstraction over Hardware/Keystore encryption keys.
  * Enables Android Keystore (with StrongBox fallback) in production and
@@ -38,16 +52,18 @@ class AndroidKeyStoreProvider : KeyStoreProvider {
         load(null)
     }
 
-    override fun hasKey(alias: String): Boolean = keyStore.containsAlias(alias)
+    override fun hasKey(alias: String): Boolean = runCatching { keyStore.containsAlias(alias) }.getOrDefault(false)
 
     override fun deleteKey(alias: String) {
-        if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
+        runCatching {
+            if (keyStore.containsAlias(alias)) {
+                keyStore.deleteEntry(alias)
+            }
         }
     }
 
     override fun getOrCreateAesGcmKey(alias: String, requireBiometric: Boolean): SecretKey {
-        val existing = keyStore.getKey(alias, null) as? SecretKey
+        val existing = runCatching { keyStore.getKey(alias, null) as? SecretKey }.getOrNull()
         if (existing != null) return existing
 
         val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
@@ -62,6 +78,9 @@ class AndroidKeyStoreProvider : KeyStoreProvider {
 
             if (requireBiometric) {
                 builder.setUserAuthenticationRequired(true)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    builder.setInvalidatedByBiometricEnrollment(true)
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     builder.setUserAuthenticationParameters(
                         0,
@@ -147,15 +166,28 @@ class AndroidKeyStoreProvider : KeyStoreProvider {
     }
 
     override fun getBiometricCipher(alias: String, mode: Int, iv: ByteArray?): Cipher {
-        val key = getOrCreateAesGcmKey(alias, requireBiometric = true)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        if (mode == Cipher.ENCRYPT_MODE) {
-            cipher.init(Cipher.ENCRYPT_MODE, key)
-        } else {
-            requireNotNull(iv) { "IV required for decryption" }
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(CryptoUtils.GCM_TAG_SIZE_BITS, iv))
+        return try {
+            val key = if (mode == Cipher.ENCRYPT_MODE) {
+                deleteKey(alias)
+                getOrCreateAesGcmKey(alias, requireBiometric = true)
+            } else {
+                (keyStore.getKey(alias, null) as? SecretKey)
+                    ?: throw BiometricKeyInvalidatedException()
+            }
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            if (mode == Cipher.ENCRYPT_MODE) {
+                cipher.init(Cipher.ENCRYPT_MODE, key)
+            } else {
+                requireNotNull(iv) { "IV required for decryption" }
+                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(CryptoUtils.GCM_TAG_SIZE_BITS, iv))
+            }
+            cipher
+        } catch (t: Throwable) {
+            if (isBiometricInvalidationError(t)) {
+                throw BiometricKeyInvalidatedException(t)
+            }
+            throw t
         }
-        return cipher
     }
 
     companion object {
@@ -165,29 +197,48 @@ class AndroidKeyStoreProvider : KeyStoreProvider {
 
 /**
  * In-memory provider for deterministic JVM testing without hardware AndroidKeyStore dependency.
+ * Enforces biometric alias isolation: keys created with requireBiometric=true cannot be used via direct
+ * [encrypt]/[decrypt] calls and must go through [getBiometricCipher] + BiometricPrompt authentication.
  */
 class InMemoryKeyStoreProvider : KeyStoreProvider {
     private val keys = mutableMapOf<String, ByteArray>()
     private val hmacKeys = mutableMapOf<String, ByteArray>()
+    private val biometricAliases = mutableSetOf<String>()
+    private val invalidatedAliases = mutableSetOf<String>()
 
     override fun hasKey(alias: String): Boolean = keys.containsKey(alias) || hmacKeys.containsKey(alias)
 
     override fun deleteKey(alias: String) {
-        keys.remove(alias)
-        hmacKeys.remove(alias)
+        keys.remove(alias)?.let { CryptoUtils.zeroize(it) }
+        hmacKeys.remove(alias)?.let { CryptoUtils.zeroize(it) }
+        biometricAliases.remove(alias)
+        invalidatedAliases.remove(alias)
+    }
+
+    fun invalidateBiometricKey(alias: String) {
+        invalidatedAliases.add(alias)
     }
 
     override fun getOrCreateAesGcmKey(alias: String, requireBiometric: Boolean): SecretKey {
+        if (requireBiometric) {
+            biometricAliases.add(alias)
+        }
         val raw = keys.getOrPut(alias) { CryptoUtils.secureRandomBytes(32) }
         return SecretKeySpec(raw, "AES")
     }
 
     override fun encrypt(alias: String, plaintext: ByteArray, aad: ByteArray?): ByteArray {
+        if (alias in biometricAliases) {
+            throw SecurityException("Biometric key $alias cannot be used directly without BiometricPrompt CryptoObject")
+        }
         val rawKey = keys.getOrPut(alias) { CryptoUtils.secureRandomBytes(32) }
         return CryptoUtils.aesGcmEncrypt(rawKey, plaintext, aad)
     }
 
     override fun decrypt(alias: String, ivAndCiphertext: ByteArray, aad: ByteArray?): ByteArray {
+        if (alias in biometricAliases) {
+            throw SecurityException("Biometric key $alias cannot be decrypted directly without BiometricPrompt CryptoObject")
+        }
         val rawKey = keys[alias] ?: throw IllegalStateException("Key $alias not found")
         return CryptoUtils.aesGcmDecrypt(rawKey, ivAndCiphertext, aad)
     }
@@ -208,7 +259,18 @@ class InMemoryKeyStoreProvider : KeyStoreProvider {
     }
 
     override fun getBiometricCipher(alias: String, mode: Int, iv: ByteArray?): Cipher {
-        val key = getOrCreateAesGcmKey(alias, requireBiometric = true)
+        if (mode == Cipher.DECRYPT_MODE && (alias in invalidatedAliases || !keys.containsKey(alias))) {
+            throw BiometricKeyInvalidatedException()
+        }
+        val key = if (mode == Cipher.ENCRYPT_MODE) {
+            invalidatedAliases.remove(alias)
+            keys.remove(alias)?.let { CryptoUtils.zeroize(it) }
+            getOrCreateAesGcmKey(alias, requireBiometric = true)
+        } else {
+            biometricAliases.add(alias)
+            val raw = keys[alias] ?: throw BiometricKeyInvalidatedException()
+            SecretKeySpec(raw, "AES")
+        }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         if (mode == Cipher.ENCRYPT_MODE) {
             cipher.init(Cipher.ENCRYPT_MODE, key)

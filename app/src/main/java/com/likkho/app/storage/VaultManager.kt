@@ -1,7 +1,12 @@
 package com.likkho.app.storage
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -9,35 +14,56 @@ import com.likkho.app.storage.backup.BackupEngine
 import com.likkho.app.storage.migration.DiaryMigrator
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import javax.crypto.AEADBadTagException
+import javax.crypto.Cipher
+import kotlin.coroutines.coroutineContext
 
 sealed class UnlockResult {
     data class Success(val vaultId: VaultId, val session: VaultSession) : UnlockResult()
     data class InCooldown(val remainingSeconds: Int) : UnlockResult()
     data class WrongPin(val cooldownTriggeredSeconds: Int, val isMaxApplicableLength: Boolean) : UnlockResult()
     object NoPasscodeConfigured : UnlockResult()
+    object Cancelled : UnlockResult()
+    data class BiometricInvalidated(
+        val message: String = "Biometrics changed. Unlock with PIN and enable again."
+    ) : UnlockResult()
     data class Error(val message: String) : UnlockResult()
 }
 
 /**
- * VaultManager orchestrates dual-vault storage, key hierarchy, unlock logic,
- * wrong-PIN protection, and memory locking per STORAGE_SPEC Sections 1, 2, and 10.
+ * VaultManager orchestrates dual-vault storage, key hierarchy, parallel unlock logic,
+ * wrong-PIN protection, calibrated PBKDF2 rewrap, CryptoObject biometrics, and memory locking.
  */
 class VaultManager(
     val baseDir: File,
     val keyStoreProvider: KeyStoreProvider = AndroidKeyStoreProvider(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val pbkdf2Iterations: Int = CryptoUtils.DEFAULT_PBKDF2_ITERATIONS,
+    private val pbkdf2Iterations: Int? = null,
     val clockProvider: ClockProvider = DefaultClockProvider,
-    val processStartTimeMs: Long = PROCESS_START_TIME_MS
+    val processStartTimeMs: Long = PROCESS_START_TIME_MS,
+    private val kdfDispatcher: CoroutineDispatcher = if (dispatcher == Dispatchers.IO) Dispatchers.Default else dispatcher,
+    private val targetIterationsProvider: () -> Int = { CryptoUtils.getCalibratedPbkdf2Iterations() }
 ) {
     companion object {
         val PROCESS_START_TIME_MS: Long = System.currentTimeMillis()
+        const val BIOMETRIC_INVALIDATED_MESSAGE = "Biometrics changed. Unlock with PIN and enable again."
+    }
+
+    private data class PendingIterationRewrap(
+        val vaultId: VaultId,
+        val pinCopy: CharArray
+    ) {
+        fun clear() {
+            CryptoUtils.zeroize(pinCopy)
+        }
     }
 
     private val sessionProtectedMediaIds = ConcurrentHashMap.newKeySet<String>()
     private val mutexV1 = Mutex()
     private val mutexV2 = Mutex()
+    private val rewrapLock = Any()
+
+    @Volatile
+    private var pendingRewrap: PendingIterationRewrap? = null
 
     val wrongPinCounter = WrongPinCounter(baseDir, keyStoreProvider, clockProvider)
     val pinLengthsRegistry = PinLengthsRegistry(baseDir)
@@ -46,14 +72,16 @@ class VaultManager(
         VaultId.PRIMARY,
         File(baseDir, VaultId.PRIMARY.dirName),
         keyStoreProvider,
-        pbkdf2Iterations
+        pbkdf2Iterations,
+        targetIterationsProvider
     )
 
     val envelopeV2 = VaultEnvelope(
         VaultId.DECOY,
         File(baseDir, VaultId.DECOY.dirName),
         keyStoreProvider,
-        pbkdf2Iterations
+        pbkdf2Iterations,
+        targetIterationsProvider
     )
 
     val primaryDiaryRepo = DiaryRepository(VaultId.PRIMARY, File(baseDir, VaultId.PRIMARY.dirName))
@@ -68,7 +96,10 @@ class VaultManager(
     val primaryWordRepo = WordAnalysisRepository(VaultId.PRIMARY, File(baseDir, VaultId.PRIMARY.dirName))
     val decoyWordRepo = WordAnalysisRepository(VaultId.DECOY, File(baseDir, VaultId.DECOY.dirName))
 
-    val backupEngine = BackupEngine(File(baseDir, "tmp"), defaultIterations = pbkdf2Iterations)
+    val backupEngine = BackupEngine(
+        File(baseDir, "tmp"),
+        defaultIterations = pbkdf2Iterations ?: CryptoUtils.DEFAULT_PBKDF2_ITERATIONS
+    )
     val diaryMigrator = DiaryMigrator()
 
     fun getDiaryRepository(vaultId: VaultId): DiaryRepository =
@@ -163,13 +194,99 @@ class VaultManager(
 
     fun cleanupStaleTempDirs(): Long = backupEngine.cleanupStaleTempDirs()
 
-    private fun runUnlockMaintenance(vaultId: VaultId, session: VaultSession) {
-        backupEngine.cleanupStaleTempDirs()
-        session.useDek { dek ->
-            val diaryRepo = getDiaryRepository(vaultId)
-            val report = diaryRepo.scanAndRecover(dek, dekVerified = true)
-            lastRecoveryReport = report
-            cleanupVaultOrphans(vaultId, dek)
+    private fun clearPendingRewrap() {
+        synchronized(rewrapLock) {
+            pendingRewrap?.clear()
+            pendingRewrap = null
+        }
+    }
+
+    private fun schedulePendingRewrap(vaultId: VaultId, pin: CharArray) {
+        synchronized(rewrapLock) {
+            pendingRewrap?.clear()
+            pendingRewrap = PendingIterationRewrap(vaultId, pin.copyOf())
+        }
+    }
+
+    fun hasPendingIterationRewrap(): Boolean = synchronized(rewrapLock) { pendingRewrap != null }
+
+    /**
+     * Executes deferred post-unlock maintenance (stale temp cleanup, scanAndRecover, orphan cleanup,
+     * and background PBKDF2 iteration migration if scheduled) off the critical unlock path at low priority.
+     */
+    suspend fun runPostUnlockMaintenance(
+        expectedVaultId: VaultId? = currentVault,
+        beforeRewrapCommitHook: ((File) -> Unit)? = null
+    ): RecoveryReport? = withContext(dispatcher) {
+        val vaultId = expectedVaultId ?: return@withContext null
+        val mutex = if (vaultId == VaultId.PRIMARY) mutexV1 else mutexV2
+        runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
+
+        mutex.withLock {
+            val session = activeSession ?: return@withLock null
+            if (!session.isOpen || session.vaultId != vaultId) return@withLock null
+
+            var report: RecoveryReport? = null
+            try {
+                val t0 = System.nanoTime()
+                backupEngine.cleanupStaleTempDirs()
+
+                val rewrapTask = synchronized(rewrapLock) {
+                    val pending = pendingRewrap
+                    if (pending != null && pending.vaultId == vaultId) {
+                        pendingRewrap = null
+                        pending
+                    } else {
+                        null
+                    }
+                }
+                if (rewrapTask != null) {
+                    try {
+                        val env = if (vaultId == VaultId.PRIMARY) envelopeV1 else envelopeV2
+                        val targetIter = env.resolveTargetIterations()
+                        session.useDek { dek ->
+                            val dekCopy = dek.copyOf()
+                            try {
+                                env.rewrapIterationsAtomic(
+                                    currentDek = dekCopy,
+                                    pin = rewrapTask.pinCopy,
+                                    newIterations = targetIter,
+                                    beforeCommitHook = beforeRewrapCommitHook
+                                )
+                                CryptoUtils.logPerf("background_rewrap_success iter=$targetIter")
+                            } finally {
+                                CryptoUtils.zeroize(dekCopy)
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        CryptoUtils.logPerf("background_rewrap_aborted reason=${t.javaClass.simpleName}")
+                    } finally {
+                        rewrapTask.clear()
+                    }
+                }
+
+                if (!session.isOpen || activeSession !== session) return@withLock null
+                session.useDek { dek ->
+                    val diaryRepo = getDiaryRepository(vaultId)
+                    val tScan0 = System.nanoTime()
+                    val scanReport = diaryRepo.scanAndRecover(dek, dekVerified = true)
+                    val scanMs = (System.nanoTime() - tScan0) / 1_000_000.0
+                    val tOrph0 = System.nanoTime()
+                    cleanupVaultOrphans(vaultId, dek)
+                    val orphMs = (System.nanoTime() - tOrph0) / 1_000_000.0
+                    lastRecoveryReport = scanReport
+                    report = scanReport
+                    val totalMs = (System.nanoTime() - t0) / 1_000_000.0
+                    CryptoUtils.logPerf(
+                        "post_unlock_maintenance scanMs=${"%.2f".format(scanMs)} orphanMs=${"%.2f".format(orphMs)} totalMs=${"%.2f".format(totalMs)}"
+                    )
+                }
+            } catch (_: CancellationException) {
+                throw CancellationException()
+            } catch (t: Throwable) {
+                CryptoUtils.logPerf("post_unlock_maintenance_error type=${t.javaClass.simpleName}")
+            }
+            report
         }
     }
 
@@ -184,7 +301,7 @@ class VaultManager(
 
     /**
      * Ensures Primary vault (v1) is initialized on first app launch.
-     * If not present, creates it in Keystore-only (no-passcode) mode.
+     * If not present, creates it in Keystore-only (no-passcode) mode and opens session immediately.
      */
     suspend fun ensurePrimaryVaultInitialized(): VaultSession = withContext(dispatcher) {
         mutexV1.withLock {
@@ -197,71 +314,120 @@ class VaultManager(
             } else {
                 throw IllegalStateException("Primary vault requires passcode unlock")
             }
+            lock()
             activeSession = session
-            runUnlockMaintenance(VaultId.PRIMARY, session)
+            lastRecoveryReport = null
             session
         }
     }
 
     /**
      * Attempts to unlock either Primary (v1) or Decoy (v2) vault using [pin].
-     * Which vault opens depends solely on which DEK unwrap tag succeeds.
-     * Never logs PIN, DEK, or vault identity.
+     * Checks both envelopes in PARALLEL and waits for both before returning so neither timing
+     * nor failures leak which vault is configured or opened.
+     * Returns [UnlockResult.Success] immediately after DEK unwrap (maintenance runs deferred).
      */
-    suspend fun unlockWithPin(pin: CharArray, isExplicitSubmit: Boolean = false): UnlockResult =
-        withContext(dispatcher) {
+    suspend fun unlockWithPin(
+        pin: CharArray,
+        isExplicitSubmit: Boolean = false,
+        zeroizeInput: Boolean = false
+    ): UnlockResult = withContext(dispatcher) {
+        try {
             val cooldown = wrongPinCounter.remainingCooldownSeconds()
             if (cooldown > 0) {
                 return@withContext UnlockResult.InCooldown(cooldown)
             }
 
-            // 1. Try Primary Vault (v1)
-            var v1Success: ByteArray? = null
-            if (envelopeV1.exists() && envelopeV1.hasPasscode()) {
-                mutexV1.withLock {
-                    try {
-                        v1Success = envelopeV1.unwrapWithPin(pin)
-                    } catch (e: AEADBadTagException) {
-                        // Wrong PIN for V1
-                    } catch (e: Exception) {
-                        // Other error
-                    }
+            val v1Active = envelopeV1.exists() && envelopeV1.hasPasscode()
+            val v2Active = envelopeV2.exists() && envelopeV2.hasPasscode()
+
+            val tTotal0 = System.nanoTime()
+            var v1Dek: ByteArray? = null
+            var v2Dek: ByteArray? = null
+
+            val pinCopy1 = if (v1Active) pin.copyOf() else null
+            val pinCopy2 = if (v2Active) pin.copyOf() else null
+
+            try {
+                coroutineScope {
+                    val d1 = if (v1Active) {
+                        async(kdfDispatcher) {
+                            val p = pinCopy1!!
+                            try {
+                                if (!isActive) return@async null
+                                mutexV1.withLock {
+                                    if (!isActive) return@withLock null
+                                    runCatching { envelopeV1.unwrapWithPin(p) }.getOrNull()
+                                }
+                            } finally {
+                                CryptoUtils.zeroize(p)
+                            }
+                        }
+                    } else null
+
+                    val d2 = if (v2Active) {
+                        async(kdfDispatcher) {
+                            val p = pinCopy2!!
+                            try {
+                                if (!isActive) return@async null
+                                mutexV2.withLock {
+                                    if (!isActive) return@withLock null
+                                    runCatching { envelopeV2.unwrapWithPin(p) }.getOrNull()
+                                }
+                            } finally {
+                                CryptoUtils.zeroize(p)
+                            }
+                        }
+                    } else null
+
+                    val results = listOfNotNull(d1, d2).awaitAll()
+                    var idx = 0
+                    if (d1 != null) v1Dek = results[idx++]
+                    if (d2 != null) v2Dek = results[idx]
                 }
+            } catch (t: Throwable) {
+                CryptoUtils.zeroize(v1Dek)
+                CryptoUtils.zeroize(v2Dek)
+                CryptoUtils.zeroize(pinCopy1)
+                CryptoUtils.zeroize(pinCopy2)
+                throw t
             }
 
-            if (v1Success != null) {
+            if (!coroutineContext.isActive) {
+                CryptoUtils.zeroize(v1Dek)
+                CryptoUtils.zeroize(v2Dek)
+                throw CancellationException("Unlock attempt superseded")
+            }
+
+            val totalMs = (System.nanoTime() - tTotal0) / 1_000_000.0
+            CryptoUtils.logPerf("unlock_pin_parallel ms=${"%.2f".format(totalMs)}")
+
+            val matchedVault: VaultId? = when {
+                v1Dek != null -> {
+                    CryptoUtils.zeroize(v2Dek)
+                    VaultId.PRIMARY
+                }
+                v2Dek != null -> VaultId.DECOY
+                else -> null
+            }
+
+            if (matchedVault != null) {
+                val matchedDek = if (matchedVault == VaultId.PRIMARY) v1Dek!! else v2Dek!!
                 wrongPinCounter.recordSuccess()
                 lock()
-                val session = VaultSession(VaultId.PRIMARY, v1Success!!)
+                val session = VaultSession(matchedVault, matchedDek)
                 activeSession = session
-                runUnlockMaintenance(VaultId.PRIMARY, session)
-                return@withContext UnlockResult.Success(VaultId.PRIMARY, session)
-            }
+                lastRecoveryReport = null
 
-            // 2. Try Decoy Vault (v2)
-            var v2Success: ByteArray? = null
-            if (envelopeV2.exists() && envelopeV2.hasPasscode()) {
-                mutexV2.withLock {
-                    try {
-                        v2Success = envelopeV2.unwrapWithPin(pin)
-                    } catch (e: AEADBadTagException) {
-                        // Wrong PIN for V2
-                    } catch (e: Exception) {
-                        // Other error
-                    }
+                val env = if (matchedVault == VaultId.PRIMARY) envelopeV1 else envelopeV2
+                val storedIter = env.storedIterations() ?: 0
+                val minTargetFloor = pbkdf2Iterations ?: CryptoUtils.MIN_CALIBRATED_ITERATIONS
+                if (storedIter > minTargetFloor) {
+                    schedulePendingRewrap(matchedVault, pin)
                 }
+                return@withContext UnlockResult.Success(matchedVault, session)
             }
 
-            if (v2Success != null) {
-                wrongPinCounter.recordSuccess()
-                lock()
-                val session = VaultSession(VaultId.DECOY, v2Success!!)
-                activeSession = session
-                runUnlockMaintenance(VaultId.DECOY, session)
-                return@withContext UnlockResult.Success(VaultId.DECOY, session)
-            }
-
-            // 3. Failed: Both vaults failed
             val isMaxLen = pinLengthsRegistry.isMaxRegisteredLength(pin.size) || isExplicitSubmit
             val triggeredCooldown = if (isMaxLen) {
                 wrongPinCounter.recordFailure()
@@ -270,10 +436,15 @@ class VaultManager(
             }
 
             UnlockResult.WrongPin(triggeredCooldown, isMaxLen)
+        } finally {
+            if (zeroizeInput) {
+                CryptoUtils.zeroize(pin)
+            }
         }
+    }
 
     /**
-     * Unlocks primary vault if no passcode is set.
+     * Unlocks vault if no passcode is set. Returns [UnlockResult.Success] immediately (maintenance deferred).
      */
     suspend fun unlockNoPasscode(vaultId: VaultId = VaultId.PRIMARY): UnlockResult =
         withContext(dispatcher) {
@@ -293,7 +464,7 @@ class VaultManager(
                     lock()
                     val session = VaultSession(vaultId, dek)
                     activeSession = session
-                    runUnlockMaintenance(vaultId, session)
+                    lastRecoveryReport = null
                     UnlockResult.Success(vaultId, session)
                 } catch (e: Exception) {
                     UnlockResult.Error(e.message ?: "Failed to unwrap Keystore key")
@@ -302,9 +473,54 @@ class VaultManager(
         }
 
     /**
-     * Unlocks primary vault using biometric authentication key.
+     * Prepares a Keystore ENCRYPT Cipher for BiometricPrompt enrollment (Primary vault only).
      */
-    suspend fun unlockWithBiometric(): UnlockResult = withContext(dispatcher) {
+    fun prepareBiometricEncryptCipher(): Cipher {
+        val session = activeSession
+        check(session != null && session.isOpen && session.vaultId == VaultId.PRIMARY) {
+            "Primary vault must be unlocked to enable biometrics"
+        }
+        check(envelopeV1.hasPasscode()) { "Set a passcode before enabling biometrics" }
+        return envelopeV1.prepareBiometricEncryptCipher()
+    }
+
+    /**
+     * Enables biometric unlock using the active unlocked session DEK and the authenticated
+     * BiometricPrompt ENCRYPT [authedCipher]. Never requires re-entering the user PIN.
+     */
+    suspend fun enableBiometricWithCipher(authedCipher: Cipher) = withContext(dispatcher) {
+        mutexV1.withLock {
+            val session = activeSession
+            check(session != null && session.isOpen && session.vaultId == VaultId.PRIMARY) {
+                "Primary vault must be unlocked to enable biometrics"
+            }
+            val dekCopy = ByteArray(CryptoUtils.AES_KEY_SIZE_BYTES)
+            session.useDek { dek -> System.arraycopy(dek, 0, dekCopy, 0, dekCopy.size) }
+            try {
+                envelopeV1.enableBiometricWithCipher(dekCopy, authedCipher)
+            } finally {
+                CryptoUtils.zeroize(dekCopy)
+            }
+        }
+    }
+
+    /**
+     * Disables biometric unlock for Primary vault, deleting the biometric Keystore key and wrapped DEK copy.
+     */
+    suspend fun disableBiometric() = withContext(dispatcher) {
+        mutexV1.withLock {
+            envelopeV1.clearBiometricKeyAndEnvelope()
+        }
+    }
+
+    /**
+     * Unlocks Primary vault strictly through a BiometricPrompt CryptoObject authenticator.
+     * Never bypasses BiometricPrompt and never executes PBKDF2.
+     * On biometric invalidation (e.g. new fingerprint enrolled), purges biometric key + wrapped copy cleanly.
+     */
+    suspend fun unlockWithBiometricPrompt(
+        authenticateCipher: suspend (Cipher) -> Cipher?
+    ): UnlockResult = withContext(dispatcher) {
         val cooldown = wrongPinCounter.remainingCooldownSeconds()
         if (cooldown > 0) {
             return@withContext UnlockResult.InCooldown(cooldown)
@@ -315,24 +531,56 @@ class VaultManager(
         }
 
         mutexV1.withLock {
+            val decryptCipher = try {
+                envelopeV1.prepareBiometricDecryptCipher()
+            } catch (t: Throwable) {
+                if (isBiometricInvalidationError(t)) {
+                    envelopeV1.clearBiometricKeyAndEnvelope()
+                    return@withLock UnlockResult.BiometricInvalidated(BIOMETRIC_INVALIDATED_MESSAGE)
+                }
+                return@withLock UnlockResult.Error(t.message ?: "Biometric setup error")
+            }
+
+            val authedCipher = try {
+                authenticateCipher(decryptCipher)
+            } catch (t: Throwable) {
+                if (isBiometricInvalidationError(t)) {
+                    envelopeV1.clearBiometricKeyAndEnvelope()
+                    return@withLock UnlockResult.BiometricInvalidated(BIOMETRIC_INVALIDATED_MESSAGE)
+                }
+                val msg = t.message?.takeIf { it.isNotBlank() && t !is CancellationException }
+                if (msg != null && t is IllegalStateException) {
+                    return@withLock UnlockResult.Error(msg)
+                }
+                return@withLock UnlockResult.Cancelled
+            } ?: return@withLock UnlockResult.Cancelled
+
+            if (!coroutineContext.isActive) {
+                return@withLock UnlockResult.Cancelled
+            }
+
             try {
-                val dek = envelopeV1.unwrapWithBiometric()
+                val dek = envelopeV1.unwrapWithBiometricCipher(authedCipher)
                 wrongPinCounter.recordSuccess()
                 lock()
                 val session = VaultSession(VaultId.PRIMARY, dek)
                 activeSession = session
-                runUnlockMaintenance(VaultId.PRIMARY, session)
+                lastRecoveryReport = null
                 UnlockResult.Success(VaultId.PRIMARY, session)
-            } catch (e: Exception) {
-                // Biometric key invalid or failed -> fallback to PIN without crash
-                UnlockResult.Error("Biometric authentication failed: ${e.message}")
+            } catch (t: Throwable) {
+                if (isBiometricInvalidationError(t)) {
+                    envelopeV1.clearBiometricKeyAndEnvelope()
+                    UnlockResult.BiometricInvalidated(BIOMETRIC_INVALIDATED_MESSAGE)
+                } else {
+                    UnlockResult.Error("Biometric authentication failed: ${t.message}")
+                }
             }
         }
     }
 
     /**
      * Sets or updates PIN on Primary vault. Re-wraps existing DEK.
-     * Does NOT re-encrypt diary files.
+     * Keeps biometric wrapped copy valid if already enabled (same DEK).
      */
     suspend fun setPrimaryPasscode(newPin: CharArray, oldPin: CharArray? = null) =
         withContext(dispatcher) {
@@ -365,7 +613,7 @@ class VaultManager(
         }
 
     /**
-     * Removes passcode on Primary vault. Re-wraps DEK with Keystore only.
+     * Removes passcode on Primary vault. Re-wraps DEK with Keystore only and deletes biometric key & copy.
      */
     suspend fun removePrimaryPasscode(oldPin: CharArray? = null) = withContext(dispatcher) {
         mutexV1.withLock {
@@ -446,37 +694,10 @@ class VaultManager(
         }
 
     /**
-     * Enables biometric unlock for Primary vault.
-     */
-    suspend fun enableBiometric(currentPin: CharArray) = withContext(dispatcher) {
-        mutexV1.withLock {
-            val dek = envelopeV1.unwrapWithPin(currentPin)
-            try {
-                envelopeV1.enableBiometric(dek, currentPin)
-            } finally {
-                CryptoUtils.zeroize(dek)
-            }
-        }
-    }
-
-    /**
-     * Disables biometric unlock for Primary vault and deletes the biometric key.
-     */
-    suspend fun disableBiometric(currentPin: CharArray) = withContext(dispatcher) {
-        mutexV1.withLock {
-            val dek = envelopeV1.unwrapWithPin(currentPin)
-            try {
-                envelopeV1.disableBiometric(dek, currentPin)
-            } finally {
-                CryptoUtils.zeroize(dek)
-            }
-        }
-    }
-
-    /**
-     * Section 10: Immediately locks memory, zero-filling the active DEK.
+     * Section 10: Immediately locks memory, zero-filling the active DEK and any pending rewrap PIN.
      */
     fun lock() {
+        clearPendingRewrap()
         activeSession?.close()
         activeSession = null
     }

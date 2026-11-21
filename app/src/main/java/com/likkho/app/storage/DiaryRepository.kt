@@ -391,7 +391,9 @@ class DiaryRepository(
             plainPreview = record.plainPreview,
             heading = record.heading,
             mediaIds = extractRecordMediaIds(record).sorted(),
-            hasTrackedMediaIds = true
+            hasTrackedMediaIds = true,
+            reminderAt = record.reminderAt,
+            pfp = record.pfp
         )
         indexManager.upsertEntry(entry, dek, diariesDir)
     }
@@ -621,6 +623,40 @@ class DiaryRepository(
             return status.index
         }
         return indexManager.rebuildFromDiariesVerified(diariesDir, dek)
+    }
+
+    data class HomeIndexResult<T>(
+        val items: List<T>,
+        val failed: List<FailedDiaryEntry> = emptyList(),
+        val usedIndexFastPath: Boolean
+    )
+
+    /**
+     * Loads Home list summaries purely from encrypted index.lki when present and consistent with disk IDs
+     * (0 diary .lkd files decrypted). Falls back to full decrypt-all + verified index rebuild ONLY if the
+     * index is missing, corrupt, or mismatched.
+     */
+    @Synchronized
+    fun <T> loadHomeEntries(
+        dek: ByteArray,
+        fromIndexEntry: (IndexEntryRecord) -> T,
+        fromFullRecord: (DiaryRecord) -> T
+    ): HomeIndexResult<T> {
+        val t0 = System.nanoTime()
+        val status = indexManager.readIndexStatus(dek)
+        if (status is IndexReadResult.Loaded && indexMatchesDisk(status.index, dek)) {
+            val sorted = status.index.entries.sortedWith(
+                compareByDescending<IndexEntryRecord> { it.pinned }.thenByDescending { it.createdAt }
+            )
+            val mapped = sorted.map(fromIndexEntry)
+            val elapsedMs = (System.nanoTime() - t0) / 1_000_000.0
+            CryptoUtils.logPerf("loadHomeEntries_indexFast count=${mapped.size} ms=${"%.2f".format(elapsedMs)}")
+            return HomeIndexResult(items = mapped, failed = emptyList(), usedIndexFastPath = true)
+        }
+        val (loaded, failed) = loadAllDiariesMapped(dek, fromFullRecord)
+        val elapsedMs = (System.nanoTime() - t0) / 1_000_000.0
+        CryptoUtils.logPerf("loadHomeEntries_fallbackDecryptAll count=${loaded.size} ms=${"%.2f".format(elapsedMs)}")
+        return HomeIndexResult(items = loaded, failed = failed, usedIndexFastPath = false)
     }
 
     /**

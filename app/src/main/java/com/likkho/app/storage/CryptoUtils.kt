@@ -20,9 +20,19 @@ object CryptoUtils {
     const val GCM_IV_SIZE_BYTES = 12  // 96-bit recommended for AES-GCM
     const val GCM_TAG_SIZE_BITS = 128 // 16-byte authentication tag
     const val DEFAULT_PBKDF2_ITERATIONS = 600_000
+    const val MIN_CALIBRATED_ITERATIONS = 150_000
+    const val MAX_CALIBRATED_ITERATIONS = 600_000
+    const val TARGET_KDF_MS = 300L
     const val SALT_SIZE_BYTES = 16
+    const val PERF_LOG_TAG = "LikkhoPerf"
 
     private val secureRandom = SecureRandom()
+    @Volatile
+    private var cachedCalibratedIterations: Int? = null
+
+    fun logPerf(message: String) {
+        runCatching { android.util.Log.i(PERF_LOG_TAG, message) }
+    }
 
     fun secureRandomBytes(size: Int): ByteArray {
         val bytes = ByteArray(size)
@@ -43,8 +53,48 @@ object CryptoUtils {
     }
 
     /**
+     * Benchmarks PBKDF2-HMAC-SHA256 on the current device and chooses an iteration count
+     * targeting ~250-350ms (300ms center), strictly clamped to [150_000, 600_000].
+     * Never logs any PIN or key material.
+     */
+    fun calibratePbkdf2Iterations(
+        sampleIterations: Int = 25_000,
+        targetMs: Long = TARGET_KDF_MS
+    ): Int {
+        val dummyPin = "calib0".toCharArray()
+        val dummySalt = ByteArray(SALT_SIZE_BYTES) { 0x5A }
+        return try {
+            // Brief JIT warmup
+            zeroize(deriveKeyPbkdf2(dummyPin, dummySalt, 2_000))
+            val t0 = System.nanoTime()
+            val derived = deriveKeyPbkdf2(dummyPin, dummySalt, sampleIterations)
+            val elapsedMs = ((System.nanoTime() - t0) / 1_000_000.0).coerceAtLeast(1.0)
+            zeroize(derived)
+            val rawTarget = ((targetMs.toDouble() / elapsedMs) * sampleIterations.toDouble()).toLong()
+            val rounded = (((rawTarget + 5_000L) / 10_000L) * 10_000L).toInt()
+            val clamped = rounded.coerceIn(MIN_CALIBRATED_ITERATIONS, MAX_CALIBRATED_ITERATIONS)
+            logPerf("pbkdf2_calibrate sample=${sampleIterations} elapsedMs=${"%.1f".format(elapsedMs)} chosen=$clamped")
+            clamped
+        } catch (_: Throwable) {
+            MIN_CALIBRATED_ITERATIONS
+        } finally {
+            zeroize(dummyPin)
+        }
+    }
+
+    fun getCalibratedPbkdf2Iterations(): Int {
+        cachedCalibratedIterations?.let { return it }
+        synchronized(this) {
+            cachedCalibratedIterations?.let { return it }
+            val chosen = calibratePbkdf2Iterations()
+            cachedCalibratedIterations = chosen
+            return chosen
+        }
+    }
+
+    /**
      * Derives a 256-bit key from PIN using PBKDF2-HMAC-SHA256.
-     * Iterations are stored in the envelope header so it can be increased in future migrations.
+     * Iterations are stored in the envelope header so it can be updated across migrations.
      */
     fun deriveKeyPbkdf2(
         pin: CharArray,
@@ -53,8 +103,12 @@ object CryptoUtils {
         keyLengthBits: Int = 256
     ): ByteArray {
         val spec = PBEKeySpec(pin, salt, iterations, keyLengthBits)
-        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-        return factory.generateSecret(spec).encoded
+        return try {
+            val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+            factory.generateSecret(spec).encoded
+        } finally {
+            spec.clearPassword()
+        }
     }
 
     /**

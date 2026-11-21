@@ -210,7 +210,9 @@ class VaultIndexManager internal constructor(
                         plainPreview = r.plainPreview,
                         heading = r.heading,
                         mediaIds = DiaryRepository.extractRecordMediaIds(r).sorted(),
-                        hasTrackedMediaIds = true
+                        hasTrackedMediaIds = true,
+                        reminderAt = r.reminderAt,
+                        pfp = r.pfp
                     )
                 )
             } catch (_: Exception) {

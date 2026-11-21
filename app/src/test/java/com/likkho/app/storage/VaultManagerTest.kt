@@ -181,10 +181,13 @@ class VaultManagerTest {
     }
 
     @Test
-    fun startupAndAllUnlockPaths_runScanAndRecover_andOrphanCleanup() = runTest(testDispatcher) {
-        // 1. Initialize Primary vault cleanly and add a stale .tmp + old unreferenced orphan media
+    fun startupAndAllUnlockPaths_deferMaintenanceUntilAfterSuccess_andCleanWhenTriggered() = runTest(testDispatcher) {
+        // 1. Initialize Primary vault cleanly: Success returns without synchronous scanAndRecover
         vaultManager.ensurePrimaryVaultInitialized()
-        assertNotNull(vaultManager.lastRecoveryReport)
+        org.junit.Assert.assertNull(
+            "ensurePrimaryVaultInitialized must not block on synchronous scanAndRecover",
+            vaultManager.lastRecoveryReport
+        )
         vaultManager.withActiveDek { dek ->
             val mediaRepo = vaultManager.primaryMediaRepo
             mediaRepo.importMediaBytes("orphan_old_1", "old orphan".toByteArray(), dek)
@@ -197,14 +200,18 @@ class VaultManagerTest {
         val tmp1 = File(vaultManager.primaryDiaryRepo.diariesDir, "stale1.lkd.tmp")
         tmp1.writeBytes(byteArrayOf(1, 2, 3))
 
-        // 2. unlockNoPasscode runs scanAndRecover + cleanupOrphanMedia
+        // 2. unlockNoPasscode returns Success immediately BEFORE maintenance runs
         val resNoPin = vaultManager.unlockNoPasscode()
         assertTrue(resNoPin is UnlockResult.Success)
-        assertFalse("unlockNoPasscode must clean .tmp", tmp1.exists())
-        assertFalse("unlockNoPasscode must clean old orphan media after recovery", vaultManager.primaryMediaRepo.exists("orphan_old_1"))
+        org.junit.Assert.assertNull("Unlock must return Success before maintenance", vaultManager.lastRecoveryReport)
+        assertTrue(".tmp must still exist right after unlock (deferred)", tmp1.exists())
+
+        vaultManager.runPostUnlockMaintenance(VaultId.PRIMARY)
+        assertFalse("runPostUnlockMaintenance must clean .tmp", tmp1.exists())
+        assertFalse("runPostUnlockMaintenance must clean old orphan media", vaultManager.primaryMediaRepo.exists("orphan_old_1"))
         assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
 
-        // 3. Set PIN, lock, create .tmp, and verify unlockWithPin (Primary) runs scanAndRecover
+        // 3. Set PIN, lock, create .tmp, verify unlockWithPin (Primary) defers maintenance
         val pin = "1234".toCharArray()
         vaultManager.setPrimaryPasscode(pin)
         vaultManager.lock()
@@ -213,22 +220,32 @@ class VaultManagerTest {
 
         val resPin = vaultManager.unlockWithPin(pin)
         assertTrue(resPin is UnlockResult.Success)
-        assertFalse("unlockWithPin (Primary) must clean .tmp", tmp2.exists())
+        org.junit.Assert.assertNull("PIN unlock must return Success before maintenance", vaultManager.lastRecoveryReport)
+        assertTrue(tmp2.exists())
+
+        vaultManager.runPostUnlockMaintenance(VaultId.PRIMARY)
+        assertFalse("Post-unlock maintenance (Primary) must clean .tmp", tmp2.exists())
         assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
+
+        // 4. Enable biometric via CryptoObject cipher (unlocked), lock, create .tmp, verify biometric unlock + deferred maintenance
+        val encCipher = vaultManager.prepareBiometricEncryptCipher()
+        vaultManager.enableBiometricWithCipher(encCipher)
         vaultManager.lock()
 
-        // 4. Enable biometric, create .tmp, verify unlockWithBiometric runs scanAndRecover
-        vaultManager.enableBiometric(pin)
         val tmp3 = File(vaultManager.primaryDiaryRepo.diariesDir, "stale3.lkd.tmp")
         tmp3.writeBytes(byteArrayOf(7, 8, 9))
 
-        val resBio = vaultManager.unlockWithBiometric()
+        val resBio = vaultManager.unlockWithBiometricPrompt { decryptCipher -> decryptCipher }
         assertTrue(resBio is UnlockResult.Success)
-        assertFalse("unlockWithBiometric must clean .tmp", tmp3.exists())
+        org.junit.Assert.assertNull("Biometric unlock must return Success before maintenance", vaultManager.lastRecoveryReport)
+        assertTrue(tmp3.exists())
+
+        vaultManager.runPostUnlockMaintenance(VaultId.PRIMARY)
+        assertFalse("Post-unlock maintenance (Biometric) must clean .tmp", tmp3.exists())
         assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
         vaultManager.lock()
 
-        // 5. Setup Decoy vault, create .tmp in decoy dir, verify unlockWithPin (Decoy) runs scanAndRecover
+        // 5. Setup Decoy vault, create .tmp in decoy dir, verify unlockWithPin (Decoy) + deferred maintenance
         val decoyPin = "5678".toCharArray()
         vaultManager.setDecoyPasscode(decoyPin, pin)
         vaultManager.decoyDiaryRepo.ensureDirs()
@@ -238,12 +255,16 @@ class VaultManagerTest {
         val resDecoy = vaultManager.unlockWithPin(decoyPin)
         assertTrue(resDecoy is UnlockResult.Success)
         assertEquals(VaultId.DECOY, (resDecoy as UnlockResult.Success).vaultId)
-        assertFalse("unlockWithPin (Decoy) must clean .tmp", tmpDecoy.exists())
+        org.junit.Assert.assertNull(vaultManager.lastRecoveryReport)
+        assertTrue(tmpDecoy.exists())
+
+        vaultManager.runPostUnlockMaintenance(VaultId.DECOY)
+        assertFalse("Post-unlock maintenance (Decoy) must clean .tmp", tmpDecoy.exists())
         assertEquals(1, vaultManager.lastRecoveryReport?.cleanedTempFiles)
     }
 
     @Test
-    fun unlockPaths_cleanStaleVaultTmpDirs() = runTest(testDispatcher) {
+    fun postUnlockMaintenance_cleansStaleVaultTmpDirs() = runTest(testDispatcher) {
         vaultManager.ensurePrimaryVaultInitialized()
         vaultManager.lock()
 
@@ -253,11 +274,14 @@ class VaultManagerTest {
 
         val res = vaultManager.unlockNoPasscode()
         assertTrue(res is UnlockResult.Success)
-        assertFalse("Unlock maintenance must clean stale vaults/tmp folders", staleDir.exists())
+        assertTrue("Cold unlock should not block cleaning tmp before Success", staleDir.exists())
+
+        vaultManager.runPostUnlockMaintenance(VaultId.PRIMARY)
+        assertFalse("Post-unlock maintenance must clean stale vaults/tmp folders", staleDir.exists())
     }
 
     @Test
-    fun processKillSimulation_pendingSessionImportDeletedImmediatelyOnNextUnlock_whileSavedMediaPreserved() =
+    fun processKillSimulation_pendingSessionImportDeletedOnPostUnlockMaintenance_whileSavedMediaPreserved() =
         runTest(testDispatcher) {
             vaultManager.ensurePrimaryVaultInitialized()
             val unsavedVideoId = "med_unsaved_kill_vid"
@@ -295,6 +319,7 @@ class VaultManagerTest {
             )
             val unlockRes = restartedVm.unlockNoPasscode()
             assertTrue(unlockRes is UnlockResult.Success)
+            restartedVm.runPostUnlockMaintenance(VaultId.PRIMARY)
 
             assertFalse(
                 "Abandonment from killed process must delete unsaved video immediately without 24h wait",
@@ -338,6 +363,7 @@ class VaultManagerTest {
 
             val reUnlock = vm.unlockNoPasscode()
             assertTrue(reUnlock is UnlockResult.Success)
+            vm.runPostUnlockMaintenance(VaultId.PRIMARY)
             assertFalse("Pre-process unreferenced media must be deleted immediately", vm.primaryMediaRepo.exists(preProcOrphan))
             assertTrue("Current-process session media must remain protected", vm.primaryMediaRepo.exists(activeSessionUnsaved))
         }

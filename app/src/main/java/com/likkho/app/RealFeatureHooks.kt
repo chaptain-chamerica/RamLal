@@ -4,16 +4,25 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.fragment.app.FragmentActivity
+import com.likkho.app.storage.BiometricKeyInvalidatedException
 import com.likkho.app.storage.CryptoUtils
+import com.likkho.app.storage.RecoveryReport
+import com.likkho.app.storage.UnlockResult
 import com.likkho.app.storage.VaultId
 import com.likkho.app.storage.VaultManager
+import com.likkho.app.storage.isBiometricInvalidationError
 import com.likkho.app.storage.model.BackgroundRecord
 import com.likkho.app.storage.model.CanvasAudioRecord
 import com.likkho.app.storage.model.CanvasImageRecord
 import com.likkho.app.storage.model.CanvasVideoRecord
 import com.likkho.app.storage.model.DiaryLockRecord
 import com.likkho.app.storage.model.DiaryRecord
+import com.likkho.app.storage.model.IndexEntryRecord
 import com.likkho.app.storage.model.PfpRecord
 import com.likkho.app.storage.model.SavedPasswordRecord
 import com.likkho.app.storage.model.WordAnalysisStorageRecord
@@ -24,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -31,8 +41,12 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import javax.crypto.Cipher
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * RealFeatureHooks connects UI actions to real local cryptographic storage per STORAGE_SPEC Section 11.
@@ -890,28 +904,163 @@ class RealFeatureHooks(
         }
 
     // =========================================================================
-    //  Biometrics & Settings
+    //  Biometrics & Post-Unlock Maintenance
     // =========================================================================
 
-    override fun authenticateBiometric(forUnlock: Boolean, onResult: (Boolean, String?) -> Unit) {
-        if (forUnlock) {
-            scope.launch {
-                val res = vaultManager.unlockWithBiometric()
-                withContext(Dispatchers.Main) {
-                    when (res) {
-                        is com.likkho.app.storage.UnlockResult.Success -> onResult(true, null)
-                        is com.likkho.app.storage.UnlockResult.InCooldown -> onResult(false, "Too many wrong attempts. Wait ${res.remainingSeconds}s.")
-                        is com.likkho.app.storage.UnlockResult.Error -> onResult(false, res.message)
-                        else -> onResult(false, "Use your PIN to unlock.")
-                    }
-                }
-            }
-        } else {
-            onResult(true, null)
+    @Volatile
+    private var activityRef: WeakReference<FragmentActivity>? = null
+
+    @Volatile
+    private var activeBiometricPrompt: BiometricPrompt? = null
+
+    override fun attachActivity(activity: FragmentActivity?) {
+        activityRef = activity?.let { WeakReference(it) }
+    }
+
+    override fun checkBiometricAvailability(): BiometricAvailability {
+        val ctx = activityRef?.get() ?: context ?: return BiometricAvailability.Unavailable()
+        val mgr = BiometricManager.from(ctx)
+        return when (mgr.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)) {
+            BiometricManager.BIOMETRIC_SUCCESS -> BiometricAvailability.Available
+            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ->
+                BiometricAvailability.NotEnrolled("No fingerprint or strong biometric enrolled in device Settings.")
+            BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE ->
+                BiometricAvailability.Unavailable("Biometric sensor temporarily unavailable.")
+            else ->
+                BiometricAvailability.Unavailable("Strong biometric hardware not supported on this device.")
         }
     }
 
-    override fun cancelBiometricPrompt() {}
+    private suspend fun showBiometricCryptoPrompt(
+        cipher: Cipher,
+        title: String,
+        subtitle: String
+    ): Cipher? = withContext(Dispatchers.Main.immediate) {
+        val activity = activityRef?.get()
+            ?: throw IllegalStateException("Biometric prompt requires an active window.")
+        suspendCancellableCoroutine { cont ->
+            val executor = ContextCompat.getMainExecutor(activity)
+            val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    activeBiometricPrompt = null
+                    if (cont.isActive) {
+                        cont.resume(result.cryptoObject?.cipher)
+                    }
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    activeBiometricPrompt = null
+                    if (!cont.isActive) return
+                    when (errorCode) {
+                        BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+                        BiometricPrompt.ERROR_USER_CANCELED,
+                        BiometricPrompt.ERROR_CANCELED,
+                        BiometricPrompt.ERROR_TIMEOUT -> cont.resume(null)
+                        else -> cont.resumeWithException(IllegalStateException(errString.toString()))
+                    }
+                }
+            }
+            val prompt = BiometricPrompt(activity, executor, callback)
+            activeBiometricPrompt = prompt
+            val info = BiometricPrompt.PromptInfo.Builder()
+                .setTitle(title)
+                .setSubtitle(subtitle)
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                .setNegativeButtonText("Cancel")
+                .build()
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+            cont.invokeOnCancellation {
+                activeBiometricPrompt = null
+                runCatching { executor.execute { prompt.cancelAuthentication() } }
+            }
+        }
+    }
+
+    override fun enableBiometric(onResult: (Boolean, String?) -> Unit) {
+        scope.launch(dispatcher) {
+            val availability = checkBiometricAvailability()
+            if (availability !is BiometricAvailability.Available) {
+                val hint = when (availability) {
+                    is BiometricAvailability.NotEnrolled -> availability.hint
+                    is BiometricAvailability.Unavailable -> availability.hint
+                    BiometricAvailability.Available -> ""
+                }
+                withContext(Dispatchers.Main) { onResult(false, hint) }
+                return@launch
+            }
+            try {
+                val encryptCipher = vaultManager.prepareBiometricEncryptCipher()
+                val authedCipher = showBiometricCryptoPrompt(
+                    cipher = encryptCipher,
+                    title = "Enable Biometric Unlock",
+                    subtitle = "Confirm your biometric to wrap your vault key"
+                )
+                if (authedCipher == null) {
+                    withContext(Dispatchers.Main) { onResult(false, "Biometric verification cancelled.") }
+                    return@launch
+                }
+                vaultManager.enableBiometricWithCipher(authedCipher)
+                withContext(Dispatchers.Main) { onResult(true, "Biometric unlock enabled.") }
+            } catch (t: Throwable) {
+                if (isBiometricInvalidationError(t)) {
+                    runCatching { vaultManager.disableBiometric() }
+                    withContext(Dispatchers.Main) {
+                        onResult(false, "Biometrics changed. Unlock with PIN and enable again.")
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        onResult(false, t.message ?: "Could not enable biometric unlock.")
+                    }
+                }
+            }
+        }
+    }
+
+    override fun disableBiometric(onResult: (Boolean, String?) -> Unit) {
+        scope.launch(dispatcher) {
+            val res = runCatching { vaultManager.disableBiometric() }
+            withContext(Dispatchers.Main) {
+                if (res.isSuccess) {
+                    onResult(true, "Biometric unlock disabled.")
+                } else {
+                    onResult(false, res.exceptionOrNull()?.message ?: "Could not disable biometric unlock.")
+                }
+            }
+        }
+    }
+
+    override fun unlockWithBiometricPrompt(onResult: (UnlockResult) -> Unit) {
+        scope.launch(dispatcher) {
+            val res = vaultManager.unlockWithBiometricPrompt { decryptCipher ->
+                showBiometricCryptoPrompt(
+                    cipher = decryptCipher,
+                    title = "Unlock Likkho",
+                    subtitle = "Use your biometric to unlock your vault"
+                )
+            }
+            withContext(Dispatchers.Main) {
+                onResult(res)
+            }
+        }
+    }
+
+    override fun cancelBiometricPrompt() {
+        val prompt = activeBiometricPrompt ?: return
+        activeBiometricPrompt = null
+        val activity = activityRef?.get()
+        if (activity != null) {
+            runCatching { ContextCompat.getMainExecutor(activity).execute { prompt.cancelAuthentication() } }
+        } else {
+            runCatching { prompt.cancelAuthentication() }
+        }
+    }
+
+    override suspend fun runPostUnlockMaintenance(vaultId: VaultId): RecoveryReport? =
+        withContext(dispatcher) {
+            writeMutex.withLock {
+                vaultManager.runPostUnlockMaintenance(vaultId)
+            }
+        }
 
     override suspend fun exportAllDataZip(): String = withContext(dispatcher) {
         if (!vaultManager.isUnlocked) {
@@ -1532,6 +1681,27 @@ fun DiaryLog.toDiaryRecord(): DiaryRecord {
         content = emptyList(),
         plainPreview = plainPreview,
         contentHtml = contentHtml
+    )
+}
+
+fun IndexEntryRecord.toSummaryDiaryLog(): DiaryLog {
+    val locked = (flags and 1) != 0
+    return DiaryLog(
+        id = id,
+        heading = heading,
+        contentHtml = "",
+        plainPreview = plainPreview,
+        pfp = pfp?.let { Pfp(it.sourceMediaId, it.text, it.bgColor, it.textColor, it.textScale) },
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+        reminderAt = reminderAt,
+        pinned = pinned,
+        diaryLockPin = if (locked) INDEX_LOCKED_MARKER else null,
+        canvasBgSource = null,
+        canvasImages = emptyList(),
+        audioAttachments = emptyList(),
+        videoAttachments = emptyList(),
+        isContentLoaded = false
     )
 }
 

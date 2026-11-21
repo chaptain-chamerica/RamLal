@@ -27,6 +27,7 @@ import com.likkho.app.storage.UnlockResult
 import com.likkho.app.storage.VaultId
 import com.likkho.app.storage.VaultManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -83,6 +84,9 @@ class AppViewModel @JvmOverloads constructor(
     var ringingAlert by mutableStateOf<RingingAlert?>(null)
     var availableUpdate by mutableStateOf<AppUpdateInfo?>(null)
     var failedDiaries by mutableStateOf<List<FailedDiaryEntry>>(emptyList())
+    var isVaultChecking by mutableStateOf(false)
+    var lockBiometricMessage by mutableStateOf<String?>(null)
+    private var postUnlockMaintenanceJob: Job? = null
 
     // ---------- passcode guard & wrong-PIN protection (Storage Spec Section 2) ----------
     fun remainingCooldownSeconds(): Int = vaultManager.wrongPinCounter.remainingCooldownSeconds()
@@ -96,29 +100,46 @@ class AppViewModel @JvmOverloads constructor(
     fun hasLargerApplicableLength(len: Int): Boolean = vaultManager.pinLengthsRegistry.applicableLengths.any { it > len }
 
     init {
+        val tCold0 = System.nanoTime()
+        val initialFlags = runCatching { vaultManager.envelopeV1.readHeaderFlags() }.getOrNull()
+        val hasPrimaryFast = initialFlags?.hasPasscode == true
+        if (hasPrimaryFast) {
+            isLocked = true
+            savedPasscode = "••••"
+            isVaultChecking = true
+            isStartupReady = true
+            CryptoUtils.logPerf("cold_start_lock_immediate ms=${"%.2f".format((System.nanoTime() - tCold0) / 1_000_000.0)}")
+        } else {
+            isLocked = false
+            isVaultChecking = true
+            isStartupReady = true
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                hooks.runStartupStorageCleanup()
-
-                // Initialize primary vault envelope on first launch
-                if (!vaultManager.envelopeV1.exists()) {
-                    vaultManager.ensurePrimaryVaultInitialized()
+                if (!hasPrimaryFast) {
+                    if (!vaultManager.envelopeV1.exists() || !vaultManager.hasPasscode(VaultId.PRIMARY)) {
+                        if (!vaultManager.isUnlocked) {
+                            vaultManager.ensurePrimaryVaultInitialized()
+                        }
+                    }
                 }
 
                 val hasPrimary = vaultManager.hasPasscode(VaultId.PRIMARY)
                 val hasDecoy = vaultManager.decoyExists() && vaultManager.hasPasscode(VaultId.DECOY)
                 val bio = vaultManager.hasBiometric(VaultId.PRIMARY)
+                // Warm registered lengths off the UI thread
+                vaultManager.pinLengthsRegistry.applicableLengths
 
-                val (initialLogs, initialFailed) = if (!hasPrimary) {
-                    if (!vaultManager.isUnlocked) {
-                        vaultManager.unlockNoPasscode()
+                val homeResult = if (!hasPrimary && vaultManager.isUnlocked) {
+                    vaultManager.withActiveDek { dek ->
+                        vaultManager.activeDiaryRepository().loadHomeEntries(
+                            dek = dek,
+                            fromIndexEntry = { it.toSummaryDiaryLog() },
+                            fromFullRecord = { it.toSummaryDiaryLog() }
+                        )
                     }
-                    if (vaultManager.isUnlocked) {
-                        vaultManager.withActiveDek { dek ->
-                            vaultManager.activeDiaryRepository().loadAllDiariesMapped(dek) { it.toSummaryDiaryLog() }
-                        }
-                    } else emptyList<DiaryLog>() to emptyList()
-                } else emptyList<DiaryLog>() to emptyList()
+                } else null
 
                 val savedFonts = FontRegistry.loadSavedFonts(fontStorageDir())
 
@@ -134,21 +155,27 @@ class AppViewModel @JvmOverloads constructor(
                         savedPasscode = null
                         secondaryPasscode = null
                         isLocked = false
-                        logs.clear()
-                        logs.addAll(initialLogs)
-                        failedDiaries = initialFailed
-                        if (initialFailed.isNotEmpty()) {
-                            showStatus(
-                                "${initialFailed.size} diary ${if (initialFailed.size == 1) "file" else "files"} failed to open (${initialFailed.joinToString { it.diaryId }}).",
-                                BannerKind.ERROR,
-                                8000
-                            )
+                        if (homeResult != null) {
+                            logs.clear()
+                            logs.addAll(homeResult.items)
+                            failedDiaries = homeResult.failed
+                            if (homeResult.failed.isNotEmpty()) {
+                                showStatus(
+                                    "${homeResult.failed.size} diary ${if (homeResult.failed.size == 1) "file" else "files"} failed to open (${homeResult.failed.joinToString { it.diaryId }}).",
+                                    BannerKind.ERROR,
+                                    8000
+                                )
+                            }
                         }
+                        schedulePostUnlockMaintenance(VaultId.PRIMARY)
+                        CryptoUtils.logPerf("cold_start_no_passcode_ready ms=${"%.2f".format((System.nanoTime() - tCold0) / 1_000_000.0)}")
                     }
+                    isVaultChecking = false
                     isStartupReady = true
                 }
             } catch (_: Throwable) {
                 withContext(Dispatchers.Main) {
+                    isVaultChecking = false
                     isStartupReady = true
                 }
             }
@@ -190,7 +217,10 @@ class AppViewModel @JvmOverloads constructor(
 
     // ---------- lock & unlock ----------
     fun handleInstantLock() {
-        if (savedPasscode == null) { navigateTo(Route.SETTINGS); return }
+        if (effectivePrimaryPin.isEmpty()) { navigateTo(Route.SETTINGS); return }
+        postUnlockMaintenanceJob?.cancel()
+        postUnlockMaintenanceJob = null
+        hooks.cancelBiometricPrompt()
         vaultManager.lock()
         logs.clear()
         screenBitmapTracker.clear()
@@ -199,24 +229,50 @@ class AppViewModel @JvmOverloads constructor(
     }
 
     suspend fun attemptUnlock(pin: String): UnlockResult = withContext(Dispatchers.IO) {
-        val res = vaultManager.unlockWithPin(pin.toCharArray())
-        if (res is UnlockResult.Success) {
-            val mode = if (res.vaultId == VaultId.PRIMARY) VaultMode.PRIMARY else VaultMode.DECOY
-            withContext(Dispatchers.Main) {
-                onUnlocked(mode)
+        val chars = pin.toCharArray()
+        try {
+            val res = vaultManager.unlockWithPin(chars, zeroizeInput = true)
+            if (res is UnlockResult.Success) {
+                val mode = if (res.vaultId == VaultId.PRIMARY) VaultMode.PRIMARY else VaultMode.DECOY
+                withContext(Dispatchers.Main) {
+                    onUnlocked(mode)
+                }
             }
+            res
+        } finally {
+            CryptoUtils.zeroize(chars)
         }
-        res
     }
 
-    suspend fun attemptBiometricUnlock(): UnlockResult = withContext(Dispatchers.IO) {
-        val res = vaultManager.unlockWithBiometric()
-        if (res is UnlockResult.Success) {
-            withContext(Dispatchers.Main) {
-                onUnlocked(VaultMode.PRIMARY)
+    fun startBiometricUnlock(onComplete: (UnlockResult) -> Unit) {
+        hooks.unlockWithBiometricPrompt { res ->
+            when (res) {
+                is UnlockResult.Success -> {
+                    onUnlocked(VaultMode.PRIMARY)
+                }
+                is UnlockResult.BiometricInvalidated -> {
+                    biometricsEnabled = vaultManager.hasBiometric(VaultId.PRIMARY)
+                    lockBiometricMessage = res.message
+                }
+                else -> Unit
             }
+            onComplete(res)
         }
-        res
+    }
+
+    fun refreshBiometricState() {
+        biometricsEnabled = vaultManager.hasBiometric(VaultId.PRIMARY)
+    }
+
+    private fun schedulePostUnlockMaintenance(vaultId: VaultId) {
+        postUnlockMaintenanceJob?.cancel()
+        postUnlockMaintenanceJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(1500)
+            if (!vaultManager.isUnlocked || vaultManager.currentVault != vaultId) return@launch
+            runCatching { hooks.runStartupStorageCleanup() }
+            if (!vaultManager.isUnlocked || vaultManager.currentVault != vaultId) return@launch
+            runCatching { hooks.runPostUnlockMaintenance(vaultId) }
+        }
     }
 
     fun onUnlocked(mode: VaultMode) {
@@ -224,23 +280,30 @@ class AppViewModel @JvmOverloads constructor(
         route = Route.HOME
         editingLog = null
         isLocked = false
+        lockBiometricMessage = null
         loadLogsFromActiveVault()
+        val vaultId = if (mode == VaultMode.PRIMARY) VaultId.PRIMARY else VaultId.DECOY
+        schedulePostUnlockMaintenance(vaultId)
     }
 
     fun loadLogsFromActiveVault() {
         viewModelScope.launch(Dispatchers.IO) {
             if (!vaultManager.isUnlocked) return@launch
-            val (list, failed) = vaultManager.withActiveDek { dek ->
+            val homeResult = vaultManager.withActiveDek { dek ->
                 val repo = vaultManager.activeDiaryRepository()
-                repo.loadAllDiariesMapped(dek) { it.toSummaryDiaryLog() }
+                repo.loadHomeEntries(
+                    dek = dek,
+                    fromIndexEntry = { it.toSummaryDiaryLog() },
+                    fromFullRecord = { it.toSummaryDiaryLog() }
+                )
             }
             withContext(Dispatchers.Main) {
                 logs.clear()
-                logs.addAll(list)
-                failedDiaries = failed
-                if (failed.isNotEmpty()) {
+                logs.addAll(homeResult.items)
+                failedDiaries = homeResult.failed
+                if (homeResult.failed.isNotEmpty()) {
                     showStatus(
-                        "${failed.size} diary ${if (failed.size == 1) "file" else "files"} failed to open (${failed.joinToString { it.diaryId }}).",
+                        "${homeResult.failed.size} diary ${if (homeResult.failed.size == 1) "file" else "files"} failed to open (${homeResult.failed.joinToString { it.diaryId }}).",
                         BannerKind.ERROR,
                         8000
                     )
@@ -437,7 +500,14 @@ class AppViewModel @JvmOverloads constructor(
                 return true
             }
             viewModelScope.launch(Dispatchers.IO) {
-                vaultManager.setDecoyPasscode(pin.toCharArray(), (savedPasscode ?: "0000").toCharArray())
+                val decoyChars = pin.toCharArray()
+                val primChars = (savedPasscode ?: "0000").toCharArray()
+                try {
+                    vaultManager.setDecoyPasscode(decoyChars, primChars)
+                } finally {
+                    CryptoUtils.zeroize(decoyChars)
+                    CryptoUtils.zeroize(primChars)
+                }
             }
             secondaryPasscode = "••••"
             return true
@@ -447,6 +517,10 @@ class AppViewModel @JvmOverloads constructor(
         if (pin == null) {
             viewModelScope.launch(Dispatchers.IO) {
                 vaultManager.removePrimaryPasscode()
+                val hasBio = vaultManager.hasBiometric(VaultId.PRIMARY)
+                withContext(Dispatchers.Main) {
+                    biometricsEnabled = hasBio
+                }
             }
             savedPasscode = null
             secondaryPasscode = null
@@ -456,7 +530,16 @@ class AppViewModel @JvmOverloads constructor(
             return true
         }
         viewModelScope.launch(Dispatchers.IO) {
-            vaultManager.setPrimaryPasscode(pin.toCharArray())
+            val chars = pin.toCharArray()
+            try {
+                vaultManager.setPrimaryPasscode(chars)
+                val hasBio = vaultManager.hasBiometric(VaultId.PRIMARY)
+                withContext(Dispatchers.Main) {
+                    biometricsEnabled = hasBio
+                }
+            } finally {
+                CryptoUtils.zeroize(chars)
+            }
         }
         savedPasscode = "••••"
         return true
@@ -477,21 +560,43 @@ class AppViewModel @JvmOverloads constructor(
             return true
         }
         viewModelScope.launch(Dispatchers.IO) {
-            vaultManager.setDecoyPasscode(pin.toCharArray(), savedPasscode?.toCharArray() ?: "0000".toCharArray())
+            val decoyChars = pin.toCharArray()
+            val primChars = (savedPasscode ?: "0000").toCharArray()
+            try {
+                vaultManager.setDecoyPasscode(decoyChars, primChars)
+            } finally {
+                CryptoUtils.zeroize(decoyChars)
+                CryptoUtils.zeroize(primChars)
+            }
         }
         secondaryPasscode = "••••"
         return true
     }
 
+    suspend fun verifyDiaryLockPin(log: DiaryLog, pin: String): Boolean = withContext(Dispatchers.IO) {
+        val resolved = if (log.diaryLockPin == INDEX_LOCKED_MARKER) {
+            loadFullDiaryLog(log.id) ?: return@withContext false
+        } else {
+            log
+        }
+        checkDiaryLockPin(resolved, pin)
+    }
+
     fun checkDiaryLockPin(log: DiaryLog, pin: String): Boolean {
         val lock = log.diaryLockPin ?: return true
+        if (lock == INDEX_LOCKED_MARKER) return false
         if (lock == pin) return true
         if (lock.contains(":")) {
             val parts = lock.split(":", limit = 2)
             if (parts.size == 2) {
                 val salt = CryptoUtils.fromHex(parts[0])
                 val expectedHash = CryptoUtils.fromHex(parts[1])
-                val computedHash = CryptoUtils.pbkdf2Sha256(pin.toCharArray(), salt, 100_000)
+                val pinChars = pin.toCharArray()
+                val computedHash = try {
+                    CryptoUtils.pbkdf2Sha256(pinChars, salt, 100_000)
+                } finally {
+                    CryptoUtils.zeroize(pinChars)
+                }
                 return CryptoUtils.constantTimeEquals(expectedHash, computedHash)
             }
         }
