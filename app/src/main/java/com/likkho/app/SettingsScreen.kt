@@ -69,6 +69,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -102,6 +103,7 @@ fun SettingsScreen(vm: AppViewModel) {
     var showPasscodeModal by remember { mutableStateOf(false) }
     var configuringSecondary by remember { mutableStateOf(false) }
     var pinInput by remember { mutableStateOf("") }
+    var confirmPinInput by remember { mutableStateOf("") }
     var pinError by remember { mutableStateOf("") }
     var manualUpdate by remember { mutableStateOf<AppUpdateInfo?>(null) }
     var checkingUpdate by remember { mutableStateOf(false) }
@@ -122,7 +124,8 @@ fun SettingsScreen(vm: AppViewModel) {
 
     fun openPasscodeModal(secondary: Boolean) {
         configuringSecondary = secondary
-        pinInput = if (secondary) vm.secondaryPasscode.orEmpty() else vm.savedPasscode.orEmpty()
+        pinInput = ""
+        confirmPinInput = ""
         pinError = ""
         showPasscodeModal = true
     }
@@ -200,7 +203,7 @@ fun SettingsScreen(vm: AppViewModel) {
                         enabled = rowEnabled,
                         onClick = {
                             if (vm.savedPasscode == null) {
-                                configuringSecondary = false; pinInput = ""
+                                configuringSecondary = false; pinInput = ""; confirmPinInput = ""
                                 pinError = "Please set a Passcode first to enable Biometric unlock."
                                 showPasscodeModal = true
                             } else if (!vm.biometricsEnabled) {
@@ -324,27 +327,60 @@ fun SettingsScreen(vm: AppViewModel) {
     // ---------- Set passcode dialog (same UI for primary & covert secondary) ----------
     if (showPasscodeModal) {
         val hasExisting = if (configuringSecondary) vm.secondaryPasscode != null else vm.savedPasscode != null
+        fun closeModal() {
+            pinInput = ""
+            confirmPinInput = ""
+            pinError = ""
+            showPasscodeModal = false
+            configuringSecondary = false
+        }
         fun save() {
             val cleaned = pinInput.filter { it.isDigit() }
+            val confirmed = confirmPinInput.filter { it.isDigit() }
             if (cleaned.length < 4 || cleaned.length > 6) { pinError = "Passcode must be 4 to 6 digits."; return }
+            if (cleaned != confirmed) { pinError = "Passcodes do not match."; return }
             val ok = if (configuringSecondary) vm.updateSecondaryPasscode(cleaned) else vm.updatePasscode(cleaned)
             if (!ok) { pinError = "Passcode must be different from existing passcode."; return }
-            showPasscodeModal = false; configuringSecondary = false; showToast("Passcode saved.")
+            closeModal(); showToast("Passcode saved.")
         }
-        WikiDialog(onDismiss = { showPasscodeModal = false; configuringSecondary = false }, title = "Set Passcode", showClose = false, maxWidth = 320.dp) {
+        WikiDialog(onDismiss = { closeModal() }, title = "Set Passcode", showClose = false, maxWidth = 320.dp) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Enter a 4 to 6 digit PIN.", style = sansStyle(12.sp, w.muted, FontWeight.Normal))
-                WikiTextField(pinInput, { pinInput = it.filter { c -> c.isDigit() }.take(6); pinError = "" }, Modifier.fillMaxWidth(), "••••", password = true, keyboardType = KeyboardType.NumberPassword, height = 44.dp, onDone = { save() })
+                Text("Enter and confirm a 4 to 6 digit PIN.", style = sansStyle(12.sp, w.muted, FontWeight.Normal))
+                Column {
+                    FieldLabel("Passcode")
+                    WikiTextField(
+                        pinInput,
+                        { pinInput = it.filter { c -> c.isDigit() }.take(6); pinError = "" },
+                        Modifier.fillMaxWidth().testTag("set_passcode_input"),
+                        "••••",
+                        password = true,
+                        keyboardType = KeyboardType.NumberPassword,
+                        height = 44.dp,
+                    )
+                }
+                Column {
+                    FieldLabel("Confirm Passcode")
+                    WikiTextField(
+                        confirmPinInput,
+                        { confirmPinInput = it.filter { c -> c.isDigit() }.take(6); pinError = "" },
+                        Modifier.fillMaxWidth().testTag("confirm_passcode_input"),
+                        "••••",
+                        password = true,
+                        keyboardType = KeyboardType.NumberPassword,
+                        height = 44.dp,
+                        onDone = { save() },
+                    )
+                }
                 if (pinError.isNotEmpty()) Text(pinError, style = sansStyle(12.sp, w.danger, FontWeight.Medium))
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     if (hasExisting) {
                         WikiButton("Remove", {
                             if (configuringSecondary) vm.updateSecondaryPasscode(null) else { vm.updatePasscode(null) }
-                            showPasscodeModal = false; configuringSecondary = false; showToast("Passcode removed.")
+                            closeModal(); showToast("Passcode removed.")
                         }, kind = BtnKind.OUTLINE, icon = Icons.Outlined.Delete, height = 36.dp)
                     }
                     Spacer(Modifier.weight(1f))
-                    WikiButton("Cancel", { showPasscodeModal = false; configuringSecondary = false }, height = 36.dp)
+                    WikiButton("Cancel", { closeModal() }, height = 36.dp)
                     Spacer(Modifier.width(8.dp))
                     WikiButton("Save", { save() }, kind = BtnKind.PRIMARY, height = 36.dp)
                 }

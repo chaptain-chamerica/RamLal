@@ -997,6 +997,42 @@ class AppViewModel @JvmOverloads constructor(
         return bmp
     }
 
+    suspend fun getMediaSizeBytes(mediaId: String): Long = withContext(Dispatchers.IO) {
+        if (mediaId.isBlank() || !vaultManager.isUnlocked) return@withContext 0L
+        runCatching { vaultManager.activeMediaRepository().getMediaFile(mediaId).length() }.getOrDefault(0L)
+    }
+
+    suspend fun loadEditableImageBitmap(mediaId: String, maxDim: Int = 2048): Bitmap? = withContext(Dispatchers.IO) {
+        if (mediaId.isBlank() || !vaultManager.isUnlocked) return@withContext null
+        decodeRawBitmapFromEncryptedMedia(mediaId, maxDim = maxDim)
+    }
+
+    suspend fun importEditedImageBytes(
+        bytes: ByteArray,
+        previewBitmap: ImageBitmap? = null
+    ): String? = withContext(Dispatchers.IO) {
+        if (!vaultManager.isUnlocked || bytes.isEmpty()) return@withContext null
+        val mediaId = CryptoUtils.randomId("med_")
+        try {
+            vaultManager.withActiveDek { dek ->
+                vaultManager.activeMediaRepository().importMediaBytes(mediaId, bytes, dek)
+            }
+            val cacheBmp = previewBitmap ?: decodeSampledBitmapFromEncryptedMedia(mediaId)
+            if (cacheBmp != null) {
+                imageBitmapCache.put(mediaId, cacheBmp)
+            }
+            vaultManager.recordSessionImportedMedia(mediaId)
+            mediaId
+        } catch (t: Throwable) {
+            runCatching {
+                vaultManager.activeMediaRepository().deleteMedia(mediaId)
+                vaultManager.unprotectSessionMedia(setOf(mediaId))
+            }
+            imageBitmapCache.remove(mediaId)
+            null
+        }
+    }
+
     suspend fun loadDecryptedImageBitmap(mediaId: String): ImageBitmap? {
         if (mediaId.isBlank()) return null
         imageBitmapCache.get(mediaId)?.let { return it }
@@ -1006,6 +1042,10 @@ class AppViewModel @JvmOverloads constructor(
     }
 
     private fun decodeSampledBitmapFromEncryptedMedia(mediaId: String, maxDim: Int = 1600): ImageBitmap? {
+        return decodeRawBitmapFromEncryptedMedia(mediaId, maxDim)?.asImageBitmap()
+    }
+
+    private fun decodeRawBitmapFromEncryptedMedia(mediaId: String, maxDim: Int = 1600): Bitmap? {
         if (!vaultManager.isUnlocked) return null
         return runCatching {
             vaultManager.withActiveDek { dek ->
@@ -1030,7 +1070,7 @@ class AppViewModel @JvmOverloads constructor(
                 val rawBitmap = repo.openDecryptedStream(mediaId, dek).use { s ->
                     BitmapFactory.decodeStream(s, null, opts)
                 } ?: return@withActiveDek null
-                applyExifOrientation(rawBitmap, orientation).asImageBitmap()
+                applyExifOrientation(rawBitmap, orientation)
             }
         }.getOrNull()
     }

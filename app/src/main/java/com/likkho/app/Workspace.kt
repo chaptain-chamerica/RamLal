@@ -18,8 +18,6 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -125,10 +123,11 @@ fun WorkspaceScreen(vm: AppViewModel) {
     val initialMediaIds = remember {
         collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
     }
+    var baselineLog by remember { mutableStateOf(initial) }
+    var baselineHtml by remember(initial?.id, initial?.isContentLoaded) { mutableStateOf(editorState.toHtml()) }
     var hasSavedDiary by remember { mutableStateOf(initial != null) }
     var lastSavedMediaIds by remember { mutableStateOf(initialMediaIds) }
     val sessionImportedMediaIds = remember { mutableStateListOf<String>() }
-    var showUnsavedMediaExitDialog by remember { mutableStateOf(false) }
 
     var importingItem by remember { mutableStateOf<ImportingItem?>(null) }
     var showImportSkeleton by remember { mutableStateOf(false) }
@@ -391,9 +390,9 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
     }
 
-    fun save(showFeedback: Boolean = true) {
+    fun save(showFeedback: Boolean = true, exitAfterSave: Boolean = false) {
         val now = System.currentTimeMillis()
-        val base = initial ?: DiaryLog(id = "log_$now", heading = "", createdAt = now)
+        val base = baselineLog ?: DiaryLog(id = "log_$now", heading = "", createdAt = now)
         val htmlContent = editorState.toHtml()
         val plain = editorState.maskedPlainPreview(140)
         val log = base.copy(
@@ -412,11 +411,13 @@ fun WorkspaceScreen(vm: AppViewModel) {
         )
         val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
         val obsoleteMediaIds = (lastSavedMediaIds + sessionImportedMediaIds) - currentMediaIds
-        vm.upsertLog(log, false, obsoleteMediaIds) { persistResult ->
+        hasSavedDiary = true
+        baselineLog = log
+        baselineHtml = htmlContent
+        lastSavedMediaIds = currentMediaIds
+        sessionImportedMediaIds.clear()
+        vm.upsertLog(log, exitAfterSave, obsoleteMediaIds) { persistResult ->
             persistResult.onSuccess {
-                hasSavedDiary = true
-                lastSavedMediaIds = currentMediaIds
-                sessionImportedMediaIds.clear()
                 hooks.scheduleReminder(log, reminderAt) { remRes ->
                     remRes.onFailure { err ->
                         scope.launch {
@@ -425,7 +426,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         }
                     }
                 }
-                if (showFeedback) {
+                if (showFeedback && !exitAfterSave) {
                     saved = true
                     scope.launch { delay(1500); saved = false }
                 }
@@ -445,12 +446,27 @@ fun WorkspaceScreen(vm: AppViewModel) {
             showImportCancelBackDialog = true
             return
         }
-        val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
-        val hasRemovedSavedMedia = hasSavedDiary && (lastSavedMediaIds - currentMediaIds).isNotEmpty()
-        if (hasRemovedSavedMedia) {
-            showUnsavedMediaExitDialog = true
-        } else {
-            exitWorkspace()
+        when (
+            evaluateWorkspaceExitAction(
+                isReading = reading,
+                baseline = baselineLog,
+                baselineHtml = baselineHtml,
+                currentHeading = heading,
+                currentContentHtml = editorState.toHtml(),
+                currentPlainText = editorState.text,
+                hasDividerSpan = editorState.spans.any { it.style == SpanStyle.Divider },
+                pfp = pfp,
+                bgSrc = bgSrc,
+                bgOpacity = bgOpacity,
+                images = images,
+                audios = audios,
+                videos = videos,
+                reminderAt = reminderAt,
+                lockPin = lockPin,
+            )
+        ) {
+            WorkspaceExitAction.AUTO_SAVE_AND_EXIT -> save(showFeedback = false, exitAfterSave = true)
+            WorkspaceExitAction.NO_SAVE_EXIT -> exitWorkspace()
         }
     }
 
@@ -733,7 +749,16 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 viewportRootOrigin = viewportRootOrigin,
                                 loadImageBitmap = { id -> vm.loadDecryptedImageBitmap(id) },
                                 onSelect = { selImg = im.id; selAud = null; selVid = null },
-                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onDragProgress = { maxR, maxB ->
+                                    val expanded = computeExpandedDragBounds(
+                                        itemRightDp = maxR,
+                                        itemBottomDp = maxB,
+                                        currentCanvasWidthDp = canvasWidth.value,
+                                        currentCanvasHeightDp = canvasHeight.value,
+                                        currentBounds = activeDragBoundsDp
+                                    )
+                                    if (expanded != activeDragBoundsDp) activeDragBoundsDp = expanded
+                                },
                                 onMove = { x, y ->
                                     activeDragBoundsDp = null
                                     images = images.map { m -> if (m.id == im.id) m.copy(x = x, y = y) else m }
@@ -756,7 +781,16 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
                                 onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selVid = v.id; selImg = null; selAud = null },
-                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onDragProgress = { maxR, maxB ->
+                                    val expanded = computeExpandedDragBounds(
+                                        itemRightDp = maxR,
+                                        itemBottomDp = maxB,
+                                        currentCanvasWidthDp = canvasWidth.value,
+                                        currentCanvasHeightDp = canvasHeight.value,
+                                        currentBounds = activeDragBoundsDp
+                                    )
+                                    if (expanded != activeDragBoundsDp) activeDragBoundsDp = expanded
+                                },
                                 onMove = { x, y ->
                                     activeDragBoundsDp = null
                                     videos = videos.map { vid -> if (vid.id == v.id) vid.copy(x = x, y = y) else vid }
@@ -778,7 +812,16 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
                                 onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selAud = a.id; selImg = null; selVid = null },
-                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onDragProgress = { maxR, maxB ->
+                                    val expanded = computeExpandedDragBounds(
+                                        itemRightDp = maxR,
+                                        itemBottomDp = maxB,
+                                        currentCanvasWidthDp = canvasWidth.value,
+                                        currentCanvasHeightDp = canvasHeight.value,
+                                        currentBounds = activeDragBoundsDp
+                                    )
+                                    if (expanded != activeDragBoundsDp) activeDragBoundsDp = expanded
+                                },
                                 onMove = { x, y ->
                                     activeDragBoundsDp = null
                                     audios = audios.map { aud -> if (aud.id == a.id) aud.copy(x = x, y = y) else aud }
@@ -1202,7 +1245,16 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 viewportRootOrigin = viewportRootOrigin,
                                 loadImageBitmap = { id -> vm.loadDecryptedImageBitmap(id) },
                                 onSelect = { selImg = im.id; selAud = null; selVid = null },
-                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onDragProgress = { maxR, maxB ->
+                                    val expanded = computeExpandedDragBounds(
+                                        itemRightDp = maxR,
+                                        itemBottomDp = maxB,
+                                        currentCanvasWidthDp = canvasWidth.value,
+                                        currentCanvasHeightDp = canvasHeight.value,
+                                        currentBounds = activeDragBoundsDp
+                                    )
+                                    if (expanded != activeDragBoundsDp) activeDragBoundsDp = expanded
+                                },
                                 onMove = { x, y ->
                                     activeDragBoundsDp = null
                                     images = images.map { m -> if (m.id == im.id) m.copy(x = x, y = y) else m }
@@ -1225,7 +1277,16 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
                                 onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selVid = v.id; selImg = null; selAud = null },
-                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onDragProgress = { maxR, maxB ->
+                                    val expanded = computeExpandedDragBounds(
+                                        itemRightDp = maxR,
+                                        itemBottomDp = maxB,
+                                        currentCanvasWidthDp = canvasWidth.value,
+                                        currentCanvasHeightDp = canvasHeight.value,
+                                        currentBounds = activeDragBoundsDp
+                                    )
+                                    if (expanded != activeDragBoundsDp) activeDragBoundsDp = expanded
+                                },
                                 onMove = { x, y ->
                                     activeDragBoundsDp = null
                                     videos = videos.map { vid -> if (vid.id == v.id) vid.copy(x = x, y = y) else vid }
@@ -1247,7 +1308,16 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                 openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
                                 onStatus = { vm.showStatus(it, BannerKind.ERROR) },
                                 onSelect = { selAud = a.id; selImg = null; selVid = null },
-                                onDragProgress = { maxR, maxB -> activeDragBoundsDp = maxR to maxB },
+                                onDragProgress = { maxR, maxB ->
+                                    val expanded = computeExpandedDragBounds(
+                                        itemRightDp = maxR,
+                                        itemBottomDp = maxB,
+                                        currentCanvasWidthDp = canvasWidth.value,
+                                        currentCanvasHeightDp = canvasHeight.value,
+                                        currentBounds = activeDragBoundsDp
+                                    )
+                                    if (expanded != activeDragBoundsDp) activeDragBoundsDp = expanded
+                                },
                                 onMove = { x, y ->
                                     activeDragBoundsDp = null
                                     audios = audios.map { aud -> if (aud.id == a.id) aud.copy(x = x, y = y) else aud }
@@ -1332,42 +1402,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         onClick = {
                             showImportCancelBackDialog = false
                             cancelActiveImport(showBanner = false)
-                            val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
-                            val hasRemovedSavedMedia = hasSavedDiary && (lastSavedMediaIds - currentMediaIds).isNotEmpty()
-                            if (hasRemovedSavedMedia) {
-                                showUnsavedMediaExitDialog = true
-                            } else {
-                                exitWorkspace()
-                            }
-                        },
-                        kind = BtnKind.DANGER,
-                        height = 36.dp
-                    )
-                }
-            }
-        }
-    }
-    if (showUnsavedMediaExitDialog) {
-        WikiDialog(
-            onDismiss = { showUnsavedMediaExitDialog = false },
-            title = "Unsaved Changes",
-            titleIcon = Icons.Outlined.Warning,
-            titleIconTint = w.danger,
-            maxWidth = 340.dp
-        ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Unsaved changes: media diary me rahegi",
-                    style = sansStyle(12.sp, w.text, FontWeight.Medium)
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    WikiButton("Cancel", { showUnsavedMediaExitDialog = false }, height = 36.dp)
-                    Spacer(Modifier.width(8.dp))
-                    WikiButton(
-                        text = "Exit",
-                        onClick = {
-                            showUnsavedMediaExitDialog = false
-                            exitWorkspace()
+                            requestExitWorkspace()
                         },
                         kind = BtnKind.DANGER,
                         height = 36.dp
@@ -1402,16 +1437,48 @@ fun WorkspaceScreen(vm: AppViewModel) {
             val previewBmp by produceState<ImageBitmap?>(null, targetImg.source) {
                 value = targetImg.source.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
             }
+            val diskSizeBytes by produceState(targetImg.sizeBytes, targetImg.source) {
+                value = if (targetImg.sizeBytes > 0L) targetImg.sizeBytes
+                else targetImg.source.takeIf { it.isNotBlank() }?.let { vm.getMediaSizeBytes(it) } ?: 0L
+            }
             ImageStudioDialog(
                 title = "Image Studio",
-                sizeBytes = targetImg.sizeBytes,
+                sizeBytes = diskSizeBytes,
                 onClose = { imgStudio = null },
                 previewBitmap = previewBmp,
+                loadSourceBitmap = targetImg.source.takeIf { it.isNotBlank() }?.let { srcId ->
+                    { vm.loadEditableImageBitmap(srcId) }
+                },
                 initialOpacity = targetImg.opacity,
                 onApplyOpacity = { newOpacity ->
                     images = images.map { m -> if (m.id == targetImg.id) m.copy(opacity = newOpacity) else m }
+                },
+                onApplyEdited = { encoded, previewImg ->
+                    val newMediaId = vm.importEditedImageBytes(encoded.bytes, previewImg)
+                    if (newMediaId != null) {
+                        sessionImportedMediaIds.add(newMediaId)
+                        images = images.map { m ->
+                            if (m.id == targetImg.id) {
+                                val (nextW, nextH) = if (encoded.params.hasGeometryChanges()) {
+                                    ImageEditorEngine.computeUpdatedCanvasSize(m.width, m.height, encoded.width, encoded.height)
+                                } else {
+                                    m.width to m.height
+                                }
+                                m.copy(
+                                    source = newMediaId,
+                                    width = nextW,
+                                    height = nextH,
+                                    opacity = encoded.params.opacity,
+                                    sizeBytes = encoded.bytes.size.toLong()
+                                )
+                            } else m
+                        }
+                        vm.showStatus("Image updated (${formatBytes(encoded.bytes.size.toLong())}).", BannerKind.SUCCESS)
+                    } else {
+                        vm.showStatus("Failed to save edited image.", BannerKind.ERROR)
+                    }
                 }
-            ) {}
+            )
         } ?: run { imgStudio = null }
     }
     if (bgStudio) {
@@ -1424,14 +1491,31 @@ fun WorkspaceScreen(vm: AppViewModel) {
         val bgPreviewBmp by produceState<ImageBitmap?>(null, bgSrc) {
             value = bgSrc?.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
         }
+        val bgSizeBytes by produceState(0L, bgSrc) {
+            value = bgSrc?.takeIf { it.isNotBlank() }?.let { vm.getMediaSizeBytes(it) } ?: 0L
+        }
         ImageStudioDialog(
             title = "Background Image Studio",
-            sizeBytes = 0,
+            sizeBytes = bgSizeBytes,
             onClose = { bgStudio = false },
             previewBitmap = bgPreviewBmp,
+            loadSourceBitmap = bgSrc?.takeIf { it.isNotBlank() }?.let { srcId ->
+                { vm.loadEditableImageBitmap(srcId) }
+            },
             initialOpacity = bgOpacity,
-            onApplyOpacity = { newOpacity -> bgOpacity = newOpacity }
-        ) {}
+            onApplyOpacity = { newOpacity -> bgOpacity = newOpacity },
+            onApplyEdited = { encoded, previewImg ->
+                val newMediaId = vm.importEditedImageBytes(encoded.bytes, previewImg)
+                if (newMediaId != null) {
+                    sessionImportedMediaIds.add(newMediaId)
+                    bgSrc = newMediaId
+                    bgOpacity = encoded.params.opacity
+                    vm.showStatus("Background updated (${formatBytes(encoded.bytes.size.toLong())}).", BannerKind.SUCCESS)
+                } else {
+                    vm.showStatus("Failed to save background image.", BannerKind.ERROR)
+                }
+            }
+        )
     }
     audStudio?.let { AudioStudioDialog(it.name, { audStudio = null }) { } }
     spoilerUnlockPrompt?.let { sp ->
@@ -1552,7 +1636,238 @@ internal suspend fun <T> importPfpForSession(
     }
     return imported
 }
+internal enum class WorkspaceExitAction {
+    AUTO_SAVE_AND_EXIT,
+    NO_SAVE_EXIT,
+}
 
+internal fun isDiaryContentEmpty(
+    heading: String,
+    plainText: String,
+    hasDividerSpan: Boolean,
+    pfp: Pfp?,
+    bgSrc: String?,
+    images: List<CanvasImage>,
+    audios: List<CanvasAudio>,
+    videos: List<CanvasVideo>,
+    reminderAt: Long?,
+    lockPin: String?,
+): Boolean {
+    val hasHeading = heading.trim().isNotEmpty()
+    val hasBodyText = plainText.trim { it.isWhitespace() || it == '\u200B' }.isNotEmpty() || hasDividerSpan
+    val hasPfp = pfp != null
+    val hasBg = !bgSrc.isNullOrBlank()
+    val hasMedia = images.isNotEmpty() || audios.isNotEmpty() || videos.isNotEmpty()
+    val hasReminder = reminderAt != null && reminderAt > 0L
+    val hasLock = !lockPin.isNullOrBlank()
+    return !(hasHeading || hasBodyText || hasPfp || hasBg || hasMedia || hasReminder || hasLock)
+}
+
+internal fun evaluateWorkspaceExitAction(
+    isReading: Boolean,
+    baseline: DiaryLog?,
+    baselineHtml: String,
+    currentHeading: String,
+    currentContentHtml: String,
+    currentPlainText: String,
+    hasDividerSpan: Boolean,
+    pfp: Pfp?,
+    bgSrc: String?,
+    bgOpacity: Float,
+    images: List<CanvasImage>,
+    audios: List<CanvasAudio>,
+    videos: List<CanvasVideo>,
+    reminderAt: Long?,
+    lockPin: String?,
+): WorkspaceExitAction {
+    val empty = isDiaryContentEmpty(
+        heading = currentHeading,
+        plainText = currentPlainText,
+        hasDividerSpan = hasDividerSpan,
+        pfp = pfp,
+        bgSrc = bgSrc,
+        images = images,
+        audios = audios,
+        videos = videos,
+        reminderAt = reminderAt,
+        lockPin = lockPin,
+    )
+    if (empty) return WorkspaceExitAction.NO_SAVE_EXIT
+    if (baseline == null) return WorkspaceExitAction.AUTO_SAVE_AND_EXIT
+    if (isReading) return WorkspaceExitAction.NO_SAVE_EXIT
+
+    val expectedHeading = currentHeading.ifBlank { "Untitled" }
+    val changed = expectedHeading != baseline.heading ||
+        currentContentHtml != baselineHtml ||
+        pfp != baseline.pfp ||
+        reminderAt != baseline.reminderAt ||
+        lockPin != baseline.diaryLockPin ||
+        bgSrc != baseline.canvasBgSource ||
+        kotlin.math.abs(bgOpacity - baseline.canvasBgOpacity) > 0.0005f ||
+        images != baseline.canvasImages ||
+        audios != baseline.audioAttachments ||
+        videos != baseline.videoAttachments
+    return if (changed) WorkspaceExitAction.AUTO_SAVE_AND_EXIT else WorkspaceExitAction.NO_SAVE_EXIT
+}
+
+internal fun computeExpandedDragBounds(
+    itemRightDp: Float,
+    itemBottomDp: Float,
+    currentCanvasWidthDp: Float,
+    currentCanvasHeightDp: Float,
+    currentBounds: Pair<Float, Float>?,
+    marginDp: Float = 48f,
+    stepDp: Float = 320f,
+): Pair<Float, Float>? {
+    val curRight = currentBounds?.first ?: (currentCanvasWidthDp - 240f)
+    val curBottom = currentBounds?.second ?: (currentCanvasHeightDp - 240f)
+    val needX = itemRightDp > (currentCanvasWidthDp - marginDp) && itemRightDp > curRight
+    val needY = itemBottomDp > (currentCanvasHeightDp - marginDp) && itemBottomDp > curBottom
+    if (!needX && !needY) return currentBounds
+    val nextR = if (needX) itemRightDp + stepDp else (currentBounds?.first ?: 0f)
+    val nextB = if (needY) itemBottomDp + stepDp else (currentBounds?.second ?: 0f)
+    return nextR to nextB
+}
+
+internal fun computeAutoScrollStepPx(
+    fingerRelPx: Float,
+    viewportSizePx: Float,
+    scrollValuePx: Int,
+    edgeZonePx: Float,
+    maxStepPx: Float,
+): Float {
+    if (viewportSizePx <= 0f || edgeZonePx <= 0f) return 0f
+    return when {
+        fingerRelPx > viewportSizePx - edgeZonePx -> {
+            val ratio = ((fingerRelPx - (viewportSizePx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
+            maxStepPx * (0.35f + ratio * 0.65f)
+        }
+        fingerRelPx < edgeZonePx && scrollValuePx > 0 -> {
+            val ratio = ((edgeZonePx - fingerRelPx) / edgeZonePx).coerceIn(0f, 1.5f)
+            -maxStepPx * (0.35f + ratio * 0.65f)
+        }
+        else -> 0f
+    }
+}
+
+private fun Modifier.smoothCanvasDraggable(
+    itemId: String,
+    editable: Boolean,
+    getSelected: () -> Boolean,
+    density: androidx.compose.ui.unit.Density,
+    getCoords: () -> LayoutCoordinates?,
+    getLivePosDp: () -> Pair<Float, Float>,
+    setLivePosDp: (Float, Float) -> Unit,
+    setDragging: (Boolean) -> Unit,
+    setFingerRoot: (Offset) -> Unit,
+    onTapSelect: () -> Unit,
+    onDragProgress: (Float, Float) -> Unit,
+    onMoveEnd: (Float, Float) -> Unit,
+    getItemSizeDp: () -> Pair<Float, Float>,
+): Modifier = this.pointerInput(itemId, editable) {
+    val touchSlopPx = minOf(viewConfiguration.touchSlop * 0.45f, with(density) { 4.dp.toPx() })
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        if (!editable) {
+            // In read-only mode just pass tap if not dragged (e.g. VideoCard play toggle)
+            var dragged = false
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (!change.pressed) {
+                    if (!dragged && !change.isConsumed) {
+                        onTapSelect()
+                    }
+                    break
+                }
+                if ((change.position - down.position).getDistance() > touchSlopPx) {
+                    dragged = true
+                }
+            }
+            return@awaitEachGesture
+        }
+
+        var draggingStarted = false
+        var prevFingerRoot = Offset.Zero
+
+        while (true) {
+            val event = awaitPointerEvent()
+            val pressedCount = event.changes.count { it.pressed }
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+
+            if (pressedCount >= 2) {
+                if (draggingStarted) {
+                    setDragging(false)
+                    draggingStarted = false
+                    val (lx, ly) = getLivePosDp()
+                    onMoveEnd(lx, ly)
+                }
+                break
+            }
+
+            if (change.changedToUpIgnoreConsumed()) {
+                if (draggingStarted) {
+                    change.consume()
+                    setDragging(false)
+                    val (lx, ly) = getLivePosDp()
+                    onMoveEnd(lx, ly)
+                    if (!getSelected()) onTapSelect()
+                } else if (!change.isConsumed) {
+                    onTapSelect()
+                }
+                break
+            }
+
+            if (change.isConsumed) {
+                if (draggingStarted) {
+                    setDragging(false)
+                    val (lx, ly) = getLivePosDp()
+                    onMoveEnd(lx, ly)
+                }
+                break
+            }
+
+            if (!draggingStarted) {
+                val dist = (change.position - down.position).getDistance()
+                if (dist > touchSlopPx) {
+                    val coords = getCoords()
+                    if (coords != null && coords.isAttached) {
+                        prevFingerRoot = coords.localToRoot(change.position)
+                        setFingerRoot(prevFingerRoot)
+                        draggingStarted = true
+                        setDragging(true)
+                        change.consume()
+                        val (lx, ly) = getLivePosDp()
+                        val (wDp, hDp) = getItemSizeDp()
+                        onDragProgress(lx + wDp, ly + hDp)
+                    }
+                }
+            } else {
+                change.consume()
+                val coords = getCoords()
+                if (coords != null && coords.isAttached) {
+                    val curRoot = coords.localToRoot(change.position)
+                    val deltaRoot = curRoot - prevFingerRoot
+                    prevFingerRoot = curRoot
+                    setFingerRoot(curRoot)
+                    if (deltaRoot.x != 0f || deltaRoot.y != 0f) {
+                        val (lx, ly) = getLivePosDp()
+                        val nextX = (lx + deltaRoot.x / density.density).coerceAtLeast(0f)
+                        val nextY = (ly + deltaRoot.y / density.density).coerceAtLeast(0f)
+                        setLivePosDp(nextX, nextY)
+                        val (wDp, hDp) = getItemSizeDp()
+                        onDragProgress(nextX + wDp, nextY + hDp)
+                    }
+                }
+            }
+        }
+        if (draggingStarted) {
+            setDragging(false)
+            val (lx, ly) = getLivePosDp()
+            onMoveEnd(lx, ly)
+        }
+    }
+}
 @Composable
 private fun ControlBar(content: @Composable RowScope.() -> Unit) {
     val w = wiki()
@@ -1589,14 +1904,15 @@ private fun DraggableImage(
 ) {
     val w = wiki()
     val density = LocalDensity.current
-    var liveX by remember(im.id) { mutableStateOf(im.x) }
-    var liveY by remember(im.id) { mutableStateOf(im.y) }
+    var liveX by remember(im.id) { mutableFloatStateOf(im.x) }
+    var liveY by remember(im.id) { mutableFloatStateOf(im.y) }
     var isDragging by remember(im.id) { mutableStateOf(false) }
     var fingerRootPos by remember(im.id) { mutableStateOf(Offset.Zero) }
     var itemCoords by remember(im.id) { mutableStateOf<LayoutCoordinates?>(null) }
 
     val currentW by rememberUpdatedState(im.width)
     val currentH by rememberUpdatedState(im.height)
+    val currentSelected by rememberUpdatedState(selected)
     val currentViewportOrigin by rememberUpdatedState(viewportRootOrigin)
     val currentOnSelect by rememberUpdatedState(onSelect)
     val currentOnDragProgress by rememberUpdatedState(onDragProgress)
@@ -1614,32 +1930,18 @@ private fun DraggableImage(
         val edgeZonePx = with(density) { 44.dp.toPx() }
         val maxStepPx = with(density) { 12.dp.toPx() }
         while (isDragging) {
-            val relX = fingerRootPos.x - currentViewportOrigin.x
-            val relY = fingerRootPos.y - currentViewportOrigin.y
-            var panPxX = 0f
-            var panPxY = 0f
-            if (relX > viewportWPx - edgeZonePx) {
-                val ratio = ((relX - (viewportWPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relX < edgeZonePx && hScroll.value > 0) {
-                val ratio = ((edgeZonePx - relX) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (relY > viewportHPx - edgeZonePx) {
-                val ratio = ((relY - (viewportHPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relY < edgeZonePx && vScroll.value > 0) {
-                val ratio = ((edgeZonePx - relY) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
+            val panPxX = computeAutoScrollStepPx(fingerRootPos.x - currentViewportOrigin.x, viewportWPx, hScroll.value, edgeZonePx, maxStepPx)
+            val panPxY = computeAutoScrollStepPx(fingerRootPos.y - currentViewportOrigin.y, viewportHPx, vScroll.value, edgeZonePx, maxStepPx)
             if (panPxX != 0f || panPxY != 0f) {
-                val nextX = (liveX + panPxX / density.density).coerceAtLeast(0f)
-                val nextY = (liveY + panPxY / density.density).coerceAtLeast(0f)
-                liveX = nextX
-                liveY = nextY
-                currentOnDragProgress(nextX + currentW, nextY + currentH)
-                if (panPxX != 0f) hScroll.scrollBy(panPxX)
-                if (panPxY != 0f) vScroll.scrollBy(panPxY)
+                val consumedX = if (panPxX != 0f) hScroll.scrollBy(panPxX) else 0f
+                val consumedY = if (panPxY != 0f) vScroll.scrollBy(panPxY) else 0f
+                if (consumedX != 0f || consumedY != 0f) {
+                    val nextX = (liveX + consumedX / density.density).coerceAtLeast(0f)
+                    val nextY = (liveY + consumedY / density.density).coerceAtLeast(0f)
+                    liveX = nextX
+                    liveY = nextY
+                    currentOnDragProgress(nextX + currentW, nextY + currentH)
+                }
             }
             delay(16L)
         }
@@ -1655,55 +1957,30 @@ private fun DraggableImage(
         value = im.source.takeIf { it.isNotBlank() }?.let { loadImageBitmap(it) }
     }
 
+    val highlightBorder = selected || isDragging
     Box(
         Modifier
-            .offset { IntOffset(with(this) { liveX.dp.roundToPx() }, with(this) { liveY.dp.roundToPx() }) }
+            .offset { IntOffset((liveX * density.density).roundToInt(), (liveY * density.density).roundToInt()) }
             .size(im.width.dp, im.height.dp)
             .rotate(im.rotation)
             .onGloballyPositioned { itemCoords = it }
             .background(if (bitmap != null) Color.Transparent else w.surface)
-            .wikiBorder(if (selected) w.accent else w.border, if (selected) 1.5.dp else 0.5.dp)
-            .pointerInput(im.id, editable) {
-                detectTapGestures(onTap = { if (editable) currentOnSelect() })
-            }
-            .pointerInput(im.id, editable) {
-                if (editable) {
-                    var prevFingerRoot = Offset.Zero
-                    detectDragGestures(
-                        onDragStart = { startOffset ->
-                            val coords = itemCoords
-                            if (coords != null && coords.isAttached) {
-                                prevFingerRoot = coords.localToRoot(startOffset)
-                                fingerRootPos = prevFingerRoot
-                            }
-                            isDragging = true
-                            currentOnSelect()
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        },
-                        onDragEnd = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                        onDragCancel = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                    ) { change, _ ->
-                        if (change.isConsumed) return@detectDragGestures
-                        change.consume()
-                        val coords = itemCoords
-                        if (coords != null && coords.isAttached) {
-                            val curRoot = coords.localToRoot(change.position)
-                            val deltaRoot = curRoot - prevFingerRoot
-                            prevFingerRoot = curRoot
-                            fingerRootPos = curRoot
-                            liveX = (liveX + deltaRoot.x / density.density).coerceAtLeast(0f)
-                            liveY = (liveY + deltaRoot.y / density.density).coerceAtLeast(0f)
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        }
-                    }
-                }
-            },
+            .wikiBorder(if (highlightBorder) w.accent else w.border, if (highlightBorder) 1.5.dp else 0.5.dp)
+            .smoothCanvasDraggable(
+                itemId = im.id,
+                editable = editable,
+                getSelected = { currentSelected },
+                density = density,
+                getCoords = { itemCoords },
+                getLivePosDp = { liveX to liveY },
+                setLivePosDp = { nx, ny -> liveX = nx; liveY = ny },
+                setDragging = { isDragging = it },
+                setFingerRoot = { fingerRootPos = it },
+                onTapSelect = { if (editable) currentOnSelect() },
+                onDragProgress = { r, b -> currentOnDragProgress(r, b) },
+                onMoveEnd = { x, y -> currentOnMove(x, y) },
+                getItemSizeDp = { currentW to currentH }
+            ),
         contentAlignment = Alignment.Center,
     ) {
         val loaded = bitmap
@@ -1740,14 +2017,15 @@ private fun AudioCard(
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    var liveX by remember(a.id) { mutableStateOf(a.x) }
-    var liveY by remember(a.id) { mutableStateOf(a.y) }
+    var liveX by remember(a.id) { mutableFloatStateOf(a.x) }
+    var liveY by remember(a.id) { mutableFloatStateOf(a.y) }
     var isDragging by remember(a.id) { mutableStateOf(false) }
     var fingerRootPos by remember(a.id) { mutableStateOf(Offset.Zero) }
     var itemCoords by remember(a.id) { mutableStateOf<LayoutCoordinates?>(null) }
 
     val currentW by rememberUpdatedState(a.width)
     val currentH by rememberUpdatedState(a.height)
+    val currentSelected by rememberUpdatedState(selected)
     val currentViewportOrigin by rememberUpdatedState(viewportRootOrigin)
     val currentOnSelect by rememberUpdatedState(onSelect)
     val currentOnDragProgress by rememberUpdatedState(onDragProgress)
@@ -1765,32 +2043,18 @@ private fun AudioCard(
         val edgeZonePx = with(density) { 44.dp.toPx() }
         val maxStepPx = with(density) { 12.dp.toPx() }
         while (isDragging) {
-            val relX = fingerRootPos.x - currentViewportOrigin.x
-            val relY = fingerRootPos.y - currentViewportOrigin.y
-            var panPxX = 0f
-            var panPxY = 0f
-            if (relX > viewportWPx - edgeZonePx) {
-                val ratio = ((relX - (viewportWPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relX < edgeZonePx && hScroll.value > 0) {
-                val ratio = ((edgeZonePx - relX) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (relY > viewportHPx - edgeZonePx) {
-                val ratio = ((relY - (viewportHPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relY < edgeZonePx && vScroll.value > 0) {
-                val ratio = ((edgeZonePx - relY) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
+            val panPxX = computeAutoScrollStepPx(fingerRootPos.x - currentViewportOrigin.x, viewportWPx, hScroll.value, edgeZonePx, maxStepPx)
+            val panPxY = computeAutoScrollStepPx(fingerRootPos.y - currentViewportOrigin.y, viewportHPx, vScroll.value, edgeZonePx, maxStepPx)
             if (panPxX != 0f || panPxY != 0f) {
-                val nextX = (liveX + panPxX / density.density).coerceAtLeast(0f)
-                val nextY = (liveY + panPxY / density.density).coerceAtLeast(0f)
-                liveX = nextX
-                liveY = nextY
-                currentOnDragProgress(nextX + currentW, nextY + currentH)
-                if (panPxX != 0f) hScroll.scrollBy(panPxX)
-                if (panPxY != 0f) vScroll.scrollBy(panPxY)
+                val consumedX = if (panPxX != 0f) hScroll.scrollBy(panPxX) else 0f
+                val consumedY = if (panPxY != 0f) vScroll.scrollBy(panPxY) else 0f
+                if (consumedX != 0f || consumedY != 0f) {
+                    val nextX = (liveX + consumedX / density.density).coerceAtLeast(0f)
+                    val nextY = (liveY + consumedY / density.density).coerceAtLeast(0f)
+                    liveX = nextX
+                    liveY = nextY
+                    currentOnDragProgress(nextX + currentW, nextY + currentH)
+                }
             }
             delay(16L)
         }
@@ -1905,58 +2169,30 @@ private fun AudioCard(
         }
     }
 
+    val highlightAudioBorder = selected || isDragging
     Row(
         Modifier
-            .offset { IntOffset(with(this) { liveX.dp.roundToPx() }, with(this) { liveY.dp.roundToPx() }) }
+            .offset { IntOffset((liveX * density.density).roundToInt(), (liveY * density.density).roundToInt()) }
             .size(a.width.dp, a.height.dp)
             .rotate(a.rotation)
             .onGloballyPositioned { itemCoords = it }
             .background(Color(0xFFB32424))
-            .wikiBorder(if (selected) wiki().accent else Color(0xFF7A1616), if (selected) 1.5.dp else 0.5.dp)
-            .pointerInput(a.id, editable) {
-                detectTapGestures(
-                    onTap = { if (editable) currentOnSelect() },
-                    onDoubleTap = { if (editable) currentOnSelect() }
-                )
-            }
-            .pointerInput(a.id, editable) {
-                if (editable) {
-                    var prevFingerRoot = Offset.Zero
-                    detectDragGestures(
-                        onDragStart = { startOffset ->
-                            val coords = itemCoords
-                            if (coords != null && coords.isAttached) {
-                                prevFingerRoot = coords.localToRoot(startOffset)
-                                fingerRootPos = prevFingerRoot
-                            }
-                            isDragging = true
-                            currentOnSelect()
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        },
-                        onDragEnd = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                        onDragCancel = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                    ) { change, _ ->
-                        if (change.isConsumed) return@detectDragGestures
-                        change.consume()
-                        val coords = itemCoords
-                        if (coords != null && coords.isAttached) {
-                            val curRoot = coords.localToRoot(change.position)
-                            val deltaRoot = curRoot - prevFingerRoot
-                            prevFingerRoot = curRoot
-                            fingerRootPos = curRoot
-                            liveX = (liveX + deltaRoot.x / density.density).coerceAtLeast(0f)
-                            liveY = (liveY + deltaRoot.y / density.density).coerceAtLeast(0f)
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        }
-                    }
-                }
-            }
+            .wikiBorder(if (highlightAudioBorder) wiki().accent else Color(0xFF7A1616), if (highlightAudioBorder) 1.5.dp else 0.5.dp)
+            .smoothCanvasDraggable(
+                itemId = a.id,
+                editable = editable,
+                getSelected = { currentSelected },
+                density = density,
+                getCoords = { itemCoords },
+                getLivePosDp = { liveX to liveY },
+                setLivePosDp = { nx, ny -> liveX = nx; liveY = ny },
+                setDragging = { isDragging = it },
+                setFingerRoot = { fingerRootPos = it },
+                onTapSelect = { if (editable) currentOnSelect() },
+                onDragProgress = { r, b -> currentOnDragProgress(r, b) },
+                onMoveEnd = { x, y -> currentOnMove(x, y) },
+                getItemSizeDp = { currentW to currentH }
+            )
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2017,14 +2253,15 @@ private fun VideoCard(
     val w = wiki()
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    var liveX by remember(v.id) { mutableStateOf(v.x) }
-    var liveY by remember(v.id) { mutableStateOf(v.y) }
+    var liveX by remember(v.id) { mutableFloatStateOf(v.x) }
+    var liveY by remember(v.id) { mutableFloatStateOf(v.y) }
     var isDragging by remember(v.id) { mutableStateOf(false) }
     var fingerRootPos by remember(v.id) { mutableStateOf(Offset.Zero) }
     var itemCoords by remember(v.id) { mutableStateOf<LayoutCoordinates?>(null) }
 
     val currentW by rememberUpdatedState(v.width)
     val currentH by rememberUpdatedState(v.height)
+    val currentSelected by rememberUpdatedState(selected)
     val currentViewportOrigin by rememberUpdatedState(viewportRootOrigin)
     val currentOnSelect by rememberUpdatedState(onSelect)
     val currentOnDragProgress by rememberUpdatedState(onDragProgress)
@@ -2042,32 +2279,18 @@ private fun VideoCard(
         val edgeZonePx = with(density) { 44.dp.toPx() }
         val maxStepPx = with(density) { 12.dp.toPx() }
         while (isDragging) {
-            val relX = fingerRootPos.x - currentViewportOrigin.x
-            val relY = fingerRootPos.y - currentViewportOrigin.y
-            var panPxX = 0f
-            var panPxY = 0f
-            if (relX > viewportWPx - edgeZonePx) {
-                val ratio = ((relX - (viewportWPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relX < edgeZonePx && hScroll.value > 0) {
-                val ratio = ((edgeZonePx - relX) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (relY > viewportHPx - edgeZonePx) {
-                val ratio = ((relY - (viewportHPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relY < edgeZonePx && vScroll.value > 0) {
-                val ratio = ((edgeZonePx - relY) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
+            val panPxX = computeAutoScrollStepPx(fingerRootPos.x - currentViewportOrigin.x, viewportWPx, hScroll.value, edgeZonePx, maxStepPx)
+            val panPxY = computeAutoScrollStepPx(fingerRootPos.y - currentViewportOrigin.y, viewportHPx, vScroll.value, edgeZonePx, maxStepPx)
             if (panPxX != 0f || panPxY != 0f) {
-                val nextX = (liveX + panPxX / density.density).coerceAtLeast(0f)
-                val nextY = (liveY + panPxY / density.density).coerceAtLeast(0f)
-                liveX = nextX
-                liveY = nextY
-                currentOnDragProgress(nextX + currentW, nextY + currentH)
-                if (panPxX != 0f) hScroll.scrollBy(panPxX)
-                if (panPxY != 0f) vScroll.scrollBy(panPxY)
+                val consumedX = if (panPxX != 0f) hScroll.scrollBy(panPxX) else 0f
+                val consumedY = if (panPxY != 0f) vScroll.scrollBy(panPxY) else 0f
+                if (consumedX != 0f || consumedY != 0f) {
+                    val nextX = (liveX + consumedX / density.density).coerceAtLeast(0f)
+                    val nextY = (liveY + consumedY / density.density).coerceAtLeast(0f)
+                    liveX = nextX
+                    liveY = nextY
+                    currentOnDragProgress(nextX + currentW, nextY + currentH)
+                }
             }
             delay(16L)
         }
@@ -2181,59 +2404,31 @@ private fun VideoCard(
         }
     }
 
+    val highlightVideoBorder = selected || isDragging
     Box(
         Modifier
-            .offset { IntOffset(with(this) { liveX.dp.roundToPx() }, with(this) { liveY.dp.roundToPx() }) }
+            .offset { IntOffset((liveX * density.density).roundToInt(), (liveY * density.density).roundToInt()) }
             .size(v.width.dp, v.height.dp)
             .rotate(v.rotation)
             .clipToBounds()
             .onGloballyPositioned { itemCoords = it }
             .background(Color(0xFF14161A))
-            .wikiBorder(if (selected) w.accent else w.border, if (selected) 1.5.dp else 0.5.dp)
-            .pointerInput(v.id, editable) {
-                detectTapGestures(
-                    onTap = { if (editable) currentOnSelect() else togglePlay() },
-                    onDoubleTap = { if (editable) currentOnSelect() }
-                )
-            }
-            .pointerInput(v.id, editable) {
-                if (editable) {
-                    var prevFingerRoot = Offset.Zero
-                    detectDragGestures(
-                        onDragStart = { startOffset ->
-                            val coords = itemCoords
-                            if (coords != null && coords.isAttached) {
-                                prevFingerRoot = coords.localToRoot(startOffset)
-                                fingerRootPos = prevFingerRoot
-                            }
-                            isDragging = true
-                            currentOnSelect()
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        },
-                        onDragEnd = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                        onDragCancel = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                    ) { change, _ ->
-                        if (change.isConsumed) return@detectDragGestures
-                        change.consume()
-                        val coords = itemCoords
-                        if (coords != null && coords.isAttached) {
-                            val curRoot = coords.localToRoot(change.position)
-                            val deltaRoot = curRoot - prevFingerRoot
-                            prevFingerRoot = curRoot
-                            fingerRootPos = curRoot
-                            liveX = (liveX + deltaRoot.x / density.density).coerceAtLeast(0f)
-                            liveY = (liveY + deltaRoot.y / density.density).coerceAtLeast(0f)
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        }
-                    }
-                }
-            },
+            .wikiBorder(if (highlightVideoBorder) w.accent else w.border, if (highlightVideoBorder) 1.5.dp else 0.5.dp)
+            .smoothCanvasDraggable(
+                itemId = v.id,
+                editable = editable,
+                getSelected = { currentSelected },
+                density = density,
+                getCoords = { itemCoords },
+                getLivePosDp = { liveX to liveY },
+                setLivePosDp = { nx, ny -> liveX = nx; liveY = ny },
+                setDragging = { isDragging = it },
+                setFingerRoot = { fingerRootPos = it },
+                onTapSelect = { if (editable) currentOnSelect() else togglePlay() },
+                onDragProgress = { r, b -> currentOnDragProgress(r, b) },
+                onMoveEnd = { x, y -> currentOnMove(x, y) },
+                getItemSizeDp = { currentW to currentH }
+            ),
         contentAlignment = Alignment.Center,
     ) {
         AndroidView(
