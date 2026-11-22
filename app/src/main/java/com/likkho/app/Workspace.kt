@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -145,6 +146,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
     val activeImportToken = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     var runningImportToken by remember { mutableStateOf(0L) }
     val workspaceContext = androidx.compose.ui.platform.LocalContext.current
+    val textToolbar = LocalTextToolbar.current
 
     fun cleanupUnsavedSessionMedia() {
         cleanupAbandonedSessionMedia(
@@ -154,6 +156,14 @@ fun WorkspaceScreen(vm: AppViewModel) {
         )
     }
     val currentCleanupUnsavedSessionMedia by rememberUpdatedState { cleanupUnsavedSessionMedia() }
+
+    LaunchedEffect(reading) {
+        if (reading) textToolbar.hide()
+    }
+
+    DisposableEffect(textToolbar) {
+        onDispose { textToolbar.hide() }
+    }
 
     fun cancelActiveImport(showBanner: Boolean = false) {
         activeCancelFlag.get()?.set(true)
@@ -446,6 +456,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
     }
 
     fun exitWorkspace() {
+        textToolbar.hide()
         cleanupUnsavedSessionMedia()
         vm.navigateTo(Route.HOME)
     }
@@ -474,7 +485,10 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 lockPin = lockPin,
             )
         ) {
-            WorkspaceExitAction.AUTO_SAVE_AND_EXIT -> save(showFeedback = false, exitAfterSave = true)
+            WorkspaceExitAction.AUTO_SAVE_AND_EXIT -> {
+                textToolbar.hide()
+                save(showFeedback = false, exitAfterSave = true)
+            }
             WorkspaceExitAction.NO_SAVE_EXIT -> exitWorkspace()
         }
     }
