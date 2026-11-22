@@ -399,4 +399,73 @@ class WorkspaceAndImageToolsTest {
             assertArrayEquals(editedBytes, repo.readDecryptedBytes(editedId, dek))
         }
     }
+
+    // =========================================================================
+    // 4. Long-Paragraph VisualTransformation & Home PFP Cache Deduplication
+    // =========================================================================
+
+    @Test
+    fun richTextVisualTransformation_longDocumentWithMixedSpans_preservesStylesCorrectly() {
+        val lineCount = 200
+        val sb = StringBuilder()
+        val spans = mutableListOf<com.likkho.app.editor.model.Span>()
+        for (i in 0 until lineCount) {
+            val start = sb.length
+            val line = "Paragraph line number $i with superscript x and bold text."
+            sb.append(line)
+            val end = sb.length
+            if (i == 0) {
+                spans.add(com.likkho.app.editor.model.Span(start, end, com.likkho.app.editor.model.SpanStyle.Heading(1)))
+            }
+            if (i % 4 == 0) {
+                spans.add(com.likkho.app.editor.model.Span(start, end, com.likkho.app.editor.model.SpanStyle.Align(com.likkho.app.editor.model.TextAlignment.CENTER)))
+                spans.add(com.likkho.app.editor.model.Span(start, end, com.likkho.app.editor.model.SpanStyle.Indent(1)))
+            }
+            if (i % 5 == 0) {
+                spans.add(com.likkho.app.editor.model.Span(start, start + 9, com.likkho.app.editor.model.SpanStyle.Code))
+                val supIdx = start + line.indexOf("x")
+                spans.add(com.likkho.app.editor.model.Span(supIdx, supIdx + 1, com.likkho.app.editor.model.SpanStyle.Superscript))
+            }
+            if (i % 3 == 0) {
+                spans.add(com.likkho.app.editor.model.Span(end - 5, end - 1, com.likkho.app.editor.model.SpanStyle.Bold))
+            }
+            if (i < lineCount - 1) sb.append('\n')
+        }
+
+        val fullText = sb.toString()
+        val vt = com.likkho.app.editor.RichTextVisualTransformation(
+            spans = spans,
+            defaultAlignment = com.likkho.app.editor.model.TextAlignment.LEFT,
+            fontResolver = { null }
+        )
+        val transformed = vt.filter(androidx.compose.ui.text.AnnotatedString(fullText))
+        assertEquals(fullText, transformed.text.text)
+        // ParagraphStyles emitted for every aligned/indented line (200 / 4 = 50 lines)
+        assertEquals(50, transformed.text.paragraphStyles.size)
+        // Heading + 40 superscript/code + 67 bold => many span styles preserved without truncation
+        assertTrue(transformed.text.spanStyles.size > 100)
+        // Line 0 superscript at H1 sizing (26f * 0.72f = 18.72f)
+        val firstLineSup = transformed.text.spanStyles.firstOrNull {
+            it.item.baselineShift != null && it.start < fullText.indexOf('\n')
+        }
+        assertEquals(26f * 0.72f, firstLineSup?.item?.fontSize?.value ?: 0f, 0.05f)
+    }
+
+    @Test
+    fun collectDistinctPfpMediaIds_preservesOrderAndIgnoresNullOrBlank() {
+        val entries = listOf(
+            DiaryLog(id = "1", heading = "A", pfp = Pfp(text = "A")),
+            DiaryLog(id = "2", heading = "B", pfp = Pfp(source = "med_pfp_1")),
+            DiaryLog(id = "3", heading = "C", pfp = Pfp(source = "")),
+            DiaryLog(id = "4", heading = "D", pfp = Pfp(source = "med_pfp_2")),
+            DiaryLog(id = "5", heading = "E", pfp = Pfp(source = "med_pfp_1")),
+            DiaryLog(id = "6", heading = "F", pfp = null)
+        )
+        val distinct = linkedSetOf<String>().apply {
+            entries.forEach { entry ->
+                entry.pfp?.source?.takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+        }.toList()
+        assertEquals(listOf("med_pfp_1", "med_pfp_2"), distinct)
+    }
 }

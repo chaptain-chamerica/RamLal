@@ -202,11 +202,61 @@ object HighlightLayoutCalculator {
     }
 }
 
+data class CachedHighlightRect(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+    val color: Color
+)
+
 private fun parseHighlightHex(hex: String): Color? = try {
     val clean = if (hex.startsWith("#")) hex else "#$hex"
     Color(android.graphics.Color.parseColor(clean))
 } catch (_: Exception) {
     null
+}
+
+fun computeCachedHighlightRects(
+    layoutResult: TextLayoutResult,
+    spans: List<Span>,
+    ascentPx: Float,
+    descentPx: Float,
+    lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
+): List<CachedHighlightRect> {
+    val rects = HighlightLayoutCalculator.computeFromTextLayout(
+        layoutResult = layoutResult,
+        spans = spans,
+        ascentPx = ascentPx,
+        descentPx = descentPx,
+        lineMetrics = lineMetrics
+    )
+    if (rects.isEmpty()) return emptyList()
+    return rects.mapNotNull { r ->
+        parseHighlightHex(r.colorHex)?.let { color ->
+            CachedHighlightRect(r.left, r.top, r.right, r.bottom, color)
+        }
+    }
+}
+
+fun DrawScope.drawCachedTextHighlights(cachedRects: List<CachedHighlightRect>) {
+    for (r in cachedRects) {
+        drawRect(
+            color = r.color,
+            topLeft = androidx.compose.ui.geometry.Offset(r.left, r.top),
+            size = androidx.compose.ui.geometry.Size(r.right - r.left, r.bottom - r.top)
+        )
+    }
+}
+
+fun DrawScope.drawCachedTextSpoilers(spoilerRects: List<HighlightRect>) {
+    for (r in spoilerRects) {
+        drawRect(
+            color = Color.Black,
+            topLeft = androidx.compose.ui.geometry.Offset(r.left, r.top),
+            size = androidx.compose.ui.geometry.Size(r.right - r.left, r.bottom - r.top)
+        )
+    }
 }
 
 fun DrawScope.drawTextHighlights(
@@ -216,21 +266,15 @@ fun DrawScope.drawTextHighlights(
     descentPx: Float,
     lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
 ) {
-    val rects = HighlightLayoutCalculator.computeFromTextLayout(
-        layoutResult = layoutResult,
-        spans = spans,
-        ascentPx = ascentPx,
-        descentPx = descentPx,
-        lineMetrics = lineMetrics
-    )
-    for (r in rects) {
-        val color = parseHighlightHex(r.colorHex) ?: continue
-        drawRect(
-            color = color,
-            topLeft = androidx.compose.ui.geometry.Offset(r.left, r.top),
-            size = androidx.compose.ui.geometry.Size(r.right - r.left, r.bottom - r.top)
+    drawCachedTextHighlights(
+        computeCachedHighlightRects(
+            layoutResult = layoutResult,
+            spans = spans,
+            ascentPx = ascentPx,
+            descentPx = descentPx,
+            lineMetrics = lineMetrics
         )
-    }
+    )
 }
 
 fun DrawScope.drawTextSpoilers(
@@ -249,11 +293,5 @@ fun DrawScope.drawTextSpoilers(
         descentPx = descentPx,
         lineMetrics = lineMetrics
     )
-    for (r in rects) {
-        drawRect(
-            color = Color.Black,
-            topLeft = androidx.compose.ui.geometry.Offset(r.left, r.top),
-            size = androidx.compose.ui.geometry.Size(r.right - r.left, r.bottom - r.top)
-        )
-    }
+    drawCachedTextSpoilers(rects)
 }

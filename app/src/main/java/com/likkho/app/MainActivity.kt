@@ -176,6 +176,7 @@ fun Root(vm: AppViewModel) {
 
     CompositionLocalProvider(
         LocalImageBitmapLoader provides { mediaId -> vm.loadDecryptedImageBitmap(mediaId) },
+        LocalImageBitmapCacheLookup provides { mediaId -> vm.getCachedImageBitmap(mediaId) },
         LocalBitmapKeyLifecycle provides vm.bitmapKeyLifecycle
     ) {
     Box(Modifier.fillMaxSize().background(w.bg).statusBarsPadding()) {

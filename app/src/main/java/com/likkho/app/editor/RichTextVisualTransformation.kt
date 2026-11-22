@@ -84,8 +84,8 @@ class RichTextVisualTransformation(
 
         // Emit merged non-overlapping ParagraphStyle strictly on full line bounds [lineStart, paraEnd)
         // including trailing '\n' so Compose MultiParagraph never inserts an implicit extra blank line.
-        val hasParagraphSpans = spans.any { it.style is SpanStyle.Align || it.style is SpanStyle.Indent }
-        if (hasParagraphSpans) {
+        val paragraphSpans = spans.filter { it.style is SpanStyle.Align || it.style is SpanStyle.Indent }
+        if (paragraphSpans.isNotEmpty()) {
             var lineStart = 0
             while (lineStart <= textLen) {
                 var lineEnd = lineStart
@@ -94,7 +94,7 @@ class RichTextVisualTransformation(
                 if (lineStart < paraEnd) {
                     var lineAlign: TextAlignment? = null
                     var lineIndent = 0
-                    for (sp in spans) {
+                    for (sp in paragraphSpans) {
                         val s = sp.start.coerceIn(0, textLen)
                         val e = sp.end.coerceIn(0, textLen)
                         if (s < paraEnd && e > lineStart) {
@@ -122,11 +122,14 @@ class RichTextVisualTransformation(
             }
         }
 
+        val sizingSpans = spans.filter {
+            it.style is SpanStyle.SizePx || it.style is SpanStyle.Heading || it.style is SpanStyle.Code
+        }
         fun baseFontSizeSpAt(s: Int, e: Int): Float {
             var pxSize: Float? = null
             var headingLvl: Int? = null
             var hasCode = false
-            for (other in spans) {
+            for (other in sizingSpans) {
                 if (other.start < e && other.end > s) {
                     when (val ost = other.style) {
                         is SpanStyle.SizePx -> pxSize = ost.sizePx
