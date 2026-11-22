@@ -153,6 +153,7 @@ fun SettingsScreen(vm: AppViewModel) {
                     icon = Icons.Outlined.VpnKey, title = "Set Passcode",
                     subtitle = if (activePin != null) "Passcode enabled" else "Set a passcode for lock",
                     trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = w.muted) },
+                    enabled = false,
                     onClick = {},
                     modifier = Modifier.pointerInput(vm.vaultMode, vm.savedPasscode, vm.secondaryPasscode) {
                         detectTapGestures(
