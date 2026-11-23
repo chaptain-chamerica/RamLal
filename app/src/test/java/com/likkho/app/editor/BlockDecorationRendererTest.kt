@@ -338,40 +338,6 @@ class BlockDecorationRendererTest {
             ).size
         )
     }
-
-    @Test
-    fun collectVisibleQuoteAndCodeBlocks_preservesTallSpanningBlocks_andCullsOffscreenShortBlocks() {
-        val tallQuote = QuoteBlockRect(left = 0f, top = 100f, right = 250f, bottom = 3000f, barWidth = 3f, isFullLine = true)
-        val shortAboveQuote = QuoteBlockRect(left = 0f, top = 20f, right = 120f, bottom = 60f, barWidth = 3f, isFullLine = true)
-        val shortVisibleQuote = QuoteBlockRect(left = 0f, top = 1200f, right = 180f, bottom = 1260f, barWidth = 3f, isFullLine = true)
-        val shortBelowQuote = QuoteBlockRect(left = 0f, top = 4000f, right = 140f, bottom = 4060f, barWidth = 3f, isFullLine = true)
-
-        val tallCode = CodeBoxRect(left = 0f, top = 200f, right = 240f, bottom = 2800f, isBlock = true)
-        val shortAboveCode = CodeBoxRect(left = 0f, top = 40f, right = 90f, bottom = 80f, isBlock = false)
-        val shortVisibleCode = CodeBoxRect(left = 0f, top = 1300f, right = 140f, bottom = 1350f, isBlock = false)
-        val shortBelowCode = CodeBoxRect(left = 0f, top = 3500f, right = 120f, bottom = 3550f, isBlock = false)
-
-        val cache = CachedBlockDecorations(
-            dividers = emptyList(),
-            bullets = emptyList(),
-            todos = emptyList(),
-            quoteBlocks = listOf(tallQuote, shortAboveQuote, shortVisibleQuote, shortBelowQuote),
-            codeBoxes = listOf(tallCode, shortAboveCode, shortVisibleCode, shortBelowCode),
-            checkPaths = emptyList()
-        )
-
-        val visQuotes = collectVisibleQuoteBlocks(cache, visibleTopPx = 1000f, visibleBottomPx = 1800f)
-        assertTrue(tallQuote in visQuotes)
-        assertTrue(shortVisibleQuote in visQuotes)
-        assertFalse(shortAboveQuote in visQuotes)
-        assertFalse(shortBelowQuote in visQuotes)
-
-        val visCode = collectVisibleCodeBoxes(cache, visibleTopPx = 1000f, visibleBottomPx = 1800f)
-        assertTrue(tallCode in visCode)
-        assertTrue(shortVisibleCode in visCode)
-        assertFalse(shortAboveCode in visCode)
-        assertFalse(shortBelowCode in visCode)
-    }
 }
 
 

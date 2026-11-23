@@ -227,46 +227,6 @@ fun PfpAvatar(pfp: Pfp?, size: Dp, modifier: Modifier = Modifier) {
                 contentScale = ContentScale.Fit,
             )
         }
-    } else if (pfp.source != null) {
-        val loader = LocalImageBitmapLoader.current
-        val cacheLookup = LocalImageBitmapCacheLookup.current
-        val keyLifecycle = LocalBitmapKeyLifecycle.current
-        val src = pfp.source
-        DisposableEffect(src) {
-            if (src.isNotBlank()) keyLifecycle?.acquire(src)
-            onDispose { if (src.isNotBlank()) keyLifecycle?.release(src) }
-        }
-        val cachedInitial = remember(src, cacheLookup) {
-            if (src.isNotBlank()) cacheLookup?.invoke(src) else null
-        }
-        val bmp by produceState<ImageBitmap?>(initialValue = cachedInitial, key1 = src) {
-            if (src.isNotBlank() && value == null) {
-                value = loader?.invoke(src)
-            }
-        }
-        Box(
-            modifier = modifier
-                .size(size)
-                .background(w.surface)
-                .wikiBorder(w.border, 0.5.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (bmp != null) {
-                Image(
-                    bitmap = bmp!!,
-                    contentDescription = "Diary Photo",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                Icon(
-                    Icons.Outlined.Image,
-                    "Diary Photo",
-                    tint = w.muted.copy(alpha = 0.45f),
-                    modifier = Modifier.size(size / 2),
-                )
-            }
-        }
     } else {
         Box(
             modifier = modifier
@@ -275,16 +235,38 @@ fun PfpAvatar(pfp: Pfp?, size: Dp, modifier: Modifier = Modifier) {
                 .wikiBorder(w.border, 0.5.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                pfp.text.orEmpty(),
-                style = androidx.compose.ui.text.TextStyle(
-                    fontFamily = WikiFonts.serif,
-                    fontWeight = FontWeight.Normal,
-                    color = Color(pfp.textColor),
-                    fontSize = (size.value * 0.45f * pfp.textScale).sp,
-                ),
-                maxLines = 1,
-            )
+            if (pfp.source != null) {
+                val loader = LocalImageBitmapLoader.current
+                val keyLifecycle = LocalBitmapKeyLifecycle.current
+                DisposableEffect(pfp.source) {
+                    keyLifecycle?.acquire(pfp.source)
+                    onDispose { keyLifecycle?.release(pfp.source) }
+                }
+                val bmp by produceState<ImageBitmap?>(initialValue = null, key1 = pfp.source) {
+                    value = loader?.invoke(pfp.source)
+                }
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp!!,
+                        contentDescription = "Diary Photo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Icon(Icons.Outlined.Image, "Diary Photo", tint = Color.White, modifier = Modifier.size(size / 2))
+                }
+            } else {
+                Text(
+                    pfp.text.orEmpty(),
+                    style = androidx.compose.ui.text.TextStyle(
+                        fontFamily = WikiFonts.serif,
+                        fontWeight = FontWeight.Normal,
+                        color = Color(pfp.textColor),
+                        fontSize = (size.value * 0.45f * pfp.textScale).sp,
+                    ),
+                    maxLines = 1,
+                )
+            }
         }
     }
 }

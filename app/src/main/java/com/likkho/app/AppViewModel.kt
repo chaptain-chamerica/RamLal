@@ -22,16 +22,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.likkho.app.editor.FontRegistry
 import com.likkho.app.storage.CryptoUtils
-import com.likkho.app.storage.DiaryRepository
 import com.likkho.app.storage.FailedDiaryEntry
 import com.likkho.app.storage.UnlockResult
 import com.likkho.app.storage.VaultId
 import com.likkho.app.storage.VaultManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -136,7 +132,13 @@ class AppViewModel @JvmOverloads constructor(
                 vaultManager.pinLengthsRegistry.applicableLengths
 
                 val homeResult = if (!hasPrimary && vaultManager.isUnlocked) {
-                    loadHomeEntriesSnapshot()?.also { preloadHomePfps(it.items) }
+                    vaultManager.withActiveDek { dek ->
+                        vaultManager.activeDiaryRepository().loadHomeEntries(
+                            dek = dek,
+                            fromIndexEntry = { it.toSummaryDiaryLog() },
+                            fromFullRecord = { it.toSummaryDiaryLog() }
+                        )
+                    }
                 } else null
 
                 val savedFonts = FontRegistry.loadSavedFonts(fontStorageDir())
@@ -232,12 +234,8 @@ class AppViewModel @JvmOverloads constructor(
             val res = vaultManager.unlockWithPin(chars, zeroizeInput = true)
             if (res is UnlockResult.Success) {
                 val mode = if (res.vaultId == VaultId.PRIMARY) VaultMode.PRIMARY else VaultMode.DECOY
-                val homeResult = loadHomeEntriesSnapshot()
-                if (homeResult != null) {
-                    preloadHomePfps(homeResult.items)
-                }
                 withContext(Dispatchers.Main) {
-                    onUnlocked(mode, homeResult)
+                    onUnlocked(mode)
                 }
             }
             res
@@ -250,26 +248,15 @@ class AppViewModel @JvmOverloads constructor(
         hooks.unlockWithBiometricPrompt { res ->
             when (res) {
                 is UnlockResult.Success -> {
-                    viewModelScope.launch(Dispatchers.IO) {
-                        val homeResult = loadHomeEntriesSnapshot()
-                        if (homeResult != null) {
-                            preloadHomePfps(homeResult.items)
-                        }
-                        withContext(Dispatchers.Main) {
-                            onUnlocked(VaultMode.PRIMARY, homeResult)
-                            onComplete(res)
-                        }
-                    }
+                    onUnlocked(VaultMode.PRIMARY)
                 }
                 is UnlockResult.BiometricInvalidated -> {
                     biometricsEnabled = vaultManager.hasBiometric(VaultId.PRIMARY)
                     lockBiometricMessage = res.message
-                    onComplete(res)
                 }
-                else -> {
-                    onComplete(res)
-                }
+                else -> Unit
             }
+            onComplete(res)
         }
     }
 
@@ -288,81 +275,15 @@ class AppViewModel @JvmOverloads constructor(
         }
     }
 
-    fun onUnlocked(mode: VaultMode, preloadedHome: DiaryRepository.HomeIndexResult<DiaryLog>? = null) {
+    fun onUnlocked(mode: VaultMode) {
         vaultMode = mode
         route = Route.HOME
         editingLog = null
-        if (preloadedHome != null) {
-            logs.clear()
-            logs.addAll(preloadedHome.items)
-            failedDiaries = preloadedHome.failed
-            if (preloadedHome.failed.isNotEmpty()) {
-                showStatus(
-                    "${preloadedHome.failed.size} diary ${if (preloadedHome.failed.size == 1) "file" else "files"} failed to open (${preloadedHome.failed.joinToString { it.diaryId }}).",
-                    BannerKind.ERROR,
-                    8000
-                )
-            }
-        }
         isLocked = false
         lockBiometricMessage = null
-        if (preloadedHome == null) {
-            loadLogsFromActiveVault()
-        }
+        loadLogsFromActiveVault()
         val vaultId = if (mode == VaultMode.PRIMARY) VaultId.PRIMARY else VaultId.DECOY
         schedulePostUnlockMaintenance(vaultId)
-    }
-
-    private fun loadHomeEntriesSnapshot(): DiaryRepository.HomeIndexResult<DiaryLog>? {
-        if (!vaultManager.isUnlocked) return null
-        return runCatching {
-            vaultManager.withActiveDek { dek ->
-                vaultManager.activeDiaryRepository().loadHomeEntries(
-                    dek = dek,
-                    fromIndexEntry = { it.toSummaryDiaryLog() },
-                    fromFullRecord = { it.toSummaryDiaryLog() }
-                )
-            }
-        }.getOrNull()
-    }
-
-    internal fun collectDistinctPfpMediaIds(items: List<DiaryLog>): List<String> {
-        val seen = LinkedHashSet<String>()
-        for (item in items) {
-            val src = item.pfp?.source
-            if (!src.isNullOrBlank()) {
-                seen.add(src)
-            }
-        }
-        return seen.toList()
-    }
-
-    private suspend fun preloadHomePfps(items: List<DiaryLog>, maxImmediate: Int = 24) {
-        if (!vaultManager.isUnlocked) return
-        val ids = collectDistinctPfpMediaIds(items).filter { imageBitmapCache.get(it) == null }
-        if (ids.isEmpty()) return
-        val immediate = ids.take(maxImmediate)
-        val remaining = ids.drop(maxImmediate)
-        coroutineScope {
-            immediate.map { mediaId ->
-                async(Dispatchers.IO) {
-                    decodeSampledBitmapFromEncryptedMedia(mediaId, maxDim = PFP_DECODE_MAX_DIM)?.let { bmp ->
-                        imageBitmapCache.put(mediaId, bmp)
-                    }
-                }
-            }.awaitAll()
-        }
-        if (remaining.isNotEmpty()) {
-            viewModelScope.launch(Dispatchers.IO) {
-                for (mediaId in remaining) {
-                    if (!vaultManager.isUnlocked) break
-                    if (imageBitmapCache.get(mediaId) != null) continue
-                    decodeSampledBitmapFromEncryptedMedia(mediaId, maxDim = PFP_DECODE_MAX_DIM)?.let { bmp ->
-                        imageBitmapCache.put(mediaId, bmp)
-                    }
-                }
-            }
-        }
     }
 
     fun loadLogsFromActiveVault() {
@@ -376,7 +297,6 @@ class AppViewModel @JvmOverloads constructor(
                     fromFullRecord = { it.toSummaryDiaryLog() }
                 )
             }
-            preloadHomePfps(homeResult.items)
             withContext(Dispatchers.Main) {
                 logs.clear()
                 logs.addAll(homeResult.items)
@@ -691,16 +611,13 @@ class AppViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun isHomePfpKey(key: String): Boolean =
-        logs.any { it.pfp?.source == key }
-
     val bitmapKeyLifecycle: BitmapKeyLifecycle = object : BitmapKeyLifecycle {
         override fun acquire(key: String) {
             screenBitmapTracker.acquire(key)
         }
 
         override fun release(key: String) {
-            if (screenBitmapTracker.release(key) && !isHomePfpKey(key)) {
+            if (screenBitmapTracker.release(key)) {
                 imageBitmapCache.remove(key)
             }
         }
@@ -708,9 +625,8 @@ class AppViewModel @JvmOverloads constructor(
 
     fun pruneInactiveBitmaps() {
         val active = screenBitmapTracker.activeKeys()
-        val homePfpKeys = logs.mapNotNull { it.pfp?.source }.filter { it.isNotBlank() }.toSet()
         for (key in imageBitmapCache.snapshot().keys) {
-            if (!active.contains(key) && !homePfpKeys.contains(key)) {
+            if (!active.contains(key)) {
                 imageBitmapCache.remove(key)
             }
         }
@@ -1081,47 +997,6 @@ class AppViewModel @JvmOverloads constructor(
         return bmp
     }
 
-    suspend fun getMediaSizeBytes(mediaId: String): Long = withContext(Dispatchers.IO) {
-        if (mediaId.isBlank() || !vaultManager.isUnlocked) return@withContext 0L
-        runCatching { vaultManager.activeMediaRepository().getMediaFile(mediaId).length() }.getOrDefault(0L)
-    }
-
-    suspend fun loadEditableImageBitmap(mediaId: String, maxDim: Int = 2048): Bitmap? = withContext(Dispatchers.IO) {
-        if (mediaId.isBlank() || !vaultManager.isUnlocked) return@withContext null
-        decodeRawBitmapFromEncryptedMedia(mediaId, maxDim = maxDim)
-    }
-
-    suspend fun importEditedImageBytes(
-        bytes: ByteArray,
-        previewBitmap: ImageBitmap? = null
-    ): String? = withContext(Dispatchers.IO) {
-        if (!vaultManager.isUnlocked || bytes.isEmpty()) return@withContext null
-        val mediaId = CryptoUtils.randomId("med_")
-        try {
-            vaultManager.withActiveDek { dek ->
-                vaultManager.activeMediaRepository().importMediaBytes(mediaId, bytes, dek)
-            }
-            val cacheBmp = previewBitmap ?: decodeSampledBitmapFromEncryptedMedia(mediaId)
-            if (cacheBmp != null) {
-                imageBitmapCache.put(mediaId, cacheBmp)
-            }
-            vaultManager.recordSessionImportedMedia(mediaId)
-            mediaId
-        } catch (t: Throwable) {
-            runCatching {
-                vaultManager.activeMediaRepository().deleteMedia(mediaId)
-                vaultManager.unprotectSessionMedia(setOf(mediaId))
-            }
-            imageBitmapCache.remove(mediaId)
-            null
-        }
-    }
-
-    fun getCachedImageBitmap(mediaId: String): ImageBitmap? {
-        if (mediaId.isBlank()) return null
-        return imageBitmapCache.get(mediaId)
-    }
-
     suspend fun loadDecryptedImageBitmap(mediaId: String): ImageBitmap? {
         if (mediaId.isBlank()) return null
         imageBitmapCache.get(mediaId)?.let { return it }
@@ -1131,37 +1006,10 @@ class AppViewModel @JvmOverloads constructor(
     }
 
     private fun decodeSampledBitmapFromEncryptedMedia(mediaId: String, maxDim: Int = 1600): ImageBitmap? {
-        return decodeRawBitmapFromEncryptedMedia(mediaId, maxDim)?.asImageBitmap()
-    }
-
-    private fun decodeRawBitmapFromEncryptedMedia(mediaId: String, maxDim: Int = 1600): Bitmap? {
         if (!vaultManager.isUnlocked) return null
         return runCatching {
             vaultManager.withActiveDek { dek ->
                 val repo = vaultManager.activeMediaRepository()
-                val fileSize = repo.getMediaFile(mediaId).length()
-                if (fileSize in 1L..SINGLE_READ_DECODE_MAX_BYTES) {
-                    val decryptedBytes = repo.readDecryptedBytes(mediaId, dek)
-                    val orientation = runCatching {
-                        ByteArrayInputStream(decryptedBytes).use { s ->
-                            ExifInterface(s).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-                        }
-                    }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
-
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size, bounds)
-                    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@withActiveDek null
-
-                    var sample = 1
-                    while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) {
-                        sample *= 2
-                    }
-                    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-                    val rawBitmap = BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size, opts)
-                        ?: return@withActiveDek null
-                    return@withActiveDek applyExifOrientation(rawBitmap, orientation)
-                }
-
                 val orientation = runCatching {
                     repo.openDecryptedStream(mediaId, dek).use { s ->
                         ExifInterface(s).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
@@ -1182,14 +1030,9 @@ class AppViewModel @JvmOverloads constructor(
                 val rawBitmap = repo.openDecryptedStream(mediaId, dek).use { s ->
                     BitmapFactory.decodeStream(s, null, opts)
                 } ?: return@withActiveDek null
-                applyExifOrientation(rawBitmap, orientation)
+                applyExifOrientation(rawBitmap, orientation).asImageBitmap()
             }
         }.getOrNull()
-    }
-
-    private companion object {
-        private const val PFP_DECODE_MAX_DIM = 512
-        private const val SINGLE_READ_DECODE_MAX_BYTES = 16L * 1024L * 1024L
     }
 
     private fun isExifDimensionSwapped(orientation: Int): Boolean =
