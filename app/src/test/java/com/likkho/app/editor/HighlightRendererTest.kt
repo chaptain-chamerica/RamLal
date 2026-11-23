@@ -178,4 +178,80 @@ class HighlightRendererTest {
         assertEquals(92f, rects[1].top, 0.01f)
         assertEquals(128f, rects[1].bottom, 0.01f)
     }
+
+    @Test
+    fun visibleLineRange_matchesFullComputationSubset_andBinarySearchCulls10kRects() {
+        val text = (0 until 100).joinToString("\n") { "Line $it" }
+        val lineStarts = IntArray(100)
+        val lineEnds = IntArray(100)
+        var pos = 0
+        for (i in 0 until 100) {
+            lineStarts[i] = pos
+            val lineLen = "Line $i".length
+            pos += lineLen + if (i < 99) 1 else 0
+            lineEnds[i] = pos
+        }
+        fun lineFor(off: Int): Int {
+            var lo = 0
+            var hi = 99
+            while (lo <= hi) {
+                val mid = (lo + hi) ushr 1
+                if (lineStarts[mid] <= off) lo = mid + 1 else hi = mid - 1
+            }
+            return hi.coerceIn(0, 99)
+        }
+        val spans = listOf(
+            Span(0, text.length, SpanStyle.Highlight("#fef08a"))
+        )
+        val full = HighlightLayoutCalculator.computeHighlightRects(
+            text = text,
+            spans = spans,
+            lineCount = 100,
+            ascentPx = -28f,
+            descentPx = 8f,
+            getLineForOffset = ::lineFor,
+            getLineStart = { lineStarts[it] },
+            getLineEnd = { lineEnds[it] },
+            getLineBaseline = { it * 40f + 30f },
+            getLineTop = { it * 40f },
+            getLineBottom = { (it + 1) * 40f },
+            getCharLeft = { idx -> (idx - lineStarts[lineFor(idx)]) * 10f },
+            getCharRight = { idx -> (idx - lineStarts[lineFor(idx)] + 1) * 10f }
+        )
+        val band = 20..35
+        val windowed = HighlightLayoutCalculator.computeHighlightRects(
+            text = text,
+            spans = spans,
+            lineCount = 100,
+            ascentPx = -28f,
+            descentPx = 8f,
+            getLineForOffset = ::lineFor,
+            getLineStart = { lineStarts[it] },
+            getLineEnd = { lineEnds[it] },
+            getLineBaseline = { it * 40f + 30f },
+            getLineTop = { it * 40f },
+            getLineBottom = { (it + 1) * 40f },
+            getCharLeft = { idx -> (idx - lineStarts[lineFor(idx)]) * 10f },
+            getCharRight = { idx -> (idx - lineStarts[lineFor(idx)] + 1) * 10f },
+            visibleLineRange = band
+        )
+        assertEquals(full.subList(20, 36), windowed)
+
+        // Binary-search culling over 10,000 sorted rects
+        val many = List(10_000) { i ->
+            CachedHighlightRect(
+                left = 0f,
+                top = i * 40f,
+                right = 100f,
+                bottom = i * 40f + 30f,
+                color = androidx.compose.ui.graphics.Color.Yellow
+            )
+        }
+        val visibleSlice = collectVisibleHighlightIndices(many, visibleTopPx = 200_000f, visibleBottomPx = 201_000f)
+        // Expected rects start around index 4992 (with margin) and end at top <= 201_000 (index 5025)
+        assertTrue(5000 in visibleSlice)
+        assertTrue(5025 in visibleSlice)
+        assertTrue(visibleSlice.last < 5030)
+        assertTrue(visibleSlice.count() < 50)
+    }
 }
