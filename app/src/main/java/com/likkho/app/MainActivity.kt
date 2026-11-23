@@ -37,6 +37,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -174,9 +175,13 @@ fun Root(vm: AppViewModel) {
         activity?.applySystemBars(darkMode = vm.darkMode, fullScreen = vm.fullScreen)
     }
 
+    val safeTextToolbar = rememberSafeTextToolbar()
+
     CompositionLocalProvider(
         LocalImageBitmapLoader provides { mediaId -> vm.loadDecryptedImageBitmap(mediaId) },
-        LocalBitmapKeyLifecycle provides vm.bitmapKeyLifecycle
+        LocalImageBitmapCacheLookup provides { mediaId -> vm.getCachedImageBitmap(mediaId) },
+        LocalBitmapKeyLifecycle provides vm.bitmapKeyLifecycle,
+        LocalTextToolbar provides safeTextToolbar
     ) {
     Box(Modifier.fillMaxSize().background(w.bg).statusBarsPadding()) {
         Crossfade(

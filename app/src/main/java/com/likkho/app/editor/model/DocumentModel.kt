@@ -416,6 +416,11 @@ data class Block(
     }
 }
 
+private val SPAN_ORDER_COMPARATOR = Comparator<Span> { a, b ->
+    val startCmp = a.start.compareTo(b.start)
+    if (startCmp != 0) startCmp else a.end.compareTo(b.end)
+}
+
 /**
  * Normalizes a list of spans against a given text length:
  * - Clamps all offsets within [0, textLength]
@@ -426,39 +431,80 @@ data class Block(
 fun normalizeSpans(spans: List<Span>, textLength: Int): List<Span> {
     if (spans.isEmpty() || textLength <= 0) return emptyList()
 
-    // 1. Clamp and filter empty
-    val validSpans = spans.mapNotNull { span ->
+    // Fast path: O(S) verification when spans are already clamped, non-empty, sorted by (start, end),
+    // and strictly non-overlapping / non-adjacent within each distinct style.
+    var alreadyNormalized = true
+    var prevStart = -1
+    var prevEnd = -1
+    val lastEndByStyle = HashMap<SpanStyle, Int>(minOf(spans.size, 32))
+    for (i in 0 until spans.size) {
+        val sp = spans[i]
+        val s = sp.start
+        val e = sp.end
+        if (s < 0 || s >= e || e > textLength) {
+            alreadyNormalized = false
+            break
+        }
+        if (s < prevStart || (s == prevStart && e < prevEnd)) {
+            alreadyNormalized = false
+            break
+        }
+        val prevStyleEnd = lastEndByStyle[sp.style]
+        if (prevStyleEnd != null && s <= prevStyleEnd) {
+            alreadyNormalized = false
+            break
+        }
+        lastEndByStyle[sp.style] = e
+        prevStart = s
+        prevEnd = e
+    }
+    if (alreadyNormalized) return spans
+
+    // Slow path: clamp/filter once, single TimSort (O(S) on nearly-sorted input), single linear per-style merge.
+    val validSpans = ArrayList<Span>(spans.size)
+    for (i in 0 until spans.size) {
+        val span = spans[i]
         val s = span.start.coerceIn(0, textLength)
         val e = span.end.coerceIn(0, textLength)
-        if (s < e) span.copy(start = s, end = e) else null
+        if (s < e) {
+            validSpans.add(if (s == span.start && e == span.end) span else span.copy(start = s, end = e))
+        }
     }
-
     if (validSpans.isEmpty()) return emptyList()
 
-    // 2. Group by exact style and merge overlapping/adjacent spans
-    val grouped = validSpans.groupBy { it.style }
-    val mergedResult = mutableListOf<Span>()
-
-    for ((_, styleSpans) in grouped) {
-        val sorted = styleSpans.sortedWith(compareBy({ it.start }, { it.end }))
-        if (sorted.isEmpty()) continue
-
-        var current = sorted[0]
-        for (i in 1 until sorted.size) {
-            val next = sorted[i]
-            if (next.start <= current.end) {
-                // Overlapping or adjacent: merge
-                current = current.copy(end = maxOf(current.end, next.end))
-            } else {
-                mergedResult.add(current)
-                current = next
-            }
-        }
-        mergedResult.add(current)
+    if (validSpans.size > 1) {
+        validSpans.sortWith(SPAN_ORDER_COMPARATOR)
     }
 
-    // 3. Sort final spans by start, then end
-    return mergedResult.sortedWith(compareBy({ it.start }, { it.end }))
+    val mergedResult = ArrayList<Span>(validSpans.size)
+    val lastIdxByStyle = HashMap<SpanStyle, Int>(minOf(validSpans.size, 32))
+    for (i in 0 until validSpans.size) {
+        val next = validSpans[i]
+        val prevIdx = lastIdxByStyle[next.style]
+        if (prevIdx != null) {
+            val current = mergedResult[prevIdx]
+            if (next.start <= current.end) {
+                if (next.end > current.end) {
+                    mergedResult[prevIdx] = current.copy(end = next.end)
+                }
+                continue
+            }
+        }
+        lastIdxByStyle[next.style] = mergedResult.size
+        mergedResult.add(next)
+    }
+
+    var needsSort = false
+    for (i in 1 until mergedResult.size) {
+        if (SPAN_ORDER_COMPARATOR.compare(mergedResult[i - 1], mergedResult[i]) > 0) {
+            needsSort = true
+            break
+        }
+    }
+    if (needsSort) {
+        mergedResult.sortWith(SPAN_ORDER_COMPARATOR)
+    }
+    return mergedResult
 }
 
 /**

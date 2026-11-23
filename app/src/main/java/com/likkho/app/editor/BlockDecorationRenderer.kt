@@ -108,9 +108,14 @@ object BlockDecorationLayoutCalculator {
         cursorOffset: Int = 0,
         getLineForOffset: (Int) -> Int,
         getLineTop: (Int) -> Float,
-        getLineBottom: (Int) -> Float
+        getLineBottom: (Int) -> Float,
+        visibleLineRange: IntRange? = null
     ): List<DividerLine> {
         if (lineCount <= 0) return emptyList()
+        val visFirst = visibleLineRange?.first?.coerceIn(0, lineCount - 1) ?: 0
+        val visLast = visibleLineRange?.last?.coerceIn(0, lineCount - 1) ?: (lineCount - 1)
+        if (visFirst > visLast) return emptyList()
+
         val ys = mutableListOf<Float>()
 
         // 1. Explicit paragraph divider spans (<hr>)
@@ -118,8 +123,10 @@ object BlockDecorationLayoutCalculator {
             if (sp.style is SpanStyle.Divider && text.isNotEmpty()) {
                 val off = sp.start.coerceIn(0, text.length - 1)
                 val line = getLineForOffset(off).coerceIn(0, lineCount - 1)
-                val midY = (getLineTop(line) + getLineBottom(line)) / 2f
-                ys.add(midY)
+                if (line in visFirst..visLast) {
+                    val midY = (getLineTop(line) + getLineBottom(line)) / 2f
+                    ys.add(midY)
+                }
             }
         }
 
@@ -133,7 +140,9 @@ object BlockDecorationLayoutCalculator {
                     while (e > s && text[e - 1] == '\n') e--
                     if (s < e) {
                         val lastLine = getLineForOffset((e - 1).coerceAtLeast(s)).coerceIn(0, lineCount - 1)
-                        headingEndLines.add(lastLine)
+                        if (lastLine in visFirst..visLast) {
+                            headingEndLines.add(lastLine)
+                        }
                     }
                 }
             }
@@ -143,7 +152,9 @@ object BlockDecorationLayoutCalculator {
         if (activeHeadingLevel != null) {
             val safeCursor = cursorOffset.coerceIn(0, text.length)
             val cursorLine = getLineForOffset(safeCursor).coerceIn(0, lineCount - 1)
-            headingEndLines.add(cursorLine)
+            if (cursorLine in visFirst..visLast) {
+                headingEndLines.add(cursorLine)
+            }
         }
 
         for (line in headingEndLines) {
@@ -170,15 +181,21 @@ object BlockDecorationLayoutCalculator {
         getLineTop: (Int) -> Float,
         getLineBottom: (Int) -> Float,
         getCharLeft: (Int) -> Float,
-        getCharRight: (Int) -> Float
+        getCharRight: (Int) -> Float,
+        visibleLineRange: IntRange? = null
     ): List<BulletMarkerGeom> {
         if (text.isEmpty() || lineCount <= 0 || spans.isEmpty()) return emptyList()
+        val visFirst = visibleLineRange?.first?.coerceIn(0, lineCount - 1) ?: 0
+        val visLast = visibleLineRange?.last?.coerceIn(0, lineCount - 1) ?: (lineCount - 1)
+        if (visFirst > visLast) return emptyList()
+
         val out = mutableListOf<BulletMarkerGeom>()
         for (sp in spans) {
             if (sp.style !is SpanStyle.Bullet) continue
             if (sp.start < 0 || sp.start >= text.length) continue
             val s = sp.start
             val line = getLineForOffset(s).coerceIn(0, lineCount - 1)
+            if (line !in visFirst..visLast) continue
             val lineTop = getLineTop(line)
             val lineBottom = getLineBottom(line)
             val lineH = (lineBottom - lineTop).coerceAtLeast(12f * densityScale)
@@ -202,9 +219,14 @@ object BlockDecorationLayoutCalculator {
         getLineTop: (Int) -> Float,
         getLineBottom: (Int) -> Float,
         getCharLeft: (Int) -> Float,
-        getCharRight: (Int) -> Float
+        getCharRight: (Int) -> Float,
+        visibleLineRange: IntRange? = null
     ): List<TodoCheckboxGeom> {
         if (text.isEmpty() || lineCount <= 0 || spans.isEmpty()) return emptyList()
+        val visFirst = visibleLineRange?.first?.coerceIn(0, lineCount - 1) ?: 0
+        val visLast = visibleLineRange?.last?.coerceIn(0, lineCount - 1) ?: (lineCount - 1)
+        if (visFirst > visLast) return emptyList()
+
         val out = mutableListOf<TodoCheckboxGeom>()
         for (sp in spans) {
             val todoStyle = sp.style as? SpanStyle.Todo ?: continue
@@ -212,6 +234,7 @@ object BlockDecorationLayoutCalculator {
             val s = sp.start
             val e = sp.end.coerceIn(s + 1, text.length)
             val line = getLineForOffset(s).coerceIn(0, lineCount - 1)
+            if (line !in visFirst..visLast) continue
             val lineTop = getLineTop(line)
             val lineBottom = getLineBottom(line)
             val lineH = (lineBottom - lineTop).coerceAtLeast(16f * densityScale)
@@ -266,23 +289,31 @@ object BlockDecorationLayoutCalculator {
         getLineTop: (Int) -> Float,
         getLineBottom: (Int) -> Float,
         getCharLeft: (Int) -> Float = { 0f },
-        getCharRight: (Int) -> Float = { 0f }
+        getCharRight: (Int) -> Float = { 0f },
+        visibleLineRange: IntRange? = null
     ): List<QuoteBlockRect> {
         if (text.isEmpty() || lineCount <= 0 || spans.isEmpty()) return emptyList()
-        val quoteSpans = spans.filter { it.style is SpanStyle.Quote }
-        if (quoteSpans.isEmpty()) return emptyList()
+        val visFirst = visibleLineRange?.first?.coerceIn(0, lineCount - 1) ?: 0
+        val visLast = visibleLineRange?.last?.coerceIn(0, lineCount - 1) ?: (lineCount - 1)
+        if (visFirst > visLast) return emptyList()
 
         data class FullLineEntry(val line: Int, val minLeft: Float, val maxRight: Float)
         val fullLineMap = sortedMapOf<Int, Pair<Float, Float>>()
         val partialRects = mutableListOf<QuoteBlockRect>()
 
-        for (sp in quoteSpans) {
+        for (sp in spans) {
+            if (sp.style !is SpanStyle.Quote) continue
             val s = sp.start.coerceIn(0, text.length)
             val e = sp.end.coerceIn(0, text.length)
             if (s >= e) continue
             val firstLine = getLineForOffset(s).coerceIn(0, lineCount - 1)
+            if (firstLine > visLast) continue
             val lastLine = getLineForOffset((e - 1).coerceAtLeast(s)).coerceIn(firstLine, lineCount - 1)
-            for (line in firstLine..lastLine) {
+            if (lastLine < visFirst) continue
+
+            val rangeStart = maxOf(firstLine, visFirst)
+            val rangeEnd = minOf(lastLine, visLast)
+            for (line in rangeStart..rangeEnd) {
                 val ls = getLineStart(line)
                 val le = getLineEnd(line)
                 val segStart = maxOf(s, ls)
@@ -375,25 +406,32 @@ object BlockDecorationLayoutCalculator {
         getLineTop: (Int) -> Float,
         getLineBottom: (Int) -> Float,
         getCharLeft: (Int) -> Float,
-        getCharRight: (Int) -> Float
+        getCharRight: (Int) -> Float,
+        visibleLineRange: IntRange? = null
     ): List<CodeBoxRect> {
         if (text.isEmpty() || lineCount <= 0 || spans.isEmpty()) return emptyList()
-        val codeSpans = spans.filter { it.style is SpanStyle.Code }
-        if (codeSpans.isEmpty()) return emptyList()
+        val visFirst = visibleLineRange?.first?.coerceIn(0, lineCount - 1) ?: 0
+        val visLast = visibleLineRange?.last?.coerceIn(0, lineCount - 1) ?: (lineCount - 1)
+        if (visFirst > visLast) return emptyList()
 
         data class BlockLineEntry(val line: Int, val minLeft: Float, val maxRight: Float)
         val blockLineMap = sortedMapOf<Int, Pair<Float, Float>>()
         val inlineBoxes = mutableListOf<CodeBoxRect>()
 
-        for (sp in codeSpans) {
+        for (sp in spans) {
+            if (sp.style !is SpanStyle.Code) continue
             val s = sp.start.coerceIn(0, text.length)
             val e = sp.end.coerceIn(0, text.length)
             if (s >= e) continue
 
             val firstLine = getLineForOffset(s).coerceIn(0, lineCount - 1)
+            if (firstLine > visLast) continue
             val lastLine = getLineForOffset((e - 1).coerceAtLeast(s)).coerceIn(firstLine, lineCount - 1)
+            if (lastLine < visFirst) continue
 
-            for (line in firstLine..lastLine) {
+            val rangeStart = maxOf(firstLine, visFirst)
+            val rangeEnd = minOf(lastLine, visLast)
+            for (line in rangeStart..rangeEnd) {
                 val lineStart = getLineStart(line)
                 val lineEnd = getLineEnd(line)
                 val segStart = maxOf(s, lineStart)
@@ -475,6 +513,417 @@ object BlockDecorationLayoutCalculator {
     }
 }
 
+private const val TALL_BLOCK_HEIGHT_THRESHOLD_PX = 400f
+
+data class CachedBlockDecorations(
+    val dividers: List<DividerLine>,
+    val bullets: List<BulletMarkerGeom>,
+    val todos: List<TodoCheckboxGeom>,
+    val quoteBlocks: List<QuoteBlockRect>,
+    val codeBoxes: List<CodeBoxRect>,
+    val checkPaths: List<Path>
+) {
+    internal val sortedDividers: List<DividerLine> =
+        if (dividers.size > 1) dividers.sortedBy { it.y } else dividers
+
+    internal val sortedBullets: List<BulletMarkerGeom> =
+        if (bullets.size > 1) bullets.sortedBy { it.centerY } else bullets
+
+    internal val sortedTodos: List<TodoCheckboxGeom>
+    internal val sortedCheckPaths: List<Path>
+
+    internal val shortQuoteBlocks: List<QuoteBlockRect>
+    internal val tallQuoteBlocks: List<QuoteBlockRect>
+
+    internal val shortCodeBoxes: List<CodeBoxRect>
+    internal val tallCodeBoxes: List<CodeBoxRect>
+
+    init {
+        if (todos.size > 1 && todos.size == checkPaths.size) {
+            val paired = todos.indices.sortedBy { todos[it].boxTop }
+            sortedTodos = paired.map { todos[it] }
+            sortedCheckPaths = paired.map { checkPaths[it] }
+        } else {
+            sortedTodos = todos
+            sortedCheckPaths = checkPaths
+        }
+
+        if (quoteBlocks.isEmpty()) {
+            shortQuoteBlocks = emptyList()
+            tallQuoteBlocks = emptyList()
+        } else {
+            val shorts = ArrayList<QuoteBlockRect>(quoteBlocks.size)
+            val talls = ArrayList<QuoteBlockRect>()
+            for (qb in quoteBlocks) {
+                if ((qb.bottom - qb.top) > TALL_BLOCK_HEIGHT_THRESHOLD_PX) talls.add(qb) else shorts.add(qb)
+            }
+            if (shorts.size > 1) shorts.sortBy { it.top }
+            shortQuoteBlocks = shorts
+            tallQuoteBlocks = talls
+        }
+
+        if (codeBoxes.isEmpty()) {
+            shortCodeBoxes = emptyList()
+            tallCodeBoxes = emptyList()
+        } else {
+            val shorts = ArrayList<CodeBoxRect>(codeBoxes.size)
+            val talls = ArrayList<CodeBoxRect>()
+            for (cb in codeBoxes) {
+                if ((cb.bottom - cb.top) > TALL_BLOCK_HEIGHT_THRESHOLD_PX) talls.add(cb) else shorts.add(cb)
+            }
+            if (shorts.size > 1) shorts.sortBy { it.top }
+            shortCodeBoxes = shorts
+            tallCodeBoxes = talls
+        }
+    }
+}
+
+fun computeBlockDecorationCache(
+    layoutResult: TextLayoutResult,
+    spans: List<Span>,
+    canvasWidth: Float,
+    densityScale: Float,
+    activeHeadingLevel: Int? = null,
+    cursorOffset: Int = 0,
+    visibleLineRange: IntRange? = null
+): CachedBlockDecorations {
+    val text = layoutResult.layoutInput.text.text
+    if (layoutResult.lineCount <= 0) {
+        return CachedBlockDecorations(emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), emptyList())
+    }
+
+    val dividers = BlockDecorationLayoutCalculator.computeDividerLines(
+        text = text,
+        spans = spans,
+        lineCount = layoutResult.lineCount,
+        activeHeadingLevel = activeHeadingLevel,
+        cursorOffset = cursorOffset,
+        getLineForOffset = { layoutResult.getLineForOffset(it) },
+        getLineTop = { layoutResult.getLineTop(it) },
+        getLineBottom = { layoutResult.getLineBottom(it) },
+        visibleLineRange = visibleLineRange
+    )
+
+    if (text.isEmpty() || spans.isEmpty()) {
+        return CachedBlockDecorations(dividers, emptyList(), emptyList(), emptyList(), emptyList(), emptyList())
+    }
+
+    val bullets = BlockDecorationLayoutCalculator.computeBulletMarkers(
+        text = text,
+        spans = spans,
+        lineCount = layoutResult.lineCount,
+        densityScale = densityScale,
+        getLineForOffset = { layoutResult.getLineForOffset(it) },
+        getLineTop = { layoutResult.getLineTop(it) },
+        getLineBottom = { layoutResult.getLineBottom(it) },
+        getCharLeft = { layoutResult.getBoundingBox(it).left },
+        getCharRight = { layoutResult.getBoundingBox(it).right },
+        visibleLineRange = visibleLineRange
+    )
+
+    val todos = BlockDecorationLayoutCalculator.computeTodoCheckboxes(
+        text = text,
+        spans = spans,
+        lineCount = layoutResult.lineCount,
+        densityScale = densityScale,
+        getLineForOffset = { layoutResult.getLineForOffset(it) },
+        getLineTop = { layoutResult.getLineTop(it) },
+        getLineBottom = { layoutResult.getLineBottom(it) },
+        getCharLeft = { layoutResult.getBoundingBox(it).left },
+        getCharRight = { layoutResult.getBoundingBox(it).right },
+        visibleLineRange = visibleLineRange
+    )
+
+    val checkPaths = todos.map { td ->
+        if (td.checked) {
+            Path().apply {
+                moveTo(td.boxLeft + td.boxSize * 0.23f, td.boxTop + td.boxSize * 0.52f)
+                lineTo(td.boxLeft + td.boxSize * 0.43f, td.boxTop + td.boxSize * 0.72f)
+                lineTo(td.boxLeft + td.boxSize * 0.77f, td.boxTop + td.boxSize * 0.30f)
+            }
+        } else {
+            Path()
+        }
+    }
+
+    val quoteOutsetLeft = 8f * densityScale
+    val quoteOutsetRight = 6f * densityScale
+    val quoteInlinePad = 3.5f * densityScale
+    val barWidthPx = 2.5f * densityScale
+    val gapFromPrevPx = 1.5f * densityScale
+    val verticalInsetPx = 1f * densityScale
+
+    val quoteBlocks = BlockDecorationLayoutCalculator.computeQuoteBlocks(
+        text = text,
+        spans = spans,
+        lineCount = layoutResult.lineCount,
+        canvasWidth = canvasWidth,
+        blockOutsetLeftPx = quoteOutsetLeft,
+        blockOutsetRightPx = quoteOutsetRight,
+        inlinePadPx = quoteInlinePad,
+        barWidthPx = barWidthPx,
+        gapFromPrevPx = gapFromPrevPx,
+        verticalInsetPx = verticalInsetPx,
+        getLineForOffset = { layoutResult.getLineForOffset(it) },
+        getLineStart = { layoutResult.getLineStart(it) },
+        getLineEnd = { layoutResult.getLineEnd(it, visibleEnd = false) },
+        getLineTop = { layoutResult.getLineTop(it) },
+        getLineBottom = { layoutResult.getLineBottom(it) },
+        getCharLeft = { layoutResult.getBoundingBox(it).left },
+        getCharRight = { layoutResult.getBoundingBox(it).right },
+        visibleLineRange = visibleLineRange
+    )
+
+    val codeOutset = 5f * densityScale
+    val codeBoxes = BlockDecorationLayoutCalculator.computeCodeBoxes(
+        text = text,
+        spans = spans,
+        lineCount = layoutResult.lineCount,
+        canvasWidth = canvasWidth,
+        blockOutsetLeftPx = codeOutset,
+        blockOutsetRightPx = codeOutset,
+        inlinePadPx = 3f * densityScale,
+        gapFromPrevPx = gapFromPrevPx,
+        verticalInsetPx = verticalInsetPx,
+        getLineForOffset = { layoutResult.getLineForOffset(it) },
+        getLineStart = { layoutResult.getLineStart(it) },
+        getLineEnd = { layoutResult.getLineEnd(it, visibleEnd = false) },
+        getLineTop = { layoutResult.getLineTop(it) },
+        getLineBottom = { layoutResult.getLineBottom(it) },
+        getCharLeft = { layoutResult.getBoundingBox(it).left },
+        getCharRight = { layoutResult.getBoundingBox(it).right },
+        visibleLineRange = visibleLineRange
+    )
+
+    return CachedBlockDecorations(
+        dividers = dividers,
+        bullets = bullets,
+        todos = todos,
+        quoteBlocks = quoteBlocks,
+        codeBoxes = codeBoxes,
+        checkPaths = checkPaths
+    )
+}
+
+internal fun collectVisibleQuoteBlocks(
+    cache: CachedBlockDecorations,
+    visibleTopPx: Float,
+    visibleBottomPx: Float
+): List<QuoteBlockRect> {
+    if (cache.quoteBlocks.isEmpty()) return emptyList()
+    val useCull = visibleTopPx.isFinite() || visibleBottomPx.isFinite()
+    if (!useCull) return cache.quoteBlocks
+    val out = mutableListOf<QuoteBlockRect>()
+    for (qb in cache.tallQuoteBlocks) {
+        if (qb.bottom >= visibleTopPx && qb.top <= visibleBottomPx) out.add(qb)
+    }
+    val startIdx = if (visibleTopPx.isFinite()) {
+        lowerBoundByTop(cache.shortQuoteBlocks, visibleTopPx - TALL_BLOCK_HEIGHT_THRESHOLD_PX) { it.top }
+    } else 0
+    for (i in startIdx until cache.shortQuoteBlocks.size) {
+        val qb = cache.shortQuoteBlocks[i]
+        if (qb.top > visibleBottomPx) break
+        if (qb.bottom >= visibleTopPx) out.add(qb)
+    }
+    return out
+}
+
+internal fun collectVisibleCodeBoxes(
+    cache: CachedBlockDecorations,
+    visibleTopPx: Float,
+    visibleBottomPx: Float
+): List<CodeBoxRect> {
+    if (cache.codeBoxes.isEmpty()) return emptyList()
+    val useCull = visibleTopPx.isFinite() || visibleBottomPx.isFinite()
+    if (!useCull) return cache.codeBoxes
+    val out = mutableListOf<CodeBoxRect>()
+    for (cb in cache.tallCodeBoxes) {
+        if (cb.bottom >= visibleTopPx && cb.top <= visibleBottomPx) out.add(cb)
+    }
+    val startIdx = if (visibleTopPx.isFinite()) {
+        lowerBoundByTop(cache.shortCodeBoxes, visibleTopPx - TALL_BLOCK_HEIGHT_THRESHOLD_PX) { it.top }
+    } else 0
+    for (i in startIdx until cache.shortCodeBoxes.size) {
+        val cb = cache.shortCodeBoxes[i]
+        if (cb.top > visibleBottomPx) break
+        if (cb.bottom >= visibleTopPx) out.add(cb)
+    }
+    return out
+}
+
+fun DrawScope.drawCachedBlockDecorations(
+    cache: CachedBlockDecorations,
+    quoteBgColor: Color,
+    quoteBarColor: Color,
+    codeBgColor: Color,
+    codeBorderColor: Color,
+    dividerColor: Color = codeBorderColor,
+    bulletColor: Color = quoteBarColor,
+    todoUncheckedBorderColor: Color = codeBorderColor,
+    todoUncheckedBgColor: Color = codeBgColor,
+    todoCheckedFillColor: Color = quoteBarColor,
+    visibleTopPx: Float = Float.NEGATIVE_INFINITY,
+    visibleBottomPx: Float = Float.POSITIVE_INFINITY
+) {
+    val useCull = visibleTopPx.isFinite() || visibleBottomPx.isFinite()
+    val hairlineStrokePx = 0.75.dp.toPx()
+
+    val divs = cache.sortedDividers
+    if (divs.isNotEmpty()) {
+        val divStart = if (useCull && visibleTopPx.isFinite()) {
+            lowerBoundByTop(divs, visibleTopPx - 4f) { it.y }
+        } else 0
+        for (i in divStart until divs.size) {
+            val div = divs[i]
+            if (useCull && div.y > visibleBottomPx + 4f) break
+            drawLine(
+                color = dividerColor,
+                start = Offset(0f, div.y),
+                end = Offset(size.width, div.y),
+                strokeWidth = hairlineStrokePx
+            )
+        }
+    }
+
+    val bullets = cache.sortedBullets
+    if (bullets.isNotEmpty()) {
+        val bStart = if (useCull && visibleTopPx.isFinite()) {
+            lowerBoundByTop(bullets, visibleTopPx - 24f) { it.centerY }
+        } else 0
+        for (i in bStart until bullets.size) {
+            val bm = bullets[i]
+            if (useCull && bm.centerY - bm.radius > visibleBottomPx) break
+            if (useCull && bm.centerY + bm.radius < visibleTopPx) continue
+            drawCircle(
+                color = bulletColor,
+                radius = bm.radius,
+                center = Offset(bm.centerX, bm.centerY)
+            )
+        }
+    }
+
+    val todos = cache.sortedTodos
+    if (todos.isNotEmpty()) {
+        val todoBorderPx = 1.6.dp.toPx()
+        val checkMinStrokePx = 1.8.dp.toPx()
+        val tStart = if (useCull && visibleTopPx.isFinite()) {
+            lowerBoundByTop(todos, visibleTopPx - 64f) { it.boxTop }
+        } else 0
+        for (i in tStart until todos.size) {
+            val td = todos[i]
+            if (useCull && td.boxTop > visibleBottomPx) break
+            if (useCull && td.boxTop + td.boxSize < visibleTopPx) continue
+            val r = td.boxSize * 0.22f
+            val topLeft = Offset(td.boxLeft, td.boxTop)
+            val boxSz = Size(td.boxSize, td.boxSize)
+            if (td.checked) {
+                drawRoundRect(
+                    color = todoCheckedFillColor,
+                    topLeft = topLeft,
+                    size = boxSz,
+                    cornerRadius = CornerRadius(r, r)
+                )
+                drawPath(
+                    path = cache.sortedCheckPaths[i],
+                    color = Color.White,
+                    style = Stroke(
+                        width = (td.boxSize * 0.13f).coerceAtLeast(checkMinStrokePx),
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round
+                    )
+                )
+            } else {
+                drawRoundRect(
+                    color = todoUncheckedBgColor,
+                    topLeft = topLeft,
+                    size = boxSz,
+                    cornerRadius = CornerRadius(r, r)
+                )
+                drawRoundRect(
+                    color = todoUncheckedBorderColor,
+                    topLeft = topLeft,
+                    size = boxSz,
+                    cornerRadius = CornerRadius(r, r),
+                    style = Stroke(width = todoBorderPx)
+                )
+            }
+        }
+    }
+
+    val quoteRadius = 2.dp.toPx()
+    fun drawQuote(qb: QuoteBlockRect) {
+        val h = (qb.bottom - qb.top).coerceAtLeast(0f)
+        val w = (qb.right - qb.left).coerceAtLeast(0f)
+        if (h <= 0f || w <= 0f) return
+        drawRoundRect(
+            color = quoteBgColor,
+            topLeft = Offset(qb.left, qb.top),
+            size = Size(w, h),
+            cornerRadius = CornerRadius(quoteRadius, quoteRadius)
+        )
+        drawRoundRect(
+            color = quoteBarColor,
+            topLeft = Offset(qb.left, qb.top),
+            size = Size(qb.barWidth.coerceAtMost(w), h),
+            cornerRadius = CornerRadius(qb.barWidth / 2f, qb.barWidth / 2f)
+        )
+    }
+    if (cache.tallQuoteBlocks.isNotEmpty()) {
+        for (qb in cache.tallQuoteBlocks) {
+            if (useCull && (qb.bottom < visibleTopPx || qb.top > visibleBottomPx)) continue
+            drawQuote(qb)
+        }
+    }
+    if (cache.shortQuoteBlocks.isNotEmpty()) {
+        val qStart = if (useCull && visibleTopPx.isFinite()) {
+            lowerBoundByTop(cache.shortQuoteBlocks, visibleTopPx - TALL_BLOCK_HEIGHT_THRESHOLD_PX) { it.top }
+        } else 0
+        for (i in qStart until cache.shortQuoteBlocks.size) {
+            val qb = cache.shortQuoteBlocks[i]
+            if (useCull && qb.top > visibleBottomPx) break
+            if (useCull && qb.bottom < visibleTopPx) continue
+            drawQuote(qb)
+        }
+    }
+
+    val cornerPx = 4.dp.toPx()
+    fun drawCode(cb: CodeBoxRect) {
+        val w = (cb.right - cb.left).coerceAtLeast(0f)
+        val h = (cb.bottom - cb.top).coerceAtLeast(0f)
+        if (w <= 0f || h <= 0f) return
+        drawRoundRect(
+            color = codeBgColor,
+            topLeft = Offset(cb.left, cb.top),
+            size = Size(w, h),
+            cornerRadius = CornerRadius(cornerPx, cornerPx)
+        )
+        drawRoundRect(
+            color = codeBorderColor,
+            topLeft = Offset(cb.left, cb.top),
+            size = Size(w, h),
+            cornerRadius = CornerRadius(cornerPx, cornerPx),
+            style = Stroke(width = hairlineStrokePx)
+        )
+    }
+    if (cache.tallCodeBoxes.isNotEmpty()) {
+        for (cb in cache.tallCodeBoxes) {
+            if (useCull && (cb.bottom < visibleTopPx || cb.top > visibleBottomPx)) continue
+            drawCode(cb)
+        }
+    }
+    if (cache.shortCodeBoxes.isNotEmpty()) {
+        val cStart = if (useCull && visibleTopPx.isFinite()) {
+            lowerBoundByTop(cache.shortCodeBoxes, visibleTopPx - TALL_BLOCK_HEIGHT_THRESHOLD_PX) { it.top }
+        } else 0
+        for (i in cStart until cache.shortCodeBoxes.size) {
+            val cb = cache.shortCodeBoxes[i]
+            if (useCull && cb.top > visibleBottomPx) break
+            if (useCull && cb.bottom < visibleTopPx) continue
+            drawCode(cb)
+        }
+    }
+}
+
 fun DrawScope.drawBlockDecorations(
     layoutResult: TextLayoutResult,
     spans: List<Span>,
@@ -490,188 +939,24 @@ fun DrawScope.drawBlockDecorations(
     todoUncheckedBgColor: Color = codeBgColor,
     todoCheckedFillColor: Color = quoteBarColor
 ) {
-    val text = layoutResult.layoutInput.text.text
-    if (layoutResult.lineCount <= 0) return
-
-    val dividers = BlockDecorationLayoutCalculator.computeDividerLines(
-        text = text,
+    val cache = computeBlockDecorationCache(
+        layoutResult = layoutResult,
         spans = spans,
-        lineCount = layoutResult.lineCount,
+        canvasWidth = size.width,
+        densityScale = density,
         activeHeadingLevel = activeHeadingLevel,
-        cursorOffset = cursorOffset,
-        getLineForOffset = { layoutResult.getLineForOffset(it) },
-        getLineTop = { layoutResult.getLineTop(it) },
-        getLineBottom = { layoutResult.getLineBottom(it) }
+        cursorOffset = cursorOffset
     )
-    val hairlineStrokePx = 0.75.dp.toPx()
-    for (div in dividers) {
-        drawLine(
-            color = dividerColor,
-            start = Offset(0f, div.y),
-            end = Offset(size.width, div.y),
-            strokeWidth = hairlineStrokePx
-        )
-    }
-
-    if (text.isEmpty() || spans.isEmpty()) return
-
-    val bullets = BlockDecorationLayoutCalculator.computeBulletMarkers(
-        text = text,
-        spans = spans,
-        lineCount = layoutResult.lineCount,
-        densityScale = density,
-        getLineForOffset = { layoutResult.getLineForOffset(it) },
-        getLineTop = { layoutResult.getLineTop(it) },
-        getLineBottom = { layoutResult.getLineBottom(it) },
-        getCharLeft = { layoutResult.getBoundingBox(it).left },
-        getCharRight = { layoutResult.getBoundingBox(it).right }
+    drawCachedBlockDecorations(
+        cache = cache,
+        quoteBgColor = quoteBgColor,
+        quoteBarColor = quoteBarColor,
+        codeBgColor = codeBgColor,
+        codeBorderColor = codeBorderColor,
+        dividerColor = dividerColor,
+        bulletColor = bulletColor,
+        todoUncheckedBorderColor = todoUncheckedBorderColor,
+        todoUncheckedBgColor = todoUncheckedBgColor,
+        todoCheckedFillColor = todoCheckedFillColor
     )
-    for (bm in bullets) {
-        drawCircle(
-            color = bulletColor,
-            radius = bm.radius,
-            center = Offset(bm.centerX, bm.centerY)
-        )
-    }
-
-    val todos = BlockDecorationLayoutCalculator.computeTodoCheckboxes(
-        text = text,
-        spans = spans,
-        lineCount = layoutResult.lineCount,
-        densityScale = density,
-        getLineForOffset = { layoutResult.getLineForOffset(it) },
-        getLineTop = { layoutResult.getLineTop(it) },
-        getLineBottom = { layoutResult.getLineBottom(it) },
-        getCharLeft = { layoutResult.getBoundingBox(it).left },
-        getCharRight = { layoutResult.getBoundingBox(it).right }
-    )
-    val todoBorderPx = 1.6.dp.toPx()
-    for (td in todos) {
-        val r = td.boxSize * 0.22f
-        val topLeft = Offset(td.boxLeft, td.boxTop)
-        val boxSz = Size(td.boxSize, td.boxSize)
-        if (td.checked) {
-            drawRoundRect(
-                color = todoCheckedFillColor,
-                topLeft = topLeft,
-                size = boxSz,
-                cornerRadius = CornerRadius(r, r)
-            )
-            val checkPath = Path().apply {
-                moveTo(td.boxLeft + td.boxSize * 0.23f, td.boxTop + td.boxSize * 0.52f)
-                lineTo(td.boxLeft + td.boxSize * 0.43f, td.boxTop + td.boxSize * 0.72f)
-                lineTo(td.boxLeft + td.boxSize * 0.77f, td.boxTop + td.boxSize * 0.30f)
-            }
-            drawPath(
-                path = checkPath,
-                color = Color.White,
-                style = Stroke(
-                    width = (td.boxSize * 0.13f).coerceAtLeast(1.8.dp.toPx()),
-                    cap = StrokeCap.Round,
-                    join = StrokeJoin.Round
-                )
-            )
-        } else {
-            drawRoundRect(
-                color = todoUncheckedBgColor,
-                topLeft = topLeft,
-                size = boxSz,
-                cornerRadius = CornerRadius(r, r)
-            )
-            drawRoundRect(
-                color = todoUncheckedBorderColor,
-                topLeft = topLeft,
-                size = boxSz,
-                cornerRadius = CornerRadius(r, r),
-                style = Stroke(width = todoBorderPx)
-            )
-        }
-    }
-
-    val quoteOutsetLeft = 8.dp.toPx()
-    val quoteOutsetRight = 6.dp.toPx()
-    val quoteInlinePad = 3.5.dp.toPx()
-    val barWidthPx = 2.5.dp.toPx()
-    val gapFromPrevPx = 1.5.dp.toPx()
-    val verticalInsetPx = 1.dp.toPx()
-
-    val quoteBlocks = BlockDecorationLayoutCalculator.computeQuoteBlocks(
-        text = text,
-        spans = spans,
-        lineCount = layoutResult.lineCount,
-        canvasWidth = size.width,
-        blockOutsetLeftPx = quoteOutsetLeft,
-        blockOutsetRightPx = quoteOutsetRight,
-        inlinePadPx = quoteInlinePad,
-        barWidthPx = barWidthPx,
-        gapFromPrevPx = gapFromPrevPx,
-        verticalInsetPx = verticalInsetPx,
-        getLineForOffset = { layoutResult.getLineForOffset(it) },
-        getLineStart = { layoutResult.getLineStart(it) },
-        getLineEnd = { layoutResult.getLineEnd(it, visibleEnd = false) },
-        getLineTop = { layoutResult.getLineTop(it) },
-        getLineBottom = { layoutResult.getLineBottom(it) },
-        getCharLeft = { layoutResult.getBoundingBox(it).left },
-        getCharRight = { layoutResult.getBoundingBox(it).right }
-    )
-
-    val quoteRadius = 2.dp.toPx()
-    for (qb in quoteBlocks) {
-        val h = (qb.bottom - qb.top).coerceAtLeast(0f)
-        val w = (qb.right - qb.left).coerceAtLeast(0f)
-        if (h <= 0f || w <= 0f) continue
-        drawRoundRect(
-            color = quoteBgColor,
-            topLeft = Offset(qb.left, qb.top),
-            size = Size(w, h),
-            cornerRadius = CornerRadius(quoteRadius, quoteRadius)
-        )
-        drawRoundRect(
-            color = quoteBarColor,
-            topLeft = Offset(qb.left, qb.top),
-            size = Size(qb.barWidth.coerceAtMost(w), h),
-            cornerRadius = CornerRadius(qb.barWidth / 2f, qb.barWidth / 2f)
-        )
-    }
-
-    val codeOutset = 5.dp.toPx()
-    val codeBoxes = BlockDecorationLayoutCalculator.computeCodeBoxes(
-        text = text,
-        spans = spans,
-        lineCount = layoutResult.lineCount,
-        canvasWidth = size.width,
-        blockOutsetLeftPx = codeOutset,
-        blockOutsetRightPx = codeOutset,
-        inlinePadPx = 3.dp.toPx(),
-        gapFromPrevPx = gapFromPrevPx,
-        verticalInsetPx = verticalInsetPx,
-        getLineForOffset = { layoutResult.getLineForOffset(it) },
-        getLineStart = { layoutResult.getLineStart(it) },
-        getLineEnd = { layoutResult.getLineEnd(it, visibleEnd = false) },
-        getLineTop = { layoutResult.getLineTop(it) },
-        getLineBottom = { layoutResult.getLineBottom(it) },
-        getCharLeft = { layoutResult.getBoundingBox(it).left },
-        getCharRight = { layoutResult.getBoundingBox(it).right }
-    )
-
-    val cornerPx = 4.dp.toPx()
-    val strokeWidthPx = 0.75.dp.toPx()
-    for (cb in codeBoxes) {
-        val w = (cb.right - cb.left).coerceAtLeast(0f)
-        val h = (cb.bottom - cb.top).coerceAtLeast(0f)
-        if (w <= 0f || h <= 0f) continue
-        drawRoundRect(
-            color = codeBgColor,
-            topLeft = Offset(cb.left, cb.top),
-            size = Size(w, h),
-            cornerRadius = CornerRadius(cornerPx, cornerPx)
-        )
-        drawRoundRect(
-            color = codeBorderColor,
-            topLeft = Offset(cb.left, cb.top),
-            size = Size(w, h),
-            cornerRadius = CornerRadius(cornerPx, cornerPx),
-            style = Stroke(width = strokeWidthPx)
-        )
-    }
 }
