@@ -246,77 +246,105 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
 
         // ---------- canvas (text-only) ----------
-        val viewportHeightPxState = remember { mutableIntStateOf(0) }
-        val unshrunkHeightPxState = remember { mutableIntStateOf(0) }
-        val lastWidthPxState = remember { mutableIntStateOf(0) }
-        val editorFocusRequester = remember { FocusRequester() }
-        val keyboardController = LocalSoftwareKeyboardController.current
-        LaunchedEffect(reading) {
-            if (viewportHeightPxState.intValue > 0) {
-                unshrunkHeightPxState.intValue = viewportHeightPxState.intValue
+val viewportHeightPxState = remember { mutableIntStateOf(0) }
+val unshrunkHeightPxState = remember { mutableIntStateOf(0) }
+val lastWidthPxState = remember { mutableIntStateOf(0) }
+val editorFocusRequester = remember { FocusRequester() }
+val bringIntoViewRequester = remember { BringIntoViewRequester() }
+val keyboardController = LocalSoftwareKeyboardController.current
+val density = LocalDensity.current
+val imeBottomPx = WindowInsets.ime.getBottom(density)
+val isKeyboardVisible = imeBottomPx > 0
+
+LaunchedEffect(reading, lastWidthPxState.intValue) {
+    if (viewportHeightPxState.intValue > 0 && unshrunkHeightPxState.intValue == 0) {
+        unshrunkHeightPxState.intValue = viewportHeightPxState.intValue
+    }
+}
+
+LaunchedEffect(isKeyboardVisible, reading) {
+    if (!reading && isKeyboardVisible) {
+        kotlinx.coroutines.delay(80)
+        bringIntoViewRequester.bringIntoView()
+    }
+}
+
+Box(
+    Modifier
+        .weight(1f)
+        .fillMaxWidth()
+        .background(w.bg)
+        .clipToBounds()
+        .onSizeChanged { size ->
+            if (size.width <= 0 || size.height <= 0) return@onSizeChanged
+
+            val widthChanged = lastWidthPxState.intValue != size.width
+            if (widthChanged) {
+                lastWidthPxState.intValue = size.width
+                unshrunkHeightPxState.intValue = size.height
+            } else if (!isKeyboardVisible && (unshrunkHeightPxState.intValue == 0 || size.height > unshrunkHeightPxState.intValue)) {
+                unshrunkHeightPxState.intValue = size.height
+            }
+
+            if (viewportHeightPxState.intValue != size.height) {
+                viewportHeightPxState.intValue = size.height
             }
         }
+) {
+    val bottomClearanceDp = remember(isKeyboardVisible, imeBottomPx, density) {
+        with(density) {
+            val basePadding = 120.dp.toPx()
+            val keyboardBuffer = if (isKeyboardVisible) (imeBottomPx * 0.25f) else 0f
+            (basePadding + keyboardBuffer).toDp()
+        }
+    }
 
-        Box(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .background(w.bg)
-                .clipToBounds()
-                .onSizeChanged { size ->
-                    val widthChanged = lastWidthPxState.intValue != size.width
-                    if (widthChanged) {
-                        lastWidthPxState.intValue = size.width
-                        unshrunkHeightPxState.intValue = size.height
-                    } else if (unshrunkHeightPxState.intValue == 0 || size.height > unshrunkHeightPxState.intValue) {
-                        unshrunkHeightPxState.intValue = size.height
-                    }
-                    if (viewportHeightPxState.intValue != size.height) {
-                        viewportHeightPxState.intValue = size.height
-                    }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(vScroll)
+            .pointerInput(reading) {
+                if (!reading) {
+                    detectTapGestures(
+                        onTap = {
+                            editorFocusRequester.requestFocus()
+                            keyboardController?.show()
+                            bringIntoViewRequester.bringIntoView()
+                        }
+                    )
                 }
+            }
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .graphicsLayer()
+                .bringIntoViewRequester(bringIntoViewRequester)
         ) {
             Box(
                 Modifier
-                    .fillMaxSize()
-                    .verticalScroll(vScroll)
+                    .fillMaxWidth()
+                    .padding(16.dp)
             ) {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .graphicsLayer()
-                        .pointerInput(reading) {
-                            if (!reading) {
-                                detectTapGestures {
-                                    editorFocusRequester.requestFocus()
-                                    keyboardController?.show()
-                                }
-                            }
-                        }
-                ) {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                    ) {
-                        WorkspaceWritingLayer(
-                            editorState = editorState,
-                            reading = reading,
-                            customFontsCount = vm.customFonts.size,
-                            hooks = hooks,
-                            vScroll = vScroll,
-                            viewportHeightPxState = viewportHeightPxState,
-                            unshrunkHeightPxState = unshrunkHeightPxState,
-                            editorFocusRequester = editorFocusRequester,
-                            onSpoilerPrompt = { spoilerUnlockPrompt = it },
-                            onStatus = { msg, kind -> vm.showStatus(msg, kind) },
-                            onSaveSilent = { save(showFeedback = false) },
-                        )
-                    }
-                    Spacer(Modifier.height(120.dp))
-                }
+                WorkspaceWritingLayer(
+                    editorState = editorState,
+                    reading = reading,
+                    customFontsCount = vm.customFonts.size,
+                    hooks = hooks,
+                    vScroll = vScroll,
+                    viewportHeightPxState = viewportHeightPxState,
+                    unshrunkHeightPxState = unshrunkHeightPxState,
+                    editorFocusRequester = editorFocusRequester,
+                    onSpoilerPrompt = { spoilerUnlockPrompt = it },
+                    onStatus = { msg, kind -> vm.showStatus(msg, kind) },
+                    onSaveSilent = { save(showFeedback = false) },
+                )
             }
+            Spacer(Modifier.height(bottomClearanceDp))
         }
+    }
+}
+
 
         // ---------- toolbar ----------
         if (!reading) RichToolbar(
