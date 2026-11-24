@@ -1,27 +1,13 @@
 package com.likkho.app
 
-import android.graphics.SurfaceTexture
-import android.media.MediaDataSource
-import android.media.MediaPlayer
-import android.os.Build
-import android.view.Surface
-import android.view.TextureView
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculateRotation
-import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -36,28 +22,18 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
@@ -74,12 +50,10 @@ import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextIndent
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.likkho.app.editor.BlockDecorationLayoutCalculator
 import com.likkho.app.editor.HeadingTypographySpec
 import com.likkho.app.editor.RichTextEditorState
@@ -89,29 +63,21 @@ import com.likkho.app.editor.drawTextHighlights
 import com.likkho.app.editor.drawTextSpoilers
 import com.likkho.app.editor.model.SpanStyle
 import com.likkho.app.editor.toComposeTextAlign
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 private class CanvasViewportMetrics {
-    var rootOrigin: Offset = Offset.Zero
     var widthPx: Int by mutableIntStateOf(0)
     var heightPx: Int by mutableIntStateOf(0)
     var unshrunkHeightPx: Int by mutableIntStateOf(0)
-    var writingHeightPx: Int by mutableIntStateOf(0)
-    var isDraggingMedia: Boolean by mutableStateOf(false)
-    var activeDragRightDp: Float by mutableFloatStateOf(0f)
-    var activeDragBottomDp: Float by mutableFloatStateOf(0f)
 }
 
 /**
  * WORKSPACE (WritingWorkspace.tsx). Opens in READING mode for existing diary (Edit button), EDIT mode for new.
- * Header: back | PFP | heading | [delete] | Reminder | Edit/Save.  Then reminder sub-bar, selected image/audio control bars,
- * canvas (bg image + draggable images/audio + text), and the formatting toolbar docked at bottom (edit mode only).
- * TODO(StudioAI): the text area is a plain BasicTextField; replace it with a real rich-text editor and wire hooks.applyXxx.
+ * Header: back | PFP | heading | [delete] | Reminder | Edit/Save. Then reminder sub-bar,
+ * text-only canvas, and the formatting toolbar docked at bottom (edit mode only).
  */
 @Composable
 fun WorkspaceScreen(vm: AppViewModel) {
@@ -122,39 +88,22 @@ fun WorkspaceScreen(vm: AppViewModel) {
     var pfp by remember { mutableStateOf(initial?.pfp) }
     var reminderAt by remember { mutableStateOf(initial?.reminderAt) }
     var lockPin by remember { mutableStateOf(initial?.diaryLockPin) }
-    var bgSrc by remember { mutableStateOf(initial?.canvasBgSource) }
-    var bgOpacity by remember { mutableStateOf(initial?.canvasBgOpacity ?: 0.35f) }
-    var images by remember { mutableStateOf(initial?.canvasImages ?: emptyList()) }
-    var audios by remember { mutableStateOf(initial?.audioAttachments ?: emptyList()) }
-    var videos by remember { mutableStateOf(initial?.videoAttachments ?: emptyList()) }
+    val preservedBgSource = initial?.canvasBgSource
+    val preservedBgOpacity = initial?.canvasBgOpacity ?: 0.35f
+    val preservedImages = initial?.canvasImages ?: emptyList()
+    val preservedAudios = initial?.audioAttachments ?: emptyList()
+    val preservedVideos = initial?.videoAttachments ?: emptyList()
     val editorState = remember(initial?.id, initial?.isContentLoaded) { RichTextEditorState.fromHtml(initial?.contentHtml.orEmpty()) }
     var saved by remember { mutableStateOf(false) }
-    var selImg by remember { mutableStateOf<String?>(null) }
-    var selAud by remember { mutableStateOf<String?>(null) }
-    var selVid by remember { mutableStateOf<String?>(null) }
     var showReminder by remember { mutableStateOf(false) }
     var showPfp by remember { mutableStateOf(false) }
-    var imgStudio by remember { mutableStateOf<String?>(null) }
-    var audStudio by remember { mutableStateOf<CanvasAudio?>(null) }
-    var bgStudio by remember { mutableStateOf(false) }
     var spoilerUnlockPrompt by remember { mutableStateOf<SpanStyle.Spoiler?>(null) }
-    var recording by remember { mutableStateOf(false) }
 
     val initialMediaIds = remember {
-        collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
+        collectCanvasMediaIds(pfp, preservedBgSource, preservedImages, preservedAudios, preservedVideos)
     }
-    var hasSavedDiary by remember { mutableStateOf(initial != null) }
     var lastSavedMediaIds by remember { mutableStateOf(initialMediaIds) }
     val sessionImportedMediaIds = remember { mutableStateListOf<String>() }
-    var showUnsavedMediaExitDialog by remember { mutableStateOf(false) }
-
-    var importingItem by remember { mutableStateOf<ImportingItem?>(null) }
-    var showImportSkeleton by remember { mutableStateOf(false) }
-    var showImportCancelBackDialog by remember { mutableStateOf(false) }
-    val activeCancelFlag = remember { java.util.concurrent.atomic.AtomicReference<java.util.concurrent.atomic.AtomicBoolean?>(null) }
-    val activeImportToken = remember { java.util.concurrent.atomic.AtomicLong(0L) }
-    var runningImportToken by remember { mutableStateOf(0L) }
-    val workspaceContext = androidx.compose.ui.platform.LocalContext.current
 
     fun cleanupUnsavedSessionMedia() {
         cleanupAbandonedSessionMedia(
@@ -165,34 +114,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
     }
     val currentCleanupUnsavedSessionMedia by rememberUpdatedState { cleanupUnsavedSessionMedia() }
 
-    fun cancelActiveImport(showBanner: Boolean = false) {
-        activeCancelFlag.get()?.set(true)
-        activeImportToken.incrementAndGet()
-        runningImportToken = 0L
-        importingItem = null
-        showImportSkeleton = false
-        if (showBanner) {
-            vm.showStatus("Import cancelled", BannerKind.INFO)
-        }
-    }
-
-    LaunchedEffect(runningImportToken, importingItem != null) {
-        if (importingItem != null && runningImportToken != 0L) {
-            showImportSkeleton = false
-            delay(IMPORT_SKELETON_DELAY_MS)
-            if (importingItem != null && activeImportToken.get() == runningImportToken) {
-                showImportSkeleton = true
-            }
-        } else {
-            showImportSkeleton = false
-            showImportCancelBackDialog = false
-        }
-    }
-
     DisposableEffect(Unit) {
         onDispose {
-            activeCancelFlag.get()?.set(true)
-            activeImportToken.incrementAndGet()
             currentCleanupUnsavedSessionMedia()
         }
     }
@@ -207,207 +130,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
     }
 
-    val hScroll = rememberScrollState()
     val vScroll = rememberScrollState()
-    val outerDensity = LocalDensity.current
-
-    fun currentSpawnCoords(): Pair<Float, Float> {
-        val sx = with(outerDensity) { hScroll.value.toDp().value } + 24f
-        val sy = with(outerDensity) { vScroll.value.toDp().value } + 120f
-        return sx.coerceAtLeast(0f) to sy.coerceAtLeast(0f)
-    }
-
-    fun <R> launchSingleCanvasImport(
-        kind: ImportingMediaKind,
-        defaultName: String,
-        defaultWidth: Float,
-        defaultHeight: Float,
-        uri: android.net.Uri,
-        failMessage: String,
-        extractMediaId: (R) -> String?,
-        performImport: suspend (
-            sx: Float,
-            sy: Float,
-            isCancelled: () -> Boolean,
-            onPhase: (ImportPhase) -> Unit,
-            onProgress: (Long, Long) -> Unit
-        ) -> R?,
-        onImported: (R) -> Unit,
-    ) {
-        if (importingItem != null) {
-            vm.showStatus("Ek import chal raha hai", BannerKind.INFO)
-            return
-        }
-        val (displayName, reportedSize) = queryUriDisplayAndSize(workspaceContext, uri, defaultName)
-        val (sx, sy) = currentSpawnCoords()
-        val token = activeImportToken.incrementAndGet()
-        val cancelFlag = java.util.concurrent.atomic.AtomicBoolean(false)
-        val lastUiProgressMs = java.util.concurrent.atomic.AtomicLong(0L)
-        activeCancelFlag.set(cancelFlag)
-        runningImportToken = token
-        importingItem = ImportingItem(
-            kind = kind,
-            name = displayName,
-            x = sx,
-            y = sy,
-            width = defaultWidth,
-            height = defaultHeight,
-            phase = ImportPhase.PREPARING,
-            bytesDone = 0L,
-            bytesTotal = reportedSize,
-        )
-
-        val onPhase: (ImportPhase) -> Unit = { newPhase ->
-            scope.launch {
-                if (activeImportToken.get() == token && !cancelFlag.get()) {
-                    importingItem = importingItem?.let { cur ->
-                        val monotonicPhase = if (cur.phase == ImportPhase.VERIFYING && newPhase == ImportPhase.ENCRYPTING) {
-                            ImportPhase.VERIFYING
-                        } else newPhase
-                        cur.copy(phase = monotonicPhase)
-                    }
-                }
-            }
-        }
-        val onProgress: (Long, Long) -> Unit = { bytesDone, bytesTotal ->
-            val nowMs = System.nanoTime() / 1_000_000L
-            val prevMs = lastUiProgressMs.get()
-            if (prevMs == 0L || nowMs - prevMs >= 90L) {
-                lastUiProgressMs.set(nowMs)
-                scope.launch {
-                    if (activeImportToken.get() == token && !cancelFlag.get()) {
-                        importingItem = importingItem?.let { cur ->
-                            if (cur.phase == ImportPhase.VERIFYING) cur
-                            else cur.copy(
-                                phase = ImportPhase.ENCRYPTING,
-                                bytesDone = bytesDone,
-                                bytesTotal = if (bytesTotal > 0L) bytesTotal else cur.bytesTotal
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        scope.launch {
-            try {
-                val result = performImport(sx, sy, { cancelFlag.get() }, onPhase, onProgress)
-                handleCompletedImportOutcome(
-                    result = result,
-                    cancelled = cancelFlag.get() || activeImportToken.get() != token,
-                    failMessage = failMessage,
-                    extractMediaId = extractMediaId,
-                    onImported = onImported,
-                    onCleanupCancelledMedia = { orphanId ->
-                        vm.cleanupUnusedSessionMedia(setOf(orphanId))
-                    },
-                    onFailStatus = { msg -> vm.showStatus(msg, BannerKind.ERROR) }
-                )
-            } catch (_: ImportCancelledException) {
-                if (activeImportToken.get() == token) {
-                    vm.showStatus("Import cancelled", BannerKind.INFO)
-                }
-            } catch (_: Throwable) {
-                if (activeImportToken.get() == token) {
-                    if (cancelFlag.get()) {
-                        vm.showStatus("Import cancelled", BannerKind.INFO)
-                    } else {
-                        vm.showStatus(failMessage, BannerKind.ERROR)
-                    }
-                }
-            } finally {
-                activeCancelFlag.compareAndSet(cancelFlag, null)
-                if (activeImportToken.get() == token) {
-                    runningImportToken = 0L
-                    importingItem = null
-                    showImportSkeleton = false
-                }
-            }
-        }
-    }
-
-    val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            launchSingleCanvasImport(
-                kind = ImportingMediaKind.IMAGE,
-                defaultName = "Image",
-                defaultWidth = 160f,
-                defaultHeight = 120f,
-                uri = uri,
-                failMessage = "Could not import image.",
-                extractMediaId = { it.id },
-                performImport = { sx, sy, isCancelled, onPhase, onProgress ->
-                    vm.importImageUri(uri, sx, sy, isCancelled, onPhase, onProgress)
-                },
-                onImported = { imported ->
-                    sessionImportedMediaIds.add(imported.id)
-                    images = images + imported
-                    selImg = imported.id
-                    selAud = null
-                    selVid = null
-                }
-            )
-        }
-    }
-    val videoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            launchSingleCanvasImport(
-                kind = ImportingMediaKind.VIDEO,
-                defaultName = "Video",
-                defaultWidth = 240f,
-                defaultHeight = 150f,
-                uri = uri,
-                failMessage = "Could not import video.",
-                extractMediaId = { it.source.ifBlank { it.id } },
-                performImport = { sx, sy, isCancelled, onPhase, onProgress ->
-                    vm.importVideoUri(uri, sx, sy, isCancelled, onPhase, onProgress)
-                },
-                onImported = { imported ->
-                    sessionImportedMediaIds.add(imported.id)
-                    videos = videos + imported
-                    selVid = imported.id
-                    selImg = null
-                    selAud = null
-                }
-            )
-        }
-    }
-    val audioPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            launchSingleCanvasImport(
-                kind = ImportingMediaKind.AUDIO,
-                defaultName = "Audio",
-                defaultWidth = 270f,
-                defaultHeight = 56f,
-                uri = uri,
-                failMessage = "Could not import audio.",
-                extractMediaId = { it.audioUri ?: it.id },
-                performImport = { sx, sy, isCancelled, onPhase, onProgress ->
-                    vm.importAudioUri(uri, sx, sy, isCancelled, onPhase, onProgress)
-                },
-                onImported = { imported ->
-                    sessionImportedMediaIds.add(imported.audioUri ?: imported.id)
-                    audios = audios + imported
-                    selAud = imported.id
-                    selImg = null
-                    selVid = null
-                }
-            )
-        }
-    }
-    val bgPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                val mediaId = vm.importMediaUri(uri)
-                if (mediaId != null) {
-                    sessionImportedMediaIds.add(mediaId)
-                    bgSrc = mediaId
-                } else {
-                    vm.showStatus("Could not import background image.", BannerKind.ERROR)
-                }
-            }
-        }
-    }
 
     fun save(showFeedback: Boolean = true) {
         val now = System.currentTimeMillis()
@@ -422,17 +145,22 @@ fun WorkspaceScreen(vm: AppViewModel) {
             updatedAt = now,
             reminderAt = reminderAt,
             diaryLockPin = lockPin,
-            canvasBgSource = bgSrc,
-            canvasBgOpacity = bgOpacity,
-            canvasImages = images,
-            audioAttachments = audios,
-            videoAttachments = videos
+            canvasBgSource = preservedBgSource,
+            canvasBgOpacity = preservedBgOpacity,
+            canvasImages = preservedImages,
+            audioAttachments = preservedAudios,
+            videoAttachments = preservedVideos
         )
-        val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
+        val currentMediaIds = collectCanvasMediaIds(
+            pfp,
+            preservedBgSource,
+            preservedImages,
+            preservedAudios,
+            preservedVideos
+        )
         val obsoleteMediaIds = (lastSavedMediaIds + sessionImportedMediaIds) - currentMediaIds
         vm.upsertLog(log, false, obsoleteMediaIds) { persistResult ->
             persistResult.onSuccess {
-                hasSavedDiary = true
                 lastSavedMediaIds = currentMediaIds
                 sessionImportedMediaIds.clear()
                 hooks.scheduleReminder(log, reminderAt) { remRes ->
@@ -458,26 +186,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
         vm.navigateTo(Route.HOME)
     }
 
-    fun requestExitWorkspace() {
-        if (importingItem != null) {
-            showImportCancelBackDialog = true
-            return
-        }
-        val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
-        val hasRemovedSavedMedia = hasSavedDiary && (lastSavedMediaIds - currentMediaIds).isNotEmpty()
-        if (hasRemovedSavedMedia) {
-            showUnsavedMediaExitDialog = true
-        } else {
-            exitWorkspace()
-        }
-    }
-
     BackHandler {
-        if (selImg != null || selAud != null || selVid != null) {
-            selImg = null; selAud = null; selVid = null
-        } else {
-            requestExitWorkspace()
-        }
+        exitWorkspace()
     }
 
     Column(
@@ -492,7 +202,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 IconBtn(
                     Icons.AutoMirrored.Outlined.ArrowBack,
                     "Back to Homepage",
-                    { requestExitWorkspace() },
+                    { exitWorkspace() },
                     size = 48.dp,
                     bordered = false,
                     bg = Color.Transparent
@@ -520,23 +230,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     modifier = Modifier.testTag("workspace_save_button"),
                     kind = if (saved) BtnKind.SUCCESS else BtnKind.PRIMARY,
                     icon = if (saved) Icons.Outlined.Check else Icons.Outlined.Save,
-                    enabled = canSaveDiary(importingItem),
                     height = 40.dp
                 )
-            }
-            if (importingItem != null && !reading) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(start = 12.dp, end = 12.dp, bottom = 4.dp),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Media import chal raha hai",
-                        style = sansStyle(10.sp, w.muted, FontWeight.Medium)
-                    )
-                }
             }
             Box(Modifier.fillMaxWidth().height(0.5.dp).background(w.border))
         }
@@ -547,66 +242,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 Text("Edit", style = sansStyle(12.sp, w.accent, FontWeight.Bold), modifier = Modifier.clickable { showReminder = true })
             }
         }
-        // ---------- selected image bar ----------
-        images.find { it.id == selImg }?.takeIf { !reading }?.let { im ->
-            fun upd(f: (CanvasImage) -> CanvasImage) { images = images.map { if (it.id == im.id) f(it) else it } }
-            ControlBar {
-                Text("Size: ${formatBytes(im.sizeBytes)}", style = monoStyle(10.sp, w.muted))
-                Text("Pinch anywhere to resize/rotate", style = sansStyle(10.sp, w.accent, FontWeight.Medium))
-                Bar("Compress / Edit", Icons.Outlined.Edit) { imgStudio = im.id }
-                Bar(if (im.behindText) "Behind Text (BG)" else "In Front of Text (FG)", Icons.Outlined.Layers, on = im.behindText) { upd { it.copy(behindText = !it.behindText) } }
-                Bar("", Icons.Outlined.Delete, danger = true) { images = images.filter { it.id != im.id }; selImg = null }
-                Bar("Done", null) { selImg = null }
-            }
-        }
-        // ---------- selected video bar ----------
-        videos.find { it.id == selVid }?.takeIf { !reading }?.let { v ->
-            fun upd(f: (CanvasVideo) -> CanvasVideo) { videos = videos.map { if (it.id == v.id) f(it) else it } }
-            ControlBar {
-                Text("Size: ${formatBytes(v.sizeBytes)}", style = monoStyle(10.sp, w.muted))
-                Text("Pinch anywhere to resize/rotate", style = sansStyle(10.sp, w.accent, FontWeight.Medium))
-                Bar(if (v.behindText) "Behind Text (BG)" else "In Front of Text (FG)", Icons.Outlined.Layers, on = v.behindText) { upd { it.copy(behindText = !it.behindText) } }
-                Bar("Delete", Icons.Outlined.Delete, danger = true) { videos = videos.filter { it.id != v.id }; selVid = null }
-                Bar("Done", null) { selVid = null }
-            }
-        }
-        // ---------- selected audio bar ----------
-        audios.find { it.id == selAud }?.takeIf { !reading }?.let { a ->
-            fun upd(f: (CanvasAudio) -> CanvasAudio) { audios = audios.map { if (it.id == a.id) f(it) else it } }
-            Column {
-                ControlBar {
-                    Bar("W -", Icons.Outlined.SwapHoriz) { upd { it.copy(width = (it.width - 16).coerceAtLeast(170f)) } }
-                    Bar("W +", Icons.Outlined.SwapHoriz) { upd { it.copy(width = (it.width + 16).coerceAtMost(440f)) } }
-                    Bar("H -", Icons.Outlined.SwapVert) { upd { it.copy(height = (it.height - 8).coerceAtLeast(46f)) } }
-                    Bar("H +", Icons.Outlined.SwapVert) { upd { it.copy(height = (it.height + 8).coerceAtMost(180f)) } }
-                    Bar("", Icons.Outlined.ArrowBack) { upd { it.copy(x = (it.x - 16).coerceAtLeast(0f)) } }
-                    Bar("", Icons.Outlined.ArrowForward) { upd { it.copy(x = it.x + 16) } }
-                    Bar("", Icons.Outlined.ArrowUpward) { upd { it.copy(y = (it.y - 16).coerceAtLeast(0f)) } }
-                    Bar("", Icons.Outlined.ArrowDownward) { upd { it.copy(y = it.y + 16) } }
-                    Bar("Speed ${a.playbackRate}x", Icons.Outlined.Speed) { upd { it.copy(playbackRate = AUDIO_SPEEDS[(AUDIO_SPEEDS.indexOf(it.playbackRate) + 1) % AUDIO_SPEEDS.size]) } }
-                    Bar(if (a.behindText) "Behind Text (BG)" else "In Front of Text (FG)", Icons.Outlined.Layers, on = a.behindText) { upd { it.copy(behindText = !it.behindText) } }
-                    Bar("Edit", Icons.Outlined.GraphicEq) { audStudio = a }
-                    Bar("Delete", Icons.Outlined.Delete, danger = true) { audios = audios.filter { it.id != a.id }; selAud = null }
-                    Bar("Done", null) { selAud = null }
-                }
-                Row(Modifier.fillMaxWidth().background(w.surface).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Rotate: ${a.rotation.toInt()}°", style = monoStyle(10.sp, w.muted)); Spacer(Modifier.width(8.dp))
-                    WikiSlider(a.rotation, { v -> upd { it.copy(rotation = v) } }, 0f..360f, Modifier.weight(1f))
-                }
-                HairlineDivider()
-            }
-        }
 
-        // ---------- canvas (infinite right/bottom media drag, screen-width writing) ----------
-        val keyLifecycle = LocalBitmapKeyLifecycle.current
-        DisposableEffect(bgSrc) {
-            val k = bgSrc?.takeIf { it.isNotBlank() }
-            if (k != null) keyLifecycle?.acquire(k)
-            onDispose { if (k != null) keyLifecycle?.release(k) }
-        }
-        val bgBitmap by produceState<ImageBitmap?>(null, bgSrc) {
-            value = bgSrc?.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
-        }
+        // ---------- canvas (text-only) ----------
         val viewportMetrics = remember { CanvasViewportMetrics() }
         val editorFocusRequester = remember { FocusRequester() }
         val keyboardController = LocalSoftwareKeyboardController.current
@@ -614,84 +251,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
             if (viewportMetrics.heightPx > 0) {
                 viewportMetrics.unshrunkHeightPx = viewportMetrics.heightPx
             }
-            if (reading) {
-                viewportMetrics.isDraggingMedia = false
-                viewportMetrics.activeDragRightDp = 0f
-                viewportMetrics.activeDragBottomDp = 0f
-            }
         }
-        val onMediaDragProgress: (Float, Float) -> Unit = remember(viewportMetrics) {
-            { maxR, maxB ->
-                if (!viewportMetrics.isDraggingMedia) viewportMetrics.isDraggingMedia = true
-                viewportMetrics.activeDragRightDp = maxR
-                viewportMetrics.activeDragBottomDp = maxB
-            }
-        }
-        val clearActiveDragBounds: () -> Unit = remember(viewportMetrics) {
-            {
-                viewportMetrics.isDraggingMedia = false
-                viewportMetrics.activeDragRightDp = 0f
-                viewportMetrics.activeDragBottomDp = 0f
-            }
-        }
-        val applyCanvasPinch by rememberUpdatedState { zoom: Float, rot: Float ->
-            val currentSelImg = selImg
-            val currentSelVid = selVid
-            if (currentSelImg != null) {
-                images = images.map { im ->
-                    if (im.id == currentSelImg) {
-                        val minScale = maxOf(50f / im.width, 40f / im.height)
-                        val maxScale = minOf(1200f / im.width, 1200f / im.height)
-                        val scale = zoom.coerceIn(minScale, maxScale)
-                        im.copy(
-                            width = im.width * scale,
-                            height = im.height * scale,
-                            rotation = (im.rotation + rot) % 360f
-                        )
-                    } else im
-                }
-            } else if (currentSelVid != null) {
-                videos = videos.map { v ->
-                    if (v.id == currentSelVid) {
-                        val minScale = maxOf(100f / v.width, 72f / v.height)
-                        val maxScale = minOf(1200f / v.width, 1200f / v.height)
-                        val scale = zoom.coerceIn(minScale, maxScale)
-                        v.copy(
-                            width = v.width * scale,
-                            height = v.height * scale,
-                            rotation = (v.rotation + rot) % 360f
-                        )
-                    } else v
-                }
-            }
-        }
-
         val density = LocalDensity.current
-        val skeletonRightDp = if (showImportSkeleton) importingItem?.let { it.x + it.width } ?: 0f else 0f
-        val skeletonBottomDp = if (showImportSkeleton) importingItem?.let { it.y + it.height } ?: 0f else 0f
-        val mediaMaxRightDp = remember(images, audios, videos, skeletonRightDp) {
-            maxOf(
-                images.maxOfOrNull { it.x + it.width } ?: 0f,
-                audios.maxOfOrNull { it.x + it.width } ?: 0f,
-                videos.maxOfOrNull { it.x + it.width } ?: 0f,
-                skeletonRightDp
-            )
-        }
-        val mediaMaxBottomDp = remember(images, audios, videos, skeletonBottomDp) {
-            maxOf(
-                images.maxOfOrNull { it.y + it.height } ?: 0f,
-                audios.maxOfOrNull { it.y + it.height } ?: 0f,
-                videos.maxOfOrNull { it.y + it.height } ?: 0f,
-                skeletonBottomDp
-            )
-        }
-
-        val (behindImages, frontImages) = remember(images) { images.partition { it.behindText } }
-        val (behindVideos, frontVideos) = remember(videos) { videos.partition { it.behindText } }
-        val (behindAudios, frontAudios) = remember(audios) { audios.partition { it.behindText } }
-        val hasBehindMedia = behindImages.isNotEmpty() || behindVideos.isNotEmpty() || behindAudios.isNotEmpty()
-        val hasFrontMedia = frontImages.isNotEmpty() || frontVideos.isNotEmpty() || frontAudios.isNotEmpty() || showImportSkeleton
-        val hasSelectedMedia = selImg != null || selAud != null || selVid != null
 
         BoxWithConstraints(
             Modifier
@@ -699,7 +260,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 .fillMaxWidth()
                 .background(w.bg)
                 .clipToBounds()
-                .onGloballyPositioned { coords -> viewportMetrics.rootOrigin = coords.positionInRoot() }
                 .onSizeChanged { size ->
                     val widthChanged = viewportMetrics.widthPx != size.width
                     if (widthChanged) {
@@ -712,36 +272,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
                         viewportMetrics.heightPx = size.height
                     }
                 }
-                .pointerInput(selImg, selVid, reading) {
-                    if (!reading && (selImg != null || selVid != null)) {
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                            var zooming = false
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                val pressed = event.changes.filter { it.pressed }
-                                if (pressed.isEmpty()) break
-                                if (pressed.size >= 2) {
-                                    zooming = true
-                                    val zoom = event.calculateZoom()
-                                    val rot = event.calculateRotation()
-                                    if (zoom != 1f || rot != 0f) {
-                                        applyCanvasPinch(zoom, rot)
-                                    }
-                                    event.changes.forEach { it.consume() }
-                                } else if (zooming) {
-                                    event.changes.forEach { it.consume() }
-                                }
-                            }
-                        }
-                    }
-                }
         ) {
-            val boundedWidthPx = if (constraints.hasBoundedWidth) constraints.maxWidth else 0
             val boundedHeightPx = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
-            val viewportWidthPx = (viewportMetrics.widthPx.takeIf { it > 0 } ?: boundedWidthPx)
-                .coerceAtLeast(1)
-            val viewportW = maxWidth
             val effectiveUnshrunkHeightPx = maxOf(viewportMetrics.unshrunkHeightPx, boundedHeightPx)
             val stableMinHeightDp = remember(effectiveUnshrunkHeightPx, density) {
                 if (effectiveUnshrunkHeightPx > 0) {
@@ -754,309 +286,64 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     240.dp
                 }
             }
-            val canScrollHorizontally = mediaMaxRightDp > viewportW.value - 32f || viewportMetrics.isDraggingMedia
-
-            if (bgSrc != null) {
-                val bgBmp = bgBitmap
-                if (bgBmp != null) {
-                    Image(
-                        bitmap = bgBmp,
-                        contentDescription = "Canvas background",
-                        contentScale = ContentScale.Crop,
-                        alpha = bgOpacity,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Box(Modifier.fillMaxSize().background(w.accent.copy(alpha = bgOpacity * 0.3f)))
-                }
-            }
 
             Box(
                 Modifier
                     .fillMaxSize()
-                    .horizontalScroll(hScroll, enabled = canScrollHorizontally)
+                    .verticalScroll(vScroll)
             ) {
-                Box(
+                Column(
                     Modifier
-                        .fillMaxHeight()
-                        .layout { measurable, layerConstraints ->
-                            val activeRightDp = maxOf(mediaMaxRightDp, viewportMetrics.activeDragRightDp)
-                            val allowHorizontal = activeRightDp > (viewportWidthPx / density.density) - 32f ||
-                                viewportMetrics.isDraggingMedia
-                            val wPx = if (allowHorizontal) {
-                                maxOf(viewportWidthPx, (activeRightDp + 240f).dp.roundToPx())
-                            } else {
-                                viewportWidthPx
-                            }
-                            val maxH = layerConstraints.maxHeight
-                            val minH = layerConstraints.minHeight.coerceAtMost(maxH)
-                            val placeable = measurable.measure(
-                                Constraints(
-                                    minWidth = wPx,
-                                    maxWidth = wPx,
-                                    minHeight = minH,
-                                    maxHeight = maxH
-                                )
-                            )
-                            layout(wPx, placeable.height) {
-                                placeable.placeRelative(0, 0)
+                        .fillMaxWidth()
+                        .pointerInput(reading) {
+                            if (!reading) {
+                                detectTapGestures {
+                                    editorFocusRequester.requestFocus()
+                                    keyboardController?.show()
+                                }
                             }
                         }
                 ) {
-                    // Layer 1: Dedicated Typing Canvas (independent verticalScroll; never re-measures on IME frames)
                     Box(
                         Modifier
-                            .fillMaxSize()
-                            .verticalScroll(vScroll)
+                            .fillMaxWidth()
+                            .padding(16.dp)
                     ) {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .pointerInput(reading) {
-                                    if (!reading) {
-                                        detectTapGestures {
-                                            selImg = null
-                                            selAud = null
-                                            selVid = null
-                                            editorFocusRequester.requestFocus()
-                                            keyboardController?.show()
-                                        }
-                                    }
-                                }
-                        ) {
-                            if (hasBehindMedia) {
-                                behindImages.forEach { im ->
-                                    key(im.id) {
-                                        DraggableImage(
-                                            im = im,
-                                            selected = selImg == im.id,
-                                            editable = !reading,
-                                            hScroll = hScroll,
-                                            vScroll = vScroll,
-                                            viewportMetrics = viewportMetrics,
-                                            syncVerticalScroll = false,
-                                            loadImageBitmap = { id -> vm.loadDecryptedImageBitmap(id) },
-                                            onSelect = { selImg = im.id; selAud = null; selVid = null },
-                                            onDragProgress = onMediaDragProgress,
-                                            onMove = { x, y ->
-                                                clearActiveDragBounds()
-                                                images = images.map { m -> if (m.id == im.id) m.copy(x = x, y = y) else m }
-                                            }
-                                        )
-                                    }
-                                }
-                                behindVideos.forEach { v ->
-                                    key(v.id) {
-                                        VideoCard(
-                                            v = v,
-                                            selected = selVid == v.id,
-                                            editable = !reading,
-                                            hScroll = hScroll,
-                                            vScroll = vScroll,
-                                            viewportMetrics = viewportMetrics,
-                                            syncVerticalScroll = false,
-                                            loadThumbnail = { id -> vm.loadVideoThumbnailBitmap(id) },
-                                            openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
-                                            onStatus = { vm.showStatus(it, BannerKind.ERROR) },
-                                            onSelect = { selVid = v.id; selImg = null; selAud = null },
-                                            onDragProgress = onMediaDragProgress,
-                                            onMove = { x, y ->
-                                                clearActiveDragBounds()
-                                                videos = videos.map { vid -> if (vid.id == v.id) vid.copy(x = x, y = y) else vid }
-                                            }
-                                        )
-                                    }
-                                }
-                                behindAudios.forEach { a ->
-                                    key(a.id) {
-                                        AudioCard(
-                                            a = a,
-                                            selected = selAud == a.id,
-                                            editable = !reading,
-                                            hScroll = hScroll,
-                                            vScroll = vScroll,
-                                            viewportMetrics = viewportMetrics,
-                                            syncVerticalScroll = false,
-                                            openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
-                                            onStatus = { vm.showStatus(it, BannerKind.ERROR) },
-                                            onSelect = { selAud = a.id; selImg = null; selVid = null },
-                                            onDragProgress = onMediaDragProgress,
-                                            onMove = { x, y ->
-                                                clearActiveDragBounds()
-                                                audios = audios.map { aud -> if (aud.id == a.id) aud.copy(x = x, y = y) else aud }
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-
-                            Column(Modifier.width(viewportW)) {
-                                Box(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .onSizeChanged { size ->
-                                            if (viewportMetrics.writingHeightPx != size.height) {
-                                                viewportMetrics.writingHeightPx = size.height
-                                            }
-                                        }
-                                        .padding(16.dp)
-                                ) {
-                                    WorkspaceWritingLayer(
-                                        editorState = editorState,
-                                        reading = reading,
-                                        customFontsCount = vm.customFonts.size,
-                                        hooks = hooks,
-                                        vScroll = vScroll,
-                                        viewportMetrics = viewportMetrics,
-                                        editorFocusRequester = editorFocusRequester,
-                                        minHeightDp = if (hasBehindMedia) 240.dp else stableMinHeightDp,
-                                        hasSelectedMedia = hasSelectedMedia,
-                                        onClearMediaSelection = { selImg = null; selAud = null; selVid = null },
-                                        onSpoilerPrompt = { spoilerUnlockPrompt = it },
-                                        onStatus = { msg, kind -> vm.showStatus(msg, kind) },
-                                        onSaveSilent = { save(showFeedback = false) },
-                                    )
-                                }
-                                Box(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .layout { measurable, tailConstraints ->
-                                            val minTailPx = 120.dp.roundToPx()
-                                            val dragBottomDp = viewportMetrics.activeDragBottomDp
-                                            val mediaBottomDp = maxOf(mediaMaxBottomDp, dragBottomDp)
-                                            val extraPx = if (mediaBottomDp > 0f) {
-                                                val mediaNeedPx = (mediaBottomDp + 240f).dp.roundToPx()
-                                                (mediaNeedPx - viewportMetrics.writingHeightPx).coerceAtLeast(minTailPx)
-                                            } else {
-                                                minTailPx
-                                            }
-                                            val tailW = if (tailConstraints.hasBoundedWidth) {
-                                                tailConstraints.maxWidth
-                                            } else {
-                                                viewportWidthPx
-                                            }
-                                            val placeable = measurable.measure(
-                                                Constraints(
-                                                    minWidth = tailW,
-                                                    maxWidth = tailW,
-                                                    minHeight = extraPx,
-                                                    maxHeight = extraPx
-                                                )
-                                            )
-                                            layout(placeable.width, placeable.height) {
-                                                placeable.placeRelative(0, 0)
-                                            }
-                                        }
-                                )
-                            }
-                        }
+                        WorkspaceWritingLayer(
+                            editorState = editorState,
+                            reading = reading,
+                            customFontsCount = vm.customFonts.size,
+                            hooks = hooks,
+                            vScroll = vScroll,
+                            viewportMetrics = viewportMetrics,
+                            editorFocusRequester = editorFocusRequester,
+                            minHeightDp = stableMinHeightDp,
+                            onSpoilerPrompt = { spoilerUnlockPrompt = it },
+                            onStatus = { msg, kind -> vm.showStatus(msg, kind) },
+                            onSaveSilent = { save(showFeedback = false) },
+                        )
                     }
-
-                    // Layer 2: Dedicated Media Canvas (overlapping foreground layer synced via vScroll offset in placement phase)
-                    if (hasFrontMedia) {
-                        Box(
-                            Modifier
-                                .fillMaxSize()
-                                .clipToBounds()
-                        ) {
-                            frontImages.forEach { im ->
-                                key(im.id) {
-                                    DraggableImage(
-                                        im = im,
-                                        selected = selImg == im.id,
-                                        editable = !reading,
-                                        hScroll = hScroll,
-                                        vScroll = vScroll,
-                                        viewportMetrics = viewportMetrics,
-                                        syncVerticalScroll = true,
-                                        loadImageBitmap = { id -> vm.loadDecryptedImageBitmap(id) },
-                                        onSelect = { selImg = im.id; selAud = null; selVid = null },
-                                        onDragProgress = onMediaDragProgress,
-                                        onMove = { x, y ->
-                                            clearActiveDragBounds()
-                                            images = images.map { m -> if (m.id == im.id) m.copy(x = x, y = y) else m }
-                                        }
-                                    )
-                                }
-                            }
-                            frontVideos.forEach { v ->
-                                key(v.id) {
-                                    VideoCard(
-                                        v = v,
-                                        selected = selVid == v.id,
-                                        editable = !reading,
-                                        hScroll = hScroll,
-                                        vScroll = vScroll,
-                                        viewportMetrics = viewportMetrics,
-                                        syncVerticalScroll = true,
-                                        loadThumbnail = { id -> vm.loadVideoThumbnailBitmap(id) },
-                                        openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
-                                        onStatus = { vm.showStatus(it, BannerKind.ERROR) },
-                                        onSelect = { selVid = v.id; selImg = null; selAud = null },
-                                        onDragProgress = onMediaDragProgress,
-                                        onMove = { x, y ->
-                                            clearActiveDragBounds()
-                                            videos = videos.map { vid -> if (vid.id == v.id) vid.copy(x = x, y = y) else vid }
-                                        }
-                                    )
-                                }
-                            }
-                            frontAudios.forEach { a ->
-                                key(a.id) {
-                                    AudioCard(
-                                        a = a,
-                                        selected = selAud == a.id,
-                                        editable = !reading,
-                                        hScroll = hScroll,
-                                        vScroll = vScroll,
-                                        viewportMetrics = viewportMetrics,
-                                        syncVerticalScroll = true,
-                                        openMediaDataSource = { id -> vm.openDecryptedMediaDataSource(id) },
-                                        onStatus = { vm.showStatus(it, BannerKind.ERROR) },
-                                        onSelect = { selAud = a.id; selImg = null; selVid = null },
-                                        onDragProgress = onMediaDragProgress,
-                                        onMove = { x, y ->
-                                            clearActiveDragBounds()
-                                            audios = audios.map { aud -> if (aud.id == a.id) aud.copy(x = x, y = y) else aud }
-                                        }
-                                    )
-                                }
-                            }
-                            if (showImportSkeleton) {
-                                importingItem?.let { skel ->
-                                    ImportSkeletonCard(
-                                        item = skel,
-                                        onCancel = { cancelActiveImport(showBanner = true) },
-                                        modifier = Modifier.offset { IntOffset(0, -vScroll.value) }
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    Spacer(Modifier.height(120.dp))
                 }
             }
         }
 
         // ---------- toolbar ----------
         if (!reading) RichToolbar(
-            vm = vm, lockPin = lockPin, bgSrc = bgSrc, bgOpacity = bgOpacity, recording = recording,
-            onRecordToggle = {
-                if (!recording) { hooks.startVoiceRecording(); recording = true }
-                else {
-                    recording = false
-                    hooks.stopVoiceRecording()?.let {
-                        sessionImportedMediaIds.add(it.audioUri ?: it.id)
-                        audios = audios + it
-                        vm.showStatus("Voice recording saved to diary.")
-                    }
-                }
-            },
-            onAddImage = { imagePickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-            onAddVideo = { videoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) },
-            onAddAudio = { audioPickerLauncher.launch(arrayOf("audio/*")) },
-            onLock = { lockPin = it }, onBgOpacity = { bgOpacity = it },
-            onPickBg = { bgPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-            onRemoveBg = { bgSrc = null }, onEditBg = { bgStudio = true },
+            vm = vm,
+            lockPin = lockPin,
+            bgSrc = null,
+            bgOpacity = 0.35f,
+            recording = false,
+            onRecordToggle = { vm.showStatus("Canvas media insertion will be added later.", BannerKind.INFO) },
+            onAddImage = { vm.showStatus("Canvas media insertion will be added later.", BannerKind.INFO) },
+            onAddVideo = { vm.showStatus("Canvas media insertion will be added later.", BannerKind.INFO) },
+            onAddAudio = { vm.showStatus("Canvas media insertion will be added later.", BannerKind.INFO) },
+            onLock = { lockPin = it },
+            onBgOpacity = {},
+            onPickBg = { vm.showStatus("Canvas media insertion will be added later.", BannerKind.INFO) },
+            onRemoveBg = {},
+            onEditBg = {},
             onInsertText = { inserted ->
                 val current = editorState.textFieldValue
                 val pos = current.selection.start
@@ -1070,75 +357,10 @@ fun WorkspaceScreen(vm: AppViewModel) {
             },
             onSpoiler = { hooks.applySpoiler(it) },
             editorState = editorState,
-            mediaImportBusy = importingItem != null,
+            mediaImportBusy = false,
         )
     }
 
-    if (showImportCancelBackDialog) {
-        WikiDialog(
-            onDismiss = { showImportCancelBackDialog = false },
-            title = "Import chal raha hai",
-            titleIcon = Icons.Outlined.Warning,
-            titleIconTint = w.danger,
-            maxWidth = 340.dp
-        ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Back jaane par import cancel ho jayega.",
-                    style = sansStyle(12.sp, w.text, FontWeight.Medium)
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    WikiButton("Wapas", { showImportCancelBackDialog = false }, height = 36.dp)
-                    Spacer(Modifier.width(8.dp))
-                    WikiButton(
-                        text = "Cancel import aur Back",
-                        onClick = {
-                            showImportCancelBackDialog = false
-                            cancelActiveImport(showBanner = false)
-                            val currentMediaIds = collectCanvasMediaIds(pfp, bgSrc, images, audios, videos)
-                            val hasRemovedSavedMedia = hasSavedDiary && (lastSavedMediaIds - currentMediaIds).isNotEmpty()
-                            if (hasRemovedSavedMedia) {
-                                showUnsavedMediaExitDialog = true
-                            } else {
-                                exitWorkspace()
-                            }
-                        },
-                        kind = BtnKind.DANGER,
-                        height = 36.dp
-                    )
-                }
-            }
-        }
-    }
-    if (showUnsavedMediaExitDialog) {
-        WikiDialog(
-            onDismiss = { showUnsavedMediaExitDialog = false },
-            title = "Unsaved Changes",
-            titleIcon = Icons.Outlined.Warning,
-            titleIconTint = w.danger,
-            maxWidth = 340.dp
-        ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Unsaved changes: media diary me rahegi",
-                    style = sansStyle(12.sp, w.text, FontWeight.Medium)
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    WikiButton("Cancel", { showUnsavedMediaExitDialog = false }, height = 36.dp)
-                    Spacer(Modifier.width(8.dp))
-                    WikiButton(
-                        text = "Exit",
-                        onClick = {
-                            showUnsavedMediaExitDialog = false
-                            exitWorkspace()
-                        },
-                        kind = BtnKind.DANGER,
-                        height = 36.dp
-                    )
-                }
-            }
-        }
-    }
     if (showReminder) ReminderDialog(reminderAt, { showReminder = false }) { reminderAt = it }
     if (showPfp) PfpStudioDialog(
         current = pfp,
@@ -1154,49 +376,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
         },
         onSave = { pfp = it }
     )
-    imgStudio?.let { id ->
-        images.find { it.id == id }?.let { targetImg ->
-            val studioKeyLifecycle = LocalBitmapKeyLifecycle.current
-            DisposableEffect(targetImg.source) {
-                val k = targetImg.source.takeIf { it.isNotBlank() }
-                if (k != null) studioKeyLifecycle?.acquire(k)
-                onDispose { if (k != null) studioKeyLifecycle?.release(k) }
-            }
-            val previewBmp by produceState<ImageBitmap?>(null, targetImg.source) {
-                value = targetImg.source.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
-            }
-            ImageStudioDialog(
-                title = "Image Studio",
-                sizeBytes = targetImg.sizeBytes,
-                onClose = { imgStudio = null },
-                previewBitmap = previewBmp,
-                initialOpacity = targetImg.opacity,
-                onApplyOpacity = { newOpacity ->
-                    images = images.map { m -> if (m.id == targetImg.id) m.copy(opacity = newOpacity) else m }
-                }
-            ) {}
-        } ?: run { imgStudio = null }
-    }
-    if (bgStudio) {
-        val bgStudioKeyLifecycle = LocalBitmapKeyLifecycle.current
-        DisposableEffect(bgSrc) {
-            val k = bgSrc?.takeIf { it.isNotBlank() }
-            if (k != null) bgStudioKeyLifecycle?.acquire(k)
-            onDispose { if (k != null) bgStudioKeyLifecycle?.release(k) }
-        }
-        val bgPreviewBmp by produceState<ImageBitmap?>(null, bgSrc) {
-            value = bgSrc?.takeIf { it.isNotBlank() }?.let { vm.loadDecryptedImageBitmap(it) }
-        }
-        ImageStudioDialog(
-            title = "Background Image Studio",
-            sizeBytes = 0,
-            onClose = { bgStudio = false },
-            previewBitmap = bgPreviewBmp,
-            initialOpacity = bgOpacity,
-            onApplyOpacity = { newOpacity -> bgOpacity = newOpacity }
-        ) {}
-    }
-    audStudio?.let { AudioStudioDialog(it.name, { audStudio = null }) { } }
     spoilerUnlockPrompt?.let { sp ->
         var passcodeInput by remember(sp.id) { mutableStateOf("") }
         var passcodeError by remember(sp.id) { mutableStateOf<String?>(null) }
@@ -1254,8 +433,6 @@ private fun WorkspaceWritingLayer(
     viewportMetrics: CanvasViewportMetrics,
     editorFocusRequester: FocusRequester,
     minHeightDp: Dp,
-    hasSelectedMedia: Boolean,
-    onClearMediaSelection: () -> Unit,
     onSpoilerPrompt: (SpanStyle.Spoiler) -> Unit,
     onStatus: (String, BannerKind) -> Unit,
     onSaveSilent: () -> Unit,
@@ -1508,16 +685,6 @@ private fun WorkspaceWritingLayer(
                 .heightIn(min = minHeightDp)
                 .focusRequester(editorFocusRequester)
                 .onFocusChanged { isEditorFocused = it.isFocused }
-                .then(
-                    if (!reading && hasSelectedMedia) {
-                        Modifier.pointerInput(hasSelectedMedia) {
-                            awaitEachGesture {
-                                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                                onClearMediaSelection()
-                            }
-                        }
-                    } else Modifier
-                )
                 .then(
                     if (hasInteractiveSpans) {
                         Modifier.pointerInput(editorState, hooks) {
@@ -1796,826 +963,4 @@ internal suspend fun <T> importPfpForSession(
         onFailure()
     }
     return imported
-}
-
-@Composable
-private fun ControlBar(content: @Composable RowScope.() -> Unit) {
-    val w = wiki()
-    Column {
-        Row(Modifier.fillMaxWidth().background(w.surface).horizontalScroll(rememberScrollState()).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically, content = content)
-        HairlineDivider()
-    }
-}
-
-@Composable
-private fun Bar(label: String, icon: ImageVector?, on: Boolean = false, danger: Boolean = false, onClick: () -> Unit) {
-    val w = wiki()
-    val c = if (danger) w.danger else if (on) Color.White else w.text
-    Row(Modifier.height(30.dp).background(if (on) w.accent else w.bg).wikiBorder(if (on) w.accent else if (danger) w.danger else w.border).clickable(onClick = onClick).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (icon != null) Icon(icon, null, tint = c, modifier = Modifier.size(14.dp))
-        if (label.isNotEmpty()) { if (icon != null) Spacer(Modifier.width(4.dp)); Text(label, style = sansStyle(11.sp, c, FontWeight.SemiBold), maxLines = 1) }
-    }
-}
-
-@Composable
-private fun DraggableImage(
-    im: CanvasImage,
-    selected: Boolean,
-    editable: Boolean,
-    hScroll: ScrollState,
-    vScroll: ScrollState,
-    viewportMetrics: CanvasViewportMetrics,
-    syncVerticalScroll: Boolean = false,
-    loadImageBitmap: suspend (String) -> ImageBitmap?,
-    onSelect: () -> Unit,
-    onDragProgress: (Float, Float) -> Unit,
-    onMove: (Float, Float) -> Unit,
-) {
-    val w = wiki()
-    val density = LocalDensity.current
-    var liveX by remember(im.id) { mutableStateOf(im.x) }
-    var liveY by remember(im.id) { mutableStateOf(im.y) }
-    var isDragging by remember(im.id) { mutableStateOf(false) }
-    var fingerRootPos by remember(im.id) { mutableStateOf(Offset.Zero) }
-    var itemCoords by remember(im.id) { mutableStateOf<LayoutCoordinates?>(null) }
-
-    val currentW by rememberUpdatedState(im.width)
-    val currentH by rememberUpdatedState(im.height)
-    val currentOnSelect by rememberUpdatedState(onSelect)
-    val currentOnDragProgress by rememberUpdatedState(onDragProgress)
-    val currentOnMove by rememberUpdatedState(onMove)
-
-    LaunchedEffect(im.x, im.y) {
-        if (!isDragging) {
-            liveX = im.x
-            liveY = im.y
-        }
-    }
-
-    LaunchedEffect(isDragging) {
-        if (!isDragging) return@LaunchedEffect
-        val edgeZonePx = with(density) { 44.dp.toPx() }
-        val maxStepPx = with(density) { 12.dp.toPx() }
-        while (isDragging) {
-            val viewportWPx = viewportMetrics.widthPx.toFloat()
-            val viewportHPx = viewportMetrics.heightPx.toFloat()
-            val origin = viewportMetrics.rootOrigin
-            val relX = fingerRootPos.x - origin.x
-            val relY = fingerRootPos.y - origin.y
-            var panPxX = 0f
-            var panPxY = 0f
-            if (relX > viewportWPx - edgeZonePx) {
-                val ratio = ((relX - (viewportWPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relX < edgeZonePx && hScroll.value > 0) {
-                val ratio = ((edgeZonePx - relX) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (relY > viewportHPx - edgeZonePx) {
-                val ratio = ((relY - (viewportHPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relY < edgeZonePx && vScroll.value > 0) {
-                val ratio = ((edgeZonePx - relY) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (panPxX != 0f || panPxY != 0f) {
-                val nextX = (liveX + panPxX / density.density).coerceAtLeast(0f)
-                val nextY = (liveY + panPxY / density.density).coerceAtLeast(0f)
-                liveX = nextX
-                liveY = nextY
-                currentOnDragProgress(nextX + currentW, nextY + currentH)
-                if (panPxX != 0f) hScroll.scrollBy(panPxX)
-                if (panPxY != 0f) vScroll.scrollBy(panPxY)
-            }
-            delay(16L)
-        }
-    }
-
-    val imgKeyLifecycle = LocalBitmapKeyLifecycle.current
-    DisposableEffect(im.source) {
-        val k = im.source.takeIf { it.isNotBlank() }
-        if (k != null) imgKeyLifecycle?.acquire(k)
-        onDispose { if (k != null) imgKeyLifecycle?.release(k) }
-    }
-    val bitmap by produceState<ImageBitmap?>(null, im.source) {
-        value = im.source.takeIf { it.isNotBlank() }?.let { loadImageBitmap(it) }
-    }
-
-    Box(
-        Modifier
-            .offset {
-                val xPx = with(this) { liveX.dp.roundToPx() }
-                val yPx = with(this) { liveY.dp.roundToPx() } - if (syncVerticalScroll) vScroll.value else 0
-                IntOffset(xPx, yPx)
-            }
-            .size(im.width.dp, im.height.dp)
-            .rotate(im.rotation)
-            .onGloballyPositioned { itemCoords = it }
-            .background(if (bitmap != null) Color.Transparent else w.surface)
-            .wikiBorder(if (selected) w.accent else w.border, if (selected) 1.5.dp else 0.5.dp)
-            .then(
-                if (editable) {
-                    Modifier.pointerInput(im.id) {
-                        detectTapGestures(onTap = { currentOnSelect() })
-                    }
-                } else Modifier
-            )
-            .pointerInput(im.id, editable) {
-                if (editable) {
-                    var prevFingerRoot = Offset.Zero
-                    detectDragGestures(
-                        onDragStart = { startOffset ->
-                            val coords = itemCoords
-                            if (coords != null && coords.isAttached) {
-                                prevFingerRoot = coords.localToRoot(startOffset)
-                                fingerRootPos = prevFingerRoot
-                            }
-                            isDragging = true
-                            currentOnSelect()
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        },
-                        onDragEnd = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                        onDragCancel = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                    ) { change, _ ->
-                        if (change.isConsumed) return@detectDragGestures
-                        change.consume()
-                        val coords = itemCoords
-                        if (coords != null && coords.isAttached) {
-                            val curRoot = coords.localToRoot(change.position)
-                            val deltaRoot = curRoot - prevFingerRoot
-                            prevFingerRoot = curRoot
-                            fingerRootPos = curRoot
-                            liveX = (liveX + deltaRoot.x / density.density).coerceAtLeast(0f)
-                            liveY = (liveY + deltaRoot.y / density.density).coerceAtLeast(0f)
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        }
-                    }
-                }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        val loaded = bitmap
-        if (loaded != null) {
-            Image(
-                bitmap = loaded,
-                contentDescription = "Canvas image",
-                contentScale = ContentScale.FillBounds,
-                alpha = im.opacity,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Icon(Icons.Outlined.Image, contentDescription = "Image placeholder", tint = w.muted, modifier = Modifier.alpha(im.opacity))
-        }
-    }
-}
-
-/** Opaque RED audio card #b32424. Play button before slider. Draggable infinitely right/bottom. */
-@Composable
-private fun AudioCard(
-    a: CanvasAudio,
-    selected: Boolean,
-    editable: Boolean,
-    hScroll: ScrollState,
-    vScroll: ScrollState,
-    viewportMetrics: CanvasViewportMetrics,
-    syncVerticalScroll: Boolean = false,
-    openMediaDataSource: suspend (String) -> MediaDataSource?,
-    onStatus: (String) -> Unit,
-    onSelect: () -> Unit,
-    onDragProgress: (Float, Float) -> Unit,
-    onMove: (Float, Float) -> Unit,
-) {
-    val density = LocalDensity.current
-    val scope = rememberCoroutineScope()
-    var liveX by remember(a.id) { mutableStateOf(a.x) }
-    var liveY by remember(a.id) { mutableStateOf(a.y) }
-    var isDragging by remember(a.id) { mutableStateOf(false) }
-    var fingerRootPos by remember(a.id) { mutableStateOf(Offset.Zero) }
-    var itemCoords by remember(a.id) { mutableStateOf<LayoutCoordinates?>(null) }
-
-    val currentW by rememberUpdatedState(a.width)
-    val currentH by rememberUpdatedState(a.height)
-    val currentOnSelect by rememberUpdatedState(onSelect)
-    val currentOnDragProgress by rememberUpdatedState(onDragProgress)
-    val currentOnMove by rememberUpdatedState(onMove)
-
-    LaunchedEffect(a.x, a.y) {
-        if (!isDragging) {
-            liveX = a.x
-            liveY = a.y
-        }
-    }
-
-    LaunchedEffect(isDragging) {
-        if (!isDragging) return@LaunchedEffect
-        val edgeZonePx = with(density) { 44.dp.toPx() }
-        val maxStepPx = with(density) { 12.dp.toPx() }
-        while (isDragging) {
-            val viewportWPx = viewportMetrics.widthPx.toFloat()
-            val viewportHPx = viewportMetrics.heightPx.toFloat()
-            val origin = viewportMetrics.rootOrigin
-            val relX = fingerRootPos.x - origin.x
-            val relY = fingerRootPos.y - origin.y
-            var panPxX = 0f
-            var panPxY = 0f
-            if (relX > viewportWPx - edgeZonePx) {
-                val ratio = ((relX - (viewportWPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relX < edgeZonePx && hScroll.value > 0) {
-                val ratio = ((edgeZonePx - relX) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (relY > viewportHPx - edgeZonePx) {
-                val ratio = ((relY - (viewportHPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relY < edgeZonePx && vScroll.value > 0) {
-                val ratio = ((edgeZonePx - relY) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (panPxX != 0f || panPxY != 0f) {
-                val nextX = (liveX + panPxX / density.density).coerceAtLeast(0f)
-                val nextY = (liveY + panPxY / density.density).coerceAtLeast(0f)
-                liveX = nextX
-                liveY = nextY
-                currentOnDragProgress(nextX + currentW, nextY + currentH)
-                if (panPxX != 0f) hScroll.scrollBy(panPxX)
-                if (panPxY != 0f) vScroll.scrollBy(panPxY)
-            }
-            delay(16L)
-        }
-    }
-
-    var playing by remember(a.id) { mutableStateOf(false) }
-    var loadingAudio by remember(a.id) { mutableStateOf(false) }
-    var progress by remember(a.id) { mutableStateOf(0f) }
-    var durationMs by remember(a.id) { mutableStateOf((a.durationSec * 1000).coerceAtLeast(1000)) }
-    var mediaPlayer by remember(a.id) { mutableStateOf<MediaPlayer?>(null) }
-    var activeDataSource by remember(a.id) { mutableStateOf<MediaDataSource?>(null) }
-    var disposed by remember(a.id) { mutableStateOf(false) }
-
-    DisposableEffect(a.id) {
-        disposed = false
-        onDispose {
-            disposed = true
-            runCatching { mediaPlayer?.stop() }
-            runCatching { mediaPlayer?.release() }
-            mediaPlayer = null
-            runCatching { activeDataSource?.close() }
-            activeDataSource = null
-        }
-    }
-
-    LaunchedEffect(playing, a.playbackRate, mediaPlayer) {
-        val mp = mediaPlayer ?: return@LaunchedEffect
-        if (playing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            runCatching {
-                mp.playbackParams = mp.playbackParams.setSpeed(a.playbackRate)
-            }
-        }
-        while (playing) {
-            val cur = runCatching { mp.currentPosition }.getOrDefault(0)
-            val total = durationMs.coerceAtLeast(1)
-            progress = (cur.toFloat() / total.toFloat()).coerceIn(0f, 1f)
-            delay(120L)
-        }
-    }
-
-    fun togglePlay() {
-        val existing = mediaPlayer
-        if (existing != null) {
-            if (playing) {
-                runCatching { existing.pause() }
-                playing = false
-            } else {
-                runCatching {
-                    existing.start()
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        existing.playbackParams = existing.playbackParams.setSpeed(a.playbackRate)
-                    }
-                    playing = true
-                }.onFailure {
-                    playing = false
-                    onStatus("Unable to play audio.")
-                }
-            }
-            return
-        }
-        if (loadingAudio) return
-        loadingAudio = true
-        scope.launch {
-            val ds = a.audioUri.takeIf { it.isNotBlank() }?.let { openMediaDataSource(it) }
-            if (ds == null) {
-                loadingAudio = false
-                onStatus("Audio data unavailable.")
-                return@launch
-            }
-            if (disposed) {
-                loadingAudio = false
-                runCatching { ds.close() }
-                return@launch
-            }
-            val preparedPlayer = withContext(Dispatchers.IO) {
-                runCatching {
-                    MediaPlayer().apply {
-                        setDataSource(ds)
-                        prepare()
-                    }
-                }.getOrNull()
-            }
-            loadingAudio = false
-            if (disposed) {
-                runCatching { preparedPlayer?.release() }
-                runCatching { ds.close() }
-                return@launch
-            }
-            if (preparedPlayer == null) {
-                runCatching { ds.close() }
-                onStatus("Unsupported audio format.")
-                return@launch
-            }
-            activeDataSource = ds
-            preparedPlayer.setOnCompletionListener {
-                playing = false
-                progress = 0f
-                runCatching { it.seekTo(0) }
-            }
-            durationMs = preparedPlayer.duration.takeIf { it > 0 } ?: (a.durationSec * 1000).coerceAtLeast(1000)
-            mediaPlayer = preparedPlayer
-            runCatching {
-                preparedPlayer.start()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    preparedPlayer.playbackParams = preparedPlayer.playbackParams.setSpeed(a.playbackRate)
-                }
-                playing = true
-            }.onFailure {
-                playing = false
-                onStatus("Unable to play audio.")
-            }
-        }
-    }
-
-    Row(
-        Modifier
-            .offset {
-                val xPx = with(this) { liveX.dp.roundToPx() }
-                val yPx = with(this) { liveY.dp.roundToPx() } - if (syncVerticalScroll) vScroll.value else 0
-                IntOffset(xPx, yPx)
-            }
-            .size(a.width.dp, a.height.dp)
-            .rotate(a.rotation)
-            .onGloballyPositioned { itemCoords = it }
-            .background(Color(0xFFB32424))
-            .wikiBorder(if (selected) wiki().accent else Color(0xFF7A1616), if (selected) 1.5.dp else 0.5.dp)
-            .then(
-                if (editable) {
-                    Modifier.pointerInput(a.id) {
-                        detectTapGestures(
-                            onTap = { currentOnSelect() },
-                            onDoubleTap = { currentOnSelect() }
-                        )
-                    }
-                } else Modifier
-            )
-            .pointerInput(a.id, editable) {
-                if (editable) {
-                    var prevFingerRoot = Offset.Zero
-                    detectDragGestures(
-                        onDragStart = { startOffset ->
-                            val coords = itemCoords
-                            if (coords != null && coords.isAttached) {
-                                prevFingerRoot = coords.localToRoot(startOffset)
-                                fingerRootPos = prevFingerRoot
-                            }
-                            isDragging = true
-                            currentOnSelect()
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        },
-                        onDragEnd = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                        onDragCancel = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                    ) { change, _ ->
-                        if (change.isConsumed) return@detectDragGestures
-                        change.consume()
-                        val coords = itemCoords
-                        if (coords != null && coords.isAttached) {
-                            val curRoot = coords.localToRoot(change.position)
-                            val deltaRoot = curRoot - prevFingerRoot
-                            prevFingerRoot = curRoot
-                            fingerRootPos = curRoot
-                            liveX = (liveX + deltaRoot.x / density.density).coerceAtLeast(0f)
-                            liveY = (liveY + deltaRoot.y / density.density).coerceAtLeast(0f)
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        }
-                    }
-                }
-            }
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .size(32.dp)
-                .background(Color(0xFF8E1B1B))
-                .wikiBorder(Color.White.copy(alpha = 0.4f))
-                .clickable { togglePlay() },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                contentDescription = if (playing) "Pause audio" else "Play audio",
-                tint = Color.White,
-                modifier = Modifier.size(18.dp)
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f)) {
-            Text(a.name, style = sansStyle(10.sp, Color.White, FontWeight.Medium), maxLines = 1)
-            androidx.compose.material3.Slider(
-                value = progress,
-                onValueChange = { fraction ->
-                    progress = fraction
-                    val targetMs = (fraction * durationMs).toInt()
-                    runCatching { mediaPlayer?.seekTo(targetMs) }
-                },
-                modifier = Modifier.height(20.dp),
-                colors = androidx.compose.material3.SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = Color.White,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                )
-            )
-        }
-        Text("${(durationMs / 1000).coerceAtLeast(1)}s", style = monoStyle(10.sp, Color.White))
-    }
-}
-
-@Composable
-private fun VideoCard(
-    v: CanvasVideo,
-    selected: Boolean,
-    editable: Boolean,
-    hScroll: ScrollState,
-    vScroll: ScrollState,
-    viewportMetrics: CanvasViewportMetrics,
-    syncVerticalScroll: Boolean = false,
-    loadThumbnail: suspend (String) -> ImageBitmap?,
-    openMediaDataSource: suspend (String) -> MediaDataSource?,
-    onStatus: (String) -> Unit,
-    onSelect: () -> Unit,
-    onDragProgress: (Float, Float) -> Unit,
-    onMove: (Float, Float) -> Unit,
-) {
-    val w = wiki()
-    val density = LocalDensity.current
-    val scope = rememberCoroutineScope()
-    var liveX by remember(v.id) { mutableStateOf(v.x) }
-    var liveY by remember(v.id) { mutableStateOf(v.y) }
-    var isDragging by remember(v.id) { mutableStateOf(false) }
-    var fingerRootPos by remember(v.id) { mutableStateOf(Offset.Zero) }
-    var itemCoords by remember(v.id) { mutableStateOf<LayoutCoordinates?>(null) }
-
-    val currentW by rememberUpdatedState(v.width)
-    val currentH by rememberUpdatedState(v.height)
-    val currentOnSelect by rememberUpdatedState(onSelect)
-    val currentOnDragProgress by rememberUpdatedState(onDragProgress)
-    val currentOnMove by rememberUpdatedState(onMove)
-
-    LaunchedEffect(v.x, v.y) {
-        if (!isDragging) {
-            liveX = v.x
-            liveY = v.y
-        }
-    }
-
-    LaunchedEffect(isDragging) {
-        if (!isDragging) return@LaunchedEffect
-        val edgeZonePx = with(density) { 44.dp.toPx() }
-        val maxStepPx = with(density) { 12.dp.toPx() }
-        while (isDragging) {
-            val viewportWPx = viewportMetrics.widthPx.toFloat()
-            val viewportHPx = viewportMetrics.heightPx.toFloat()
-            val origin = viewportMetrics.rootOrigin
-            val relX = fingerRootPos.x - origin.x
-            val relY = fingerRootPos.y - origin.y
-            var panPxX = 0f
-            var panPxY = 0f
-            if (relX > viewportWPx - edgeZonePx) {
-                val ratio = ((relX - (viewportWPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relX < edgeZonePx && hScroll.value > 0) {
-                val ratio = ((edgeZonePx - relX) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxX = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (relY > viewportHPx - edgeZonePx) {
-                val ratio = ((relY - (viewportHPx - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = maxStepPx * (0.35f + ratio * 0.65f)
-            } else if (relY < edgeZonePx && vScroll.value > 0) {
-                val ratio = ((edgeZonePx - relY) / edgeZonePx).coerceIn(0f, 1.5f)
-                panPxY = -maxStepPx * (0.35f + ratio * 0.65f)
-            }
-            if (panPxX != 0f || panPxY != 0f) {
-                val nextX = (liveX + panPxX / density.density).coerceAtLeast(0f)
-                val nextY = (liveY + panPxY / density.density).coerceAtLeast(0f)
-                liveX = nextX
-                liveY = nextY
-                currentOnDragProgress(nextX + currentW, nextY + currentH)
-                if (panPxX != 0f) hScroll.scrollBy(panPxX)
-                if (panPxY != 0f) vScroll.scrollBy(panPxY)
-            }
-            delay(16L)
-        }
-    }
-
-    val vidKeyLifecycle = LocalBitmapKeyLifecycle.current
-    DisposableEffect(v.source) {
-        val k = v.source.takeIf { it.isNotBlank() }?.let { "vthumb_$it" }
-        if (k != null) vidKeyLifecycle?.acquire(k)
-        onDispose { if (k != null) vidKeyLifecycle?.release(k) }
-    }
-    val thumbnail by produceState<ImageBitmap?>(null, v.source) {
-        value = v.source.takeIf { it.isNotBlank() }?.let { loadThumbnail(it) }
-    }
-
-    var playing by remember(v.id) { mutableStateOf(false) }
-    var hasRenderedFrame by remember(v.id) { mutableStateOf(false) }
-    var loadingVideo by remember(v.id) { mutableStateOf(false) }
-    var muted by remember(v.id) { mutableStateOf(false) }
-    var progress by remember(v.id) { mutableStateOf(0f) }
-    var durationMs by remember(v.id) { mutableStateOf((v.durationSec * 1000).coerceAtLeast(1000)) }
-    var mediaPlayer by remember(v.id) { mutableStateOf<MediaPlayer?>(null) }
-    var activeDataSource by remember(v.id) { mutableStateOf<MediaDataSource?>(null) }
-    var videoSurface by remember(v.id) { mutableStateOf<Surface?>(null) }
-
-    DisposableEffect(v.id) {
-        onDispose {
-            runCatching { mediaPlayer?.release() }
-            mediaPlayer = null
-            runCatching { activeDataSource?.close() }
-            activeDataSource = null
-            runCatching { videoSurface?.release() }
-            videoSurface = null
-        }
-    }
-
-    LaunchedEffect(playing, mediaPlayer) {
-        val mp = mediaPlayer ?: return@LaunchedEffect
-        while (playing) {
-            val cur = runCatching { mp.currentPosition }.getOrDefault(0)
-            val total = durationMs.coerceAtLeast(1)
-            progress = (cur.toFloat() / total.toFloat()).coerceIn(0f, 1f)
-            delay(120L)
-        }
-    }
-
-    fun togglePlay() {
-        if (editable) currentOnSelect()
-        val existing = mediaPlayer
-        if (existing != null) {
-            if (playing) {
-                runCatching { existing.pause() }
-                playing = false
-            } else {
-                runCatching {
-                    videoSurface?.let { existing.setSurface(it) }
-                    val vol = if (muted) 0f else 1f
-                    existing.setVolume(vol, vol)
-                    existing.start()
-                    hasRenderedFrame = true
-                    playing = true
-                }.onFailure {
-                    playing = false
-                    onStatus("Unable to play video.")
-                }
-            }
-            return
-        }
-        if (loadingVideo) return
-        loadingVideo = true
-        scope.launch {
-            val ds = v.source.takeIf { it.isNotBlank() }?.let { openMediaDataSource(it) }
-            if (ds == null) {
-                loadingVideo = false
-                onStatus("Video data unavailable.")
-                return@launch
-            }
-            val preparedPlayer = withContext(Dispatchers.IO) {
-                runCatching {
-                    MediaPlayer().apply {
-                        setDataSource(ds)
-                        prepare()
-                    }
-                }.getOrNull()
-            }
-            loadingVideo = false
-            if (preparedPlayer == null) {
-                runCatching { ds.close() }
-                onStatus("Unsupported video format.")
-                return@launch
-            }
-            activeDataSource = ds
-            preparedPlayer.setOnCompletionListener {
-                playing = false
-                progress = 0f
-                runCatching { it.seekTo(0) }
-            }
-            durationMs = preparedPlayer.duration.takeIf { it > 0 } ?: (v.durationSec * 1000).coerceAtLeast(1000)
-            val vol = if (muted) 0f else 1f
-            preparedPlayer.setVolume(vol, vol)
-            videoSurface?.let { preparedPlayer.setSurface(it) }
-            mediaPlayer = preparedPlayer
-            runCatching {
-                preparedPlayer.start()
-                hasRenderedFrame = true
-                playing = true
-            }.onFailure {
-                playing = false
-                onStatus("Unable to play video.")
-            }
-        }
-    }
-
-    Box(
-        Modifier
-            .offset {
-                val xPx = with(this) { liveX.dp.roundToPx() }
-                val yPx = with(this) { liveY.dp.roundToPx() } - if (syncVerticalScroll) vScroll.value else 0
-                IntOffset(xPx, yPx)
-            }
-            .size(v.width.dp, v.height.dp)
-            .rotate(v.rotation)
-            .clipToBounds()
-            .onGloballyPositioned { itemCoords = it }
-            .background(Color(0xFF14161A))
-            .wikiBorder(if (selected) w.accent else w.border, if (selected) 1.5.dp else 0.5.dp)
-            .pointerInput(v.id, editable) {
-                detectTapGestures(
-                    onTap = { if (editable) currentOnSelect() else togglePlay() },
-                    onDoubleTap = { if (editable) currentOnSelect() }
-                )
-            }
-            .pointerInput(v.id, editable) {
-                if (editable) {
-                    var prevFingerRoot = Offset.Zero
-                    detectDragGestures(
-                        onDragStart = { startOffset ->
-                            val coords = itemCoords
-                            if (coords != null && coords.isAttached) {
-                                prevFingerRoot = coords.localToRoot(startOffset)
-                                fingerRootPos = prevFingerRoot
-                            }
-                            isDragging = true
-                            currentOnSelect()
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        },
-                        onDragEnd = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                        onDragCancel = {
-                            isDragging = false
-                            currentOnMove(liveX, liveY)
-                        },
-                    ) { change, _ ->
-                        if (change.isConsumed) return@detectDragGestures
-                        change.consume()
-                        val coords = itemCoords
-                        if (coords != null && coords.isAttached) {
-                            val curRoot = coords.localToRoot(change.position)
-                            val deltaRoot = curRoot - prevFingerRoot
-                            prevFingerRoot = curRoot
-                            fingerRootPos = curRoot
-                            liveX = (liveX + deltaRoot.x / density.density).coerceAtLeast(0f)
-                            liveY = (liveY + deltaRoot.y / density.density).coerceAtLeast(0f)
-                            currentOnDragProgress(liveX + currentW, liveY + currentH)
-                        }
-                    }
-                }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        AndroidView(
-            factory = { ctx ->
-                TextureView(ctx).apply {
-                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-                            val newSurface = Surface(surface)
-                            videoSurface = newSurface
-                            runCatching { mediaPlayer?.setSurface(newSurface) }
-                        }
-
-                        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-
-                        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                            runCatching { mediaPlayer?.setSurface(null) }
-                            runCatching { videoSurface?.release() }
-                            videoSurface = null
-                            return true
-                        }
-
-                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-
-        if (!hasRenderedFrame) {
-            val thumb = thumbnail
-            if (thumb != null) {
-                Image(
-                    bitmap = thumb,
-                    contentDescription = v.name,
-                    contentScale = ContentScale.FillBounds,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Icon(Icons.Outlined.VideoFile, contentDescription = v.name, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(36.dp))
-            }
-        }
-
-        if (!playing) {
-            Box(
-                Modifier
-                    .size(48.dp)
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .wikiBorder(Color.White.copy(alpha = 0.5f))
-                    .clickable { togglePlay() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    Icons.Outlined.PlayArrow,
-                    contentDescription = "Play video",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp)
-                )
-            }
-        }
-
-        Row(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.62f))
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                Modifier
-                    .size(26.dp)
-                    .clickable { togglePlay() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                    contentDescription = if (playing) "Pause video" else "Play video",
-                    tint = Color.White,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-            androidx.compose.material3.Slider(
-                value = progress,
-                onValueChange = { fraction ->
-                    progress = fraction
-                    val targetMs = (fraction * durationMs).toInt()
-                    runCatching { mediaPlayer?.seekTo(targetMs) }
-                },
-                modifier = Modifier.weight(1f).height(20.dp),
-                colors = androidx.compose.material3.SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = Color.White,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.35f)
-                )
-            )
-            Text("${(durationMs / 1000).coerceAtLeast(1)}s", style = monoStyle(9.sp, Color.White))
-            Spacer(Modifier.width(4.dp))
-            Box(
-                Modifier
-                    .size(26.dp)
-                    .clickable {
-                        muted = !muted
-                        val vol = if (muted) 0f else 1f
-                        runCatching { mediaPlayer?.setVolume(vol, vol) }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    if (muted) Icons.Outlined.VolumeOff else Icons.Outlined.VolumeUp,
-                    contentDescription = if (muted) "Unmute video" else "Mute video",
-                    tint = Color.White,
-                    modifier = Modifier.size(15.dp)
-                )
-            }
-        }
-    }
 }
