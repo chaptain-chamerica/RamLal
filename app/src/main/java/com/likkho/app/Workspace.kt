@@ -1,12 +1,10 @@
 package com.likkho.app
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -24,34 +22,29 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalFontFamilyResolver
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextIndent
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -241,53 +234,31 @@ fun WorkspaceScreen(vm: AppViewModel) {
             }
         }
 
-       // ---------- canvas (text-only) ----------
-        val viewportHeightPxState = remember { mutableIntStateOf(0) }
-        val editorFocusRequester = remember { FocusRequester() }
-        val keyboardController = LocalSoftwareKeyboardController.current
-        val emptyCanvasInteractionSource = remember { MutableInteractionSource() }
-
-        Box(
+        // ---------- canvas (text-only) ----------
+        BoxWithConstraints(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .background(w.bg)
                 .clipToBounds()
-                .onSizeChanged { size ->
-                    if (viewportHeightPxState.intValue != size.height) {
-                        viewportHeightPxState.intValue = size.height
-                    }
-                }
-                .clickable(
-                    enabled = !reading,
-                    interactionSource = emptyCanvasInteractionSource,
-                    indication = null
-                ) {
-                    val current = editorState.textFieldValue
-                    val end = current.text.length
-                    if (current.selection.start != end || current.selection.end != end) {
-                        editorState.onTextFieldValueChange(
-                            current.copy(selection = TextRange(end), composition = null)
-                        )
-                    }
-                    editorFocusRequester.requestFocus()
-                    keyboardController?.show()
-                }
-                .verticalScroll(vScroll)
-                .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 32.dp)
         ) {
-            WorkspaceWritingLayer(
-                editorState = editorState,
-                reading = reading,
-                customFontsCount = vm.customFonts.size,
-                hooks = hooks,
-                vScroll = vScroll,
-                viewportHeightPxState = viewportHeightPxState,
-                editorFocusRequester = editorFocusRequester,
-                onSpoilerPrompt = { spoilerUnlockPrompt = it },
-                onStatus = { msg, kind -> vm.showStatus(msg, kind) },
-                onSaveSilent = { save(showFeedback = false) },
-            )
+            val canvasViewportHeight = maxHeight
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(vScroll)
+            ) {
+                WorkspaceWritingLayer(
+                    editorState = editorState,
+                    reading = reading,
+                    customFontsCount = vm.customFonts.size,
+                    hooks = hooks,
+                    minCanvasHeight = canvasViewportHeight,
+                    onSpoilerPrompt = { spoilerUnlockPrompt = it },
+                    onStatus = { msg, kind -> vm.showStatus(msg, kind) },
+                    onSaveSilent = { save(showFeedback = false) },
+                )
+            }
         }
 
         // ---------- toolbar ----------
@@ -391,9 +362,7 @@ private fun WorkspaceWritingLayer(
     reading: Boolean,
     customFontsCount: Int,
     hooks: FeatureHooks,
-    vScroll: ScrollState,
-    viewportHeightPxState: IntState,
-    editorFocusRequester: FocusRequester,
+    minCanvasHeight: Dp,
     onSpoilerPrompt: (SpanStyle.Spoiler) -> Unit,
     onStatus: (String, BannerKind) -> Unit,
     onSaveSilent: () -> Unit,
@@ -563,38 +532,6 @@ private fun WorkspaceWritingLayer(
     }
 
     var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
-    var isEditorFocused by remember { mutableStateOf(false) }
-
-    // Keep the cursor visible above the rising keyboard & toolbar when IME shrinks the viewport
-    val imeInsets = WindowInsets.ime
-    LaunchedEffect(isEditorFocused, reading) {
-        if (!isEditorFocused || reading) return@LaunchedEffect
-        var prevVpH = viewportHeightPxState.intValue
-        snapshotFlow { viewportHeightPxState.intValue }
-            .collect { vpH ->
-                val shrank = prevVpH > 0 && vpH in 1 until prevVpH
-                prevVpH = vpH
-                if (!shrank || vScroll.isScrollInProgress) return@collect
-                if (imeInsets.getBottom(density) <= 0) return@collect
-
-                val layout = textLayoutResult ?: return@collect
-                if (layout.lineCount <= 0 || layout.layoutInput.text.text != editorState.text) {
-                    return@collect
-                }
-                val cursorOffset = editorState.selection.start.coerceIn(0, layout.layoutInput.text.text.length)
-                val cursorRect = layout.getCursorRect(cursorOffset)
-                val padPx = with(density) { 16.dp.toPx() }
-                val marginPx = with(density) { 16.dp.toPx() }
-                val cursorBottomInCanvas = padPx + cursorRect.bottom + marginPx
-                val visibleBottom = vScroll.value.toFloat() + vpH.toFloat()
-                val maxRemaining = (vScroll.maxValue - vScroll.value).toFloat().coerceAtLeast(0f)
-                val overflow = (cursorBottomInCanvas - visibleBottom).coerceAtMost(maxRemaining)
-                if (overflow > 0.5f) {
-                    vScroll.scrollBy(overflow)
-                }
-            }
-    }
-
     val reusableCheckPath = remember { Path() }
 
     val currentLayout = textLayoutResult
@@ -694,9 +631,8 @@ private fun WorkspaceWritingLayer(
             onTextLayout = { textLayoutResult = it },
             modifier = Modifier
                 .fillMaxWidth()
-                .defaultMinSize(minHeight = 48.dp)
-                .focusRequester(editorFocusRequester)
-                .onFocusChanged { isEditorFocused = it.isFocused }
+                .heightIn(min = minCanvasHeight)
+                .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 32.dp)
                 .then(
                     if (hasInteractiveSpans) {
                         Modifier.pointerInput(editorState, hooks) {
