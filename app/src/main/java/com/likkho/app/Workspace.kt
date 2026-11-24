@@ -29,16 +29,21 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -50,29 +55,22 @@ import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextIndent
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.likkho.app.editor.BlockDecorationLayoutCalculator
 import com.likkho.app.editor.HeadingTypographySpec
+import com.likkho.app.editor.HighlightLayoutCalculator
 import com.likkho.app.editor.RichTextEditorState
 import com.likkho.app.editor.RichTextVisualTransformation
-import com.likkho.app.editor.drawBlockDecorations
-import com.likkho.app.editor.drawTextHighlights
-import com.likkho.app.editor.drawTextSpoilers
+import com.likkho.app.editor.drawCachedBlockDecorations
+import com.likkho.app.editor.drawCachedHighlightRects
 import com.likkho.app.editor.model.SpanStyle
 import com.likkho.app.editor.toComposeTextAlign
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
-
-private class CanvasViewportMetrics {
-    var widthPx: Int by mutableIntStateOf(0)
-    var heightPx: Int by mutableIntStateOf(0)
-    var unshrunkHeightPx: Int by mutableIntStateOf(0)
-}
 
 /**
  * WORKSPACE (WritingWorkspace.tsx). Opens in READING mode for existing diary (Edit button), EDIT mode for new.
@@ -82,6 +80,8 @@ private class CanvasViewportMetrics {
 @Composable
 fun WorkspaceScreen(vm: AppViewModel) {
     val w = wiki(); val hooks = vm.hooks; val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val textToolbar = LocalTextToolbar.current
     val initial = vm.editingLog
     var reading by remember { mutableStateOf(initial != null) }
     var heading by remember { mutableStateOf(initial?.heading.orEmpty()) }
@@ -182,6 +182,8 @@ fun WorkspaceScreen(vm: AppViewModel) {
     }
 
     fun exitWorkspace() {
+        textToolbar.hide()
+        focusManager.clearFocus(force = true)
         cleanupUnsavedSessionMedia()
         vm.navigateTo(Route.HOME)
     }
@@ -244,49 +246,36 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
 
         // ---------- canvas (text-only) ----------
-        val viewportMetrics = remember { CanvasViewportMetrics() }
+        val viewportHeightPxState = remember { mutableIntStateOf(0) }
+        val unshrunkHeightPxState = remember { mutableIntStateOf(0) }
+        val lastWidthPxState = remember { mutableIntStateOf(0) }
         val editorFocusRequester = remember { FocusRequester() }
         val keyboardController = LocalSoftwareKeyboardController.current
         LaunchedEffect(reading) {
-            if (viewportMetrics.heightPx > 0) {
-                viewportMetrics.unshrunkHeightPx = viewportMetrics.heightPx
+            if (viewportHeightPxState.intValue > 0) {
+                unshrunkHeightPxState.intValue = viewportHeightPxState.intValue
             }
         }
-        val density = LocalDensity.current
 
-        BoxWithConstraints(
+        Box(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .background(w.bg)
                 .clipToBounds()
                 .onSizeChanged { size ->
-                    val widthChanged = viewportMetrics.widthPx != size.width
+                    val widthChanged = lastWidthPxState.intValue != size.width
                     if (widthChanged) {
-                        viewportMetrics.widthPx = size.width
-                        viewportMetrics.unshrunkHeightPx = size.height
-                    } else if (viewportMetrics.unshrunkHeightPx == 0 || size.height > viewportMetrics.unshrunkHeightPx) {
-                        viewportMetrics.unshrunkHeightPx = size.height
+                        lastWidthPxState.intValue = size.width
+                        unshrunkHeightPxState.intValue = size.height
+                    } else if (unshrunkHeightPxState.intValue == 0 || size.height > unshrunkHeightPxState.intValue) {
+                        unshrunkHeightPxState.intValue = size.height
                     }
-                    if (viewportMetrics.heightPx != size.height) {
-                        viewportMetrics.heightPx = size.height
+                    if (viewportHeightPxState.intValue != size.height) {
+                        viewportHeightPxState.intValue = size.height
                     }
                 }
         ) {
-            val boundedHeightPx = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
-            val effectiveUnshrunkHeightPx = maxOf(viewportMetrics.unshrunkHeightPx, boundedHeightPx)
-            val stableMinHeightDp = remember(effectiveUnshrunkHeightPx, density) {
-                if (effectiveUnshrunkHeightPx > 0) {
-                    with(density) {
-                        (effectiveUnshrunkHeightPx - 32.dp.roundToPx())
-                            .coerceAtLeast(240.dp.roundToPx())
-                            .toDp()
-                    }
-                } else {
-                    240.dp
-                }
-            }
-
             Box(
                 Modifier
                     .fillMaxSize()
@@ -295,6 +284,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 Column(
                     Modifier
                         .fillMaxWidth()
+                        .graphicsLayer()
                         .pointerInput(reading) {
                             if (!reading) {
                                 detectTapGestures {
@@ -315,9 +305,9 @@ fun WorkspaceScreen(vm: AppViewModel) {
                             customFontsCount = vm.customFonts.size,
                             hooks = hooks,
                             vScroll = vScroll,
-                            viewportMetrics = viewportMetrics,
+                            viewportHeightPxState = viewportHeightPxState,
+                            unshrunkHeightPxState = unshrunkHeightPxState,
                             editorFocusRequester = editorFocusRequester,
-                            minHeightDp = stableMinHeightDp,
                             onSpoilerPrompt = { spoilerUnlockPrompt = it },
                             onStatus = { msg, kind -> vm.showStatus(msg, kind) },
                             onSaveSilent = { save(showFeedback = false) },
@@ -430,9 +420,9 @@ private fun WorkspaceWritingLayer(
     customFontsCount: Int,
     hooks: FeatureHooks,
     vScroll: ScrollState,
-    viewportMetrics: CanvasViewportMetrics,
+    viewportHeightPxState: IntState,
+    unshrunkHeightPxState: IntState,
     editorFocusRequester: FocusRequester,
-    minHeightDp: Dp,
     onSpoilerPrompt: (SpanStyle.Spoiler) -> Unit,
     onStatus: (String, BannerKind) -> Unit,
     onSaveSilent: () -> Unit,
@@ -627,13 +617,16 @@ private fun WorkspaceWritingLayer(
     LaunchedEffect(isEditorFocused, reading) {
         if (!isEditorFocused || reading) return@LaunchedEffect
         var prevImeBottom = imeInsets.getBottom(density)
-        var prevVpH = viewportMetrics.heightPx
-        snapshotFlow { imeInsets.getBottom(density) to viewportMetrics.heightPx }
+        var prevVpH = viewportHeightPxState.intValue
+        var needsInitialImeReveal = prevImeBottom > 0
+        snapshotFlow { imeInsets.getBottom(density) to viewportHeightPxState.intValue }
             .collect { (imeBottom, vpH) ->
                 val imeGrowing = imeBottom > prevImeBottom || (imeBottom > 0 && vpH < prevVpH)
+                val shouldReveal = imeGrowing || (needsInitialImeReveal && imeBottom > 0)
+                needsInitialImeReveal = false
                 prevImeBottom = imeBottom
                 prevVpH = vpH
-                if (imeGrowing && vpH > 0) {
+                if (shouldReveal && vpH > 0) {
                     val layout = textLayoutResult ?: return@collect
                     if (layout.lineCount <= 0 || layout.layoutInput.text.text != editorState.text) {
                         return@collect
@@ -650,6 +643,77 @@ private fun WorkspaceWritingLayer(
                     }
                 }
             }
+    }
+
+    val fallbackMinHeightPx = remember(density) { with(density) { 240.dp.roundToPx() } }
+    val verticalPadPx = remember(density) { with(density) { 32.dp.roundToPx() } }
+    val reusableCheckPath = remember { Path() }
+
+    val currentLayout = textLayoutResult
+    val validLayout = if (currentLayout != null &&
+        currentLayout.lineCount > 0 &&
+        currentLayout.layoutInput.text.text == editorState.text
+    ) {
+        currentLayout
+    } else {
+        null
+    }
+    val spansSnapshot = editorState.spans
+    val cachedBlockDecorations = remember(validLayout, spansSnapshot, density.density) {
+        if (validLayout == null) {
+            null
+        } else {
+            BlockDecorationLayoutCalculator.computeStaticDecorations(
+                layoutResult = validLayout,
+                spans = spansSnapshot,
+                densityScale = density.density
+            )
+        }
+    }
+    val activeHeadingLine = if (editorState.activeHeadingLevel != null && validLayout != null) {
+        val safeCursor = editorState.selection.start.coerceIn(0, validLayout.layoutInput.text.text.length)
+        validLayout.getLineForOffset(safeCursor).coerceIn(0, validLayout.lineCount - 1)
+    } else {
+        -1
+    }
+    val activeHeadingDivider = remember(validLayout, cachedBlockDecorations, activeHeadingLine) {
+        if (validLayout == null || cachedBlockDecorations == null || activeHeadingLine < 0) {
+            null
+        } else {
+            BlockDecorationLayoutCalculator.computeActiveHeadingDivider(
+                layoutResult = validLayout,
+                cursorLine = activeHeadingLine,
+                staticDividers = cachedBlockDecorations.staticDividers
+            )
+        }
+    }
+    val cachedHighlights = remember(validLayout, spansSnapshot, fontMetrics, segmentLineMetrics) {
+        if (validLayout == null || spansSnapshot.isEmpty()) {
+            emptyList()
+        } else {
+            HighlightLayoutCalculator.computeCachedHighlights(
+                layoutResult = validLayout,
+                spans = spansSnapshot,
+                ascentPx = fontMetrics.ascent,
+                descentPx = fontMetrics.descent,
+                lineMetrics = segmentLineMetrics
+            )
+        }
+    }
+    val unlockedSpoilers = editorState.unlockedSpoilerIds
+    val cachedSpoilers = remember(validLayout, spansSnapshot, unlockedSpoilers, fontMetrics, segmentLineMetrics) {
+        if (validLayout == null || spansSnapshot.isEmpty()) {
+            emptyList()
+        } else {
+            HighlightLayoutCalculator.computeCachedSpoilers(
+                layoutResult = validLayout,
+                spans = spansSnapshot,
+                unlockedSpoilerIds = unlockedSpoilers,
+                ascentPx = fontMetrics.ascent,
+                descentPx = fontMetrics.descent,
+                lineMetrics = segmentLineMetrics
+            )
+        }
     }
 
     CompositionLocalProvider(LocalClipboardManager provides spoilerClipboardManager) {
@@ -682,7 +746,25 @@ private fun WorkspaceWritingLayer(
             onTextLayout = { textLayoutResult = it },
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = minHeightDp)
+                .layout { measurable, constraints ->
+                    val unshrunk = unshrunkHeightPxState.intValue
+                    val targetMin = if (unshrunk > 0) {
+                        (unshrunk - verticalPadPx).coerceAtLeast(fallbackMinHeightPx)
+                    } else {
+                        fallbackMinHeightPx
+                    }
+                    val boundedMin = if (constraints.hasBoundedHeight) {
+                        targetMin.coerceAtMost(constraints.maxHeight)
+                    } else {
+                        targetMin
+                    }
+                    val placeable = measurable.measure(
+                        constraints.copy(minHeight = maxOf(constraints.minHeight, boundedMin))
+                    )
+                    layout(placeable.width, placeable.height) {
+                        placeable.placeRelative(0, 0)
+                    }
+                }
                 .focusRequester(editorFocusRequester)
                 .onFocusChanged { isEditorFocused = it.isFocused }
                 .then(
@@ -691,16 +773,17 @@ private fun WorkspaceWritingLayer(
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                                 val downPos = down.position
-                                val downTime = System.currentTimeMillis()
+                                val downTime = down.uptimeMillis
                                 val touchSlop = viewConfiguration.touchSlop
+                                val touchSlopSq = touchSlop * touchSlop
                                 val longPressTimeout = viewConfiguration.longPressTimeoutMillis
                                 while (true) {
                                     val event = awaitPointerEvent(PointerEventPass.Initial)
                                     val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (System.currentTimeMillis() - downTime > longPressTimeout) break
+                                    if (change.uptimeMillis - downTime > longPressTimeout) break
                                     val dx = change.position.x - downPos.x
                                     val dy = change.position.y - downPos.y
-                                    if (kotlin.math.hypot(dx, dy) > touchSlop) break
+                                    if (dx * dx + dy * dy > touchSlopSq) break
                                     if (change.changedToUpIgnoreConsumed()) {
                                         val layout = textLayoutResult
                                         if (layout != null &&
@@ -748,44 +831,31 @@ private fun WorkspaceWritingLayer(
             decorationBox = { inner ->
                 Box(
                     modifier = Modifier
+                        .graphicsLayer()
                         .drawBehind {
-                            val layout = textLayoutResult ?: return@drawBehind
-                            if (layout.layoutInput.text.text != editorState.text) return@drawBehind
-                            drawBlockDecorations(
-                                layoutResult = layout,
-                                spans = editorState.spans,
+                            val cached = cachedBlockDecorations ?: return@drawBehind
+                            drawCachedBlockDecorations(
+                                cached = cached,
+                                activeHeadingDivider = activeHeadingDivider,
+                                reusableCheckPath = reusableCheckPath,
                                 quoteBgColor = w.accent.copy(alpha = if (w.isDark) 0.11f else 0.055f),
                                 quoteBarColor = w.accent,
                                 codeBgColor = w.surface,
                                 codeBorderColor = w.border.copy(alpha = 0.55f),
                                 dividerColor = w.border,
-                                activeHeadingLevel = editorState.activeHeadingLevel,
-                                cursorOffset = editorState.selection.start,
                                 bulletColor = w.text.copy(alpha = 0.85f),
                                 todoUncheckedBorderColor = w.text.copy(alpha = 0.58f),
                                 todoUncheckedBgColor = w.surface,
                                 todoCheckedFillColor = w.accent
                             )
-                            drawTextHighlights(
-                                layoutResult = layout,
-                                spans = editorState.spans,
-                                ascentPx = fontMetrics.ascent,
-                                descentPx = fontMetrics.descent,
-                                lineMetrics = segmentLineMetrics
-                            )
+                            if (cachedHighlights.isNotEmpty()) {
+                                drawCachedHighlightRects(cachedHighlights)
+                            }
                         }
                         .drawWithContent {
                             drawContent()
-                            val layout = textLayoutResult ?: return@drawWithContent
-                            if (layout.layoutInput.text.text == editorState.text) {
-                                drawTextSpoilers(
-                                    layoutResult = layout,
-                                    spans = editorState.spans,
-                                    unlockedSpoilerIds = editorState.unlockedSpoilerIds,
-                                    ascentPx = fontMetrics.ascent,
-                                    descentPx = fontMetrics.descent,
-                                    lineMetrics = segmentLineMetrics
-                                )
+                            if (cachedSpoilers.isNotEmpty()) {
+                                drawCachedHighlightRects(cachedSpoilers)
                             }
                         }
                 ) {
@@ -803,6 +873,7 @@ private fun WorkspaceWritingLayer(
                     Spacer(
                         Modifier
                             .matchParentSize()
+                            .graphicsLayer()
                             .drawBehind {
                                 if (!isEditorFocused || reading || !cursorVisible) return@drawBehind
                                 val layout = textLayoutResult ?: return@drawBehind
@@ -843,47 +914,28 @@ private fun WorkspaceWritingLayer(
                             }
                     )
                     if (hasTodoSpans) {
-                        val layout = textLayoutResult
-                        if (layout != null &&
-                            layout.lineCount > 0 &&
-                            layout.layoutInput.text.text == editorState.text
-                        ) {
-                            val layoutText = layout.layoutInput.text.text
-                            val todoGeoms = remember(layout, editorState.spans, layoutText, density) {
-                                BlockDecorationLayoutCalculator.computeTodoCheckboxes(
-                                    text = layoutText,
-                                    spans = editorState.spans,
-                                    lineCount = layout.lineCount,
-                                    densityScale = density.density,
-                                    getLineForOffset = { layout.getLineForOffset(it) },
-                                    getLineTop = { layout.getLineTop(it) },
-                                    getLineBottom = { layout.getLineBottom(it) },
-                                    getCharLeft = { layout.getBoundingBox(it).left },
-                                    getCharRight = { layout.getBoundingBox(it).right }
+                        val todoGeoms = cachedBlockDecorations?.todos.orEmpty()
+                        todoGeoms.forEachIndexed { idx, geom ->
+                            key(geom.spanStart) {
+                                val hitW = with(density) { (geom.hitRight - geom.hitLeft).coerceAtLeast(24f).toDp() }
+                                val hitH = with(density) { (geom.hitBottom - geom.hitTop).coerceAtLeast(24f).toDp() }
+                                Box(
+                                    modifier = Modifier
+                                        .offset { IntOffset(geom.hitLeft.roundToInt(), geom.hitTop.roundToInt()) }
+                                        .size(hitW, hitH)
+                                        .semantics {
+                                            contentDescription = if (geom.checked) "Checked item" else "Unchecked item"
+                                        }
+                                        .testTag("canvas_checkbox_$idx")
+                                        .clickable(
+                                            interactionSource = remember { MutableInteractionSource() },
+                                            indication = null
+                                        ) {
+                                            if (editorState.toggleTodoAt(geom.spanStart) && reading) {
+                                                onSaveSilent()
+                                            }
+                                        }
                                 )
-                            }
-                            todoGeoms.forEachIndexed { idx, geom ->
-                                key(geom.spanStart) {
-                                    val hitW = with(density) { (geom.hitRight - geom.hitLeft).coerceAtLeast(24f).toDp() }
-                                    val hitH = with(density) { (geom.hitBottom - geom.hitTop).coerceAtLeast(24f).toDp() }
-                                    Box(
-                                        modifier = Modifier
-                                            .offset { IntOffset(geom.hitLeft.roundToInt(), geom.hitTop.roundToInt()) }
-                                            .size(hitW, hitH)
-                                            .semantics {
-                                                contentDescription = if (geom.checked) "Checked item" else "Unchecked item"
-                                            }
-                                            .testTag("canvas_checkbox_$idx")
-                                            .clickable(
-                                                interactionSource = remember { MutableInteractionSource() },
-                                                indication = null
-                                            ) {
-                                                if (editorState.toggleTodoAt(geom.spanStart) && reading) {
-                                                    onSaveSilent()
-                                                }
-                                            }
-                                    )
-                                }
                             }
                         }
                     }

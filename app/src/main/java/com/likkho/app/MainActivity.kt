@@ -178,6 +178,7 @@ fun Root(vm: AppViewModel) {
         LocalImageBitmapLoader provides { mediaId -> vm.loadDecryptedImageBitmap(mediaId) },
         LocalBitmapKeyLifecycle provides vm.bitmapKeyLifecycle
     ) {
+        ProvideSafeTextToolbar {
     Box(Modifier.fillMaxSize().background(w.bg).statusBarsPadding()) {
         Crossfade(
             targetState = vm.route,
@@ -239,5 +240,6 @@ fun Root(vm: AppViewModel) {
             }
         }
     }
+        }
     }
 }

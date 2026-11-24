@@ -238,39 +238,41 @@ fun WikiDialog(
         onDismissRequest = { if (dismissOnOutside) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = dismissOnOutside),
     ) {
-        Box(
-            Modifier.fillMaxSize().padding(16.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(
-                Modifier
-                    .widthIn(max = maxWidth)
-                    .fillMaxWidth()
-                    .heightIn(max = 640.dp)
-                    .background(w.bg, RectangleShape)
-                    .wikiBorder(w.border)
+        ProvideSafeTextToolbar {
+            Box(
+                Modifier.fillMaxSize().padding(16.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                Row(
-                    Modifier.fillMaxWidth().background(w.surface).padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Column(
+                    Modifier
+                        .widthIn(max = maxWidth)
+                        .fillMaxWidth()
+                        .heightIn(max = 640.dp)
+                        .background(w.bg, RectangleShape)
+                        .wikiBorder(w.border)
                 ) {
-                    if (titleIcon != null) {
-                        Icon(titleIcon, null, tint = titleIconTint, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
+                    Row(
+                        Modifier.fillMaxWidth().background(w.surface).padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (titleIcon != null) {
+                            Icon(titleIcon, null, tint = titleIconTint, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(title, style = serifStyle(17.sp, w.text), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (subtitle != null) Text(subtitle, style = sansStyle(10.sp, w.muted, FontWeight.Normal))
+                        }
+                        if (showClose) {
+                            Icon(
+                                Icons.Outlined.Close, "Close", tint = w.muted,
+                                modifier = Modifier.size(22.dp).clickable { onDismiss() }.padding(2.dp),
+                            )
+                        }
                     }
-                    Column(Modifier.weight(1f)) {
-                        Text(title, style = serifStyle(17.sp, w.text), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (subtitle != null) Text(subtitle, style = sansStyle(10.sp, w.muted, FontWeight.Normal))
-                    }
-                    if (showClose) {
-                        Icon(
-                            Icons.Outlined.Close, "Close", tint = w.muted,
-                            modifier = Modifier.size(22.dp).clickable { onDismiss() }.padding(2.dp),
-                        )
-                    }
+                    Box(Modifier.fillMaxWidth().height(0.5.dp).background(w.hairline))
+                    Column(Modifier.verticalScroll(rememberScrollState())) { content() }
                 }
-                Box(Modifier.fillMaxWidth().height(0.5.dp).background(w.hairline))
-                Column(Modifier.verticalScroll(rememberScrollState())) { content() }
             }
         }
     }

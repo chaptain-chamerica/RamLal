@@ -200,13 +200,97 @@ object HighlightLayoutCalculator {
         }
         return rects
     }
+
+    fun computeCachedHighlights(
+        layoutResult: TextLayoutResult,
+        spans: List<Span>,
+        ascentPx: Float,
+        descentPx: Float,
+        lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
+    ): List<CachedHighlightDrawRect> {
+        val rects = computeFromTextLayout(
+            layoutResult = layoutResult,
+            spans = spans,
+            ascentPx = ascentPx,
+            descentPx = descentPx,
+            lineMetrics = lineMetrics
+        )
+        if (rects.isEmpty()) return emptyList()
+        val out = ArrayList<CachedHighlightDrawRect>(rects.size)
+        for (i in rects.indices) {
+            val r = rects[i]
+            val color = parseHighlightHex(r.colorHex) ?: continue
+            out.add(
+                CachedHighlightDrawRect(
+                    left = r.left,
+                    top = r.top,
+                    width = r.right - r.left,
+                    height = r.bottom - r.top,
+                    color = color
+                )
+            )
+        }
+        return out
+    }
+
+    fun computeCachedSpoilers(
+        layoutResult: TextLayoutResult,
+        spans: List<Span>,
+        unlockedSpoilerIds: Set<String>,
+        ascentPx: Float,
+        descentPx: Float,
+        lineMetrics: ((lineStart: Int, lineEnd: Int) -> Pair<Float, Float>)? = null
+    ): List<CachedHighlightDrawRect> {
+        val rects = computeSpoilerRects(
+            layoutResult = layoutResult,
+            spans = spans,
+            unlockedSpoilerIds = unlockedSpoilerIds,
+            ascentPx = ascentPx,
+            descentPx = descentPx,
+            lineMetrics = lineMetrics
+        )
+        if (rects.isEmpty()) return emptyList()
+        val out = ArrayList<CachedHighlightDrawRect>(rects.size)
+        for (i in rects.indices) {
+            val r = rects[i]
+            out.add(
+                CachedHighlightDrawRect(
+                    left = r.left,
+                    top = r.top,
+                    width = r.right - r.left,
+                    height = r.bottom - r.top,
+                    color = Color.Black
+                )
+            )
+        }
+        return out
+    }
 }
+
+data class CachedHighlightDrawRect(
+    val left: Float,
+    val top: Float,
+    val width: Float,
+    val height: Float,
+    val color: Color
+)
 
 private fun parseHighlightHex(hex: String): Color? = try {
     val clean = if (hex.startsWith("#")) hex else "#$hex"
     Color(android.graphics.Color.parseColor(clean))
 } catch (_: Exception) {
     null
+}
+
+fun DrawScope.drawCachedHighlightRects(rects: List<CachedHighlightDrawRect>) {
+    for (i in rects.indices) {
+        val r = rects[i]
+        drawRect(
+            color = r.color,
+            topLeft = androidx.compose.ui.geometry.Offset(r.left, r.top),
+            size = androidx.compose.ui.geometry.Size(r.width, r.height)
+        )
+    }
 }
 
 fun DrawScope.drawTextHighlights(
