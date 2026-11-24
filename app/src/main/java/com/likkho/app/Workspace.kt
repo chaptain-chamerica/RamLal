@@ -60,7 +60,6 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -668,23 +667,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
 
         val density = LocalDensity.current
-        val screenWidthDp = LocalConfiguration.current.screenWidthDp.dp
-        val viewportW = if (viewportMetrics.widthPx > 0) {
-            with(density) { viewportMetrics.widthPx.toDp() }
-        } else {
-            screenWidthDp
-        }
-        val stableMinHeightDp = remember(viewportMetrics.unshrunkHeightPx, density) {
-            if (viewportMetrics.unshrunkHeightPx > 0) {
-                with(density) {
-                    (viewportMetrics.unshrunkHeightPx - 32.dp.roundToPx())
-                        .coerceAtLeast(240.dp.roundToPx())
-                        .toDp()
-                }
-            } else {
-                240.dp
-            }
-        }
         val skeletonRightDp = if (showImportSkeleton) importingItem?.let { it.x + it.width } ?: 0f else 0f
         val skeletonBottomDp = if (showImportSkeleton) importingItem?.let { it.y + it.height } ?: 0f else 0f
         val mediaMaxRightDp = remember(images, audios, videos, skeletonRightDp) {
@@ -703,7 +685,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 skeletonBottomDp
             )
         }
-        val canScrollHorizontally = mediaMaxRightDp > viewportW.value - 32f || viewportMetrics.isDraggingMedia
 
         val (behindImages, frontImages) = remember(images) { images.partition { it.behindText } }
         val (behindVideos, frontVideos) = remember(videos) { videos.partition { it.behindText } }
@@ -712,7 +693,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
         val hasFrontMedia = frontImages.isNotEmpty() || frontVideos.isNotEmpty() || frontAudios.isNotEmpty() || showImportSkeleton
         val hasSelectedMedia = selImg != null || selAud != null || selVid != null
 
-        Box(
+        BoxWithConstraints(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
@@ -756,6 +737,25 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     }
                 }
         ) {
+            val boundedWidthPx = if (constraints.hasBoundedWidth) constraints.maxWidth else 0
+            val boundedHeightPx = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
+            val viewportWidthPx = (viewportMetrics.widthPx.takeIf { it > 0 } ?: boundedWidthPx)
+                .coerceAtLeast(1)
+            val viewportW = maxWidth
+            val effectiveUnshrunkHeightPx = maxOf(viewportMetrics.unshrunkHeightPx, boundedHeightPx)
+            val stableMinHeightDp = remember(effectiveUnshrunkHeightPx, density) {
+                if (effectiveUnshrunkHeightPx > 0) {
+                    with(density) {
+                        (effectiveUnshrunkHeightPx - 32.dp.roundToPx())
+                            .coerceAtLeast(240.dp.roundToPx())
+                            .toDp()
+                    }
+                } else {
+                    240.dp
+                }
+            }
+            val canScrollHorizontally = mediaMaxRightDp > viewportW.value - 32f || viewportMetrics.isDraggingMedia
+
             if (bgSrc != null) {
                 val bgBmp = bgBitmap
                 if (bgBmp != null) {
@@ -779,19 +779,24 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 Box(
                     Modifier
                         .fillMaxHeight()
-                        .layout { measurable, constraints ->
-                            val vwPx = viewportMetrics.widthPx.takeIf { it > 0 }
-                                ?: viewportW.roundToPx().coerceAtLeast(1)
+                        .layout { measurable, layerConstraints ->
                             val activeRightDp = maxOf(mediaMaxRightDp, viewportMetrics.activeDragRightDp)
-                            val allowHorizontal = activeRightDp > (vwPx / density.density) - 32f ||
+                            val allowHorizontal = activeRightDp > (viewportWidthPx / density.density) - 32f ||
                                 viewportMetrics.isDraggingMedia
                             val wPx = if (allowHorizontal) {
-                                maxOf(vwPx, (activeRightDp + 240f).dp.roundToPx())
+                                maxOf(viewportWidthPx, (activeRightDp + 240f).dp.roundToPx())
                             } else {
-                                vwPx
+                                viewportWidthPx
                             }
+                            val maxH = layerConstraints.maxHeight
+                            val minH = layerConstraints.minHeight.coerceAtMost(maxH)
                             val placeable = measurable.measure(
-                                constraints.copy(minWidth = wPx, maxWidth = wPx)
+                                Constraints(
+                                    minWidth = wPx,
+                                    maxWidth = wPx,
+                                    minHeight = minH,
+                                    maxHeight = maxH
+                                )
                             )
                             layout(wPx, placeable.height) {
                                 placeable.placeRelative(0, 0)
@@ -912,10 +917,10 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                         onSaveSilent = { save(showFeedback = false) },
                                     )
                                 }
-                                Spacer(
+                                Box(
                                     Modifier
                                         .fillMaxWidth()
-                                        .layout { _, constraints ->
+                                        .layout { measurable, tailConstraints ->
                                             val minTailPx = 120.dp.roundToPx()
                                             val dragBottomDp = viewportMetrics.activeDragBottomDp
                                             val mediaBottomDp = maxOf(mediaMaxBottomDp, dragBottomDp)
@@ -925,7 +930,22 @@ fun WorkspaceScreen(vm: AppViewModel) {
                                             } else {
                                                 minTailPx
                                             }
-                                            layout(constraints.maxWidth.coerceAtLeast(0), extraPx) {}
+                                            val tailW = if (tailConstraints.hasBoundedWidth) {
+                                                tailConstraints.maxWidth
+                                            } else {
+                                                viewportWidthPx
+                                            }
+                                            val placeable = measurable.measure(
+                                                Constraints(
+                                                    minWidth = tailW,
+                                                    maxWidth = tailW,
+                                                    minHeight = extraPx,
+                                                    maxHeight = extraPx
+                                                )
+                                            )
+                                            layout(placeable.width, placeable.height) {
+                                                placeable.placeRelative(0, 0)
+                                            }
                                         }
                                 )
                             }
