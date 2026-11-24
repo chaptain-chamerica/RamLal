@@ -1065,6 +1065,7 @@ class RichTextEditorState(
     // =========================================================================
 
     fun onTextFieldValueChange(newValue: TextFieldValue) {
+        if (newValue == textFieldValue) return
         val oldText = textFieldValue.text
         val newText = newValue.text
 
@@ -1076,7 +1077,7 @@ class RichTextEditorState(
                 val (ls, le) = currentLineBounds(newText, pos)
                 val prefix = findListPrefixOnLine(spans, ls, le)
                 if (prefix != null && pos < prefix.end) {
-                    adjusted = newValue.copy(selection = TextRange(prefix.end))
+                    adjusted = newValue.copy(selection = TextRange(prefix.end), composition = null)
                 }
             }
             val prevPos = textFieldValue.selection.start.coerceIn(0, oldText.length)
@@ -1399,7 +1400,12 @@ class RichTextEditorState(
         val renumbered = renumberNumberedLists(workingText, workingSpans, workingSel.start, workingSel.end)
         val snapped = snapLineParagraphSpans(renumbered.text, renumbered.spans)
         spans = normalizeSpans(snapped, renumbered.text.length)
-        textFieldValue = TextFieldValue(renumbered.text, TextRange(renumbered.selStart, renumbered.selEnd))
+        val preservedComposition = if (renumbered.text == newText) newValue.composition else null
+        textFieldValue = TextFieldValue(
+            text = renumbered.text,
+            selection = TextRange(renumbered.selStart, renumbered.selEnd),
+            composition = preservedComposition
+        )
         syncLineState(renumbered.selStart)
     }
 

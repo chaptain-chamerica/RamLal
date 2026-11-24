@@ -1059,5 +1059,54 @@ class RichTextEditorStateTest {
         assertTrue(reimported.removeSpoilerFromRange(TextRange(14, 18)))
         assertTrue(reimported.spans.isEmpty())
     }
+
+    @Test
+    fun ime_composition_preserved_across_typing_and_cursor_updates_cleared_on_rewrite() {
+        val editor = RichTextEditorState()
+
+        // 1. IME begins composing "hel"
+        val composing1 = TextFieldValue(
+            text = "hel",
+            selection = TextRange(3),
+            composition = TextRange(0, 3)
+        )
+        editor.onTextFieldValueChange(composing1)
+        assertEquals("hel", editor.text)
+        assertEquals(TextRange(0, 3), editor.textFieldValue.composition)
+
+        // 2. IME updates composing span to "hello" (with active Bold enabled)
+        editor.toggleBold()
+        val composing2 = TextFieldValue(
+            text = "hello",
+            selection = TextRange(5),
+            composition = TextRange(0, 5)
+        )
+        editor.onTextFieldValueChange(composing2)
+        assertEquals("hello", editor.text)
+        assertEquals(TextRange(0, 5), editor.textFieldValue.composition)
+        assertEquals(listOf(Span(3, 5, SpanStyle.Bold)), editor.spans)
+
+        // 3. IME commits word (same text, composition cleared to null)
+        val committed = composing2.copy(composition = null)
+        editor.onTextFieldValueChange(committed)
+        assertEquals("hello", editor.text)
+        assertNull(editor.textFieldValue.composition)
+
+        // 4. Cursor clamped out of a list prefix clears composition cleanly
+        val listEditor = RichTextEditorState()
+        listEditor.toggleBullet()
+        listEditor.onTextFieldValueChange(TextFieldValue("• item", TextRange(6)))
+        listEditor.onTextFieldValueChange(
+            TextFieldValue(
+                text = "• item",
+                selection = TextRange(0),
+                composition = TextRange(0, 1)
+            )
+        )
+        assertEquals(TextRange(2), listEditor.selection)
+        assertNull(listEditor.textFieldValue.composition)
+    }
 }
+
+
 

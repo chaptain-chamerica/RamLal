@@ -594,7 +594,10 @@ fun RichToolbar(
             CategorySep()
 
             // Group 8: Research, Security & Tools
-            val linkToolOn = pop == Pop.LINK || editorState?.hasLinkOnSelection == true
+            val linkToolActive by remember(editorState) {
+                derivedStateOf { editorState?.hasLinkOnSelection == true }
+            }
+            val linkToolOn = pop == Pop.LINK || linkToolActive
             ToolGlyph(Icons.Outlined.Link, "WebLink (Selected Text)", on = linkToolOn) {
                 pendingSpoilerRange = null
                 spoilerError = null
@@ -617,7 +620,10 @@ fun RichToolbar(
                     pop = Pop.LINK
                 }
             }
-            val spoilerToolOn = pop == Pop.SPOILER || editorState?.hasSpoilerOnSelection == true
+            val spoilerToolActive by remember(editorState) {
+                derivedStateOf { editorState?.hasSpoilerOnSelection == true }
+            }
+            val spoilerToolOn = pop == Pop.SPOILER || spoilerToolActive
             ToolGlyph(Icons.Outlined.VisibilityOff, "Text Spoiler (Selected Text)", on = spoilerToolOn) {
                 pendingLinkRange = null
                 if (editorState == null) {

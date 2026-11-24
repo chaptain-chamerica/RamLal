@@ -92,7 +92,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
+        if (hasFocus && vm.fullScreen) {
             applySystemBars(darkMode = vm.darkMode, fullScreen = vm.fullScreen)
         }
     }
