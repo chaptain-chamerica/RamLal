@@ -94,6 +94,21 @@ class RichTextEditorState(
     var unlockedSpoilerIds by mutableStateOf<Set<String>>(emptySet())
         private set
 
+    private data class EditorSnapshot(
+        val textFieldValue: TextFieldValue,
+        val spans: List<Span>,
+        val canvasAlignment: TextAlignment
+    )
+
+    private val undoStack = ArrayDeque<EditorSnapshot>()
+    private val redoStack = ArrayDeque<EditorSnapshot>()
+
+    var canUndo by mutableStateOf(false)
+        private set
+
+    var canRedo by mutableStateOf(false)
+        private set
+
     var onLockedSpoilerBlocked: ((SpanStyle.Spoiler) -> Unit)? = null
 
     val isH1Active: Boolean get() = activeHeadingLevel == 1
@@ -113,6 +128,65 @@ class RichTextEditorState(
         syncLineState(initialText.length)
     }
 
+    private fun pushUndoSnapshot() {
+        val current = EditorSnapshot(
+            textFieldValue = textFieldValue.copy(composition = null),
+            spans = spans,
+            canvasAlignment = canvasAlignment
+        )
+        if (undoStack.lastOrNull() == current) return
+        if (undoStack.size >= MAX_UNDO_HISTORY) {
+            undoStack.removeFirst()
+        }
+        undoStack.addLast(current)
+        redoStack.clear()
+        canUndo = true
+        canRedo = false
+    }
+
+    fun undo(): Boolean {
+        if (undoStack.isEmpty()) return false
+        val current = EditorSnapshot(
+            textFieldValue = textFieldValue.copy(composition = null),
+            spans = spans,
+            canvasAlignment = canvasAlignment
+        )
+        redoStack.addLast(current)
+        val prev = undoStack.removeLast()
+        spans = normalizeSpans(prev.spans, prev.textFieldValue.text.length)
+        canvasAlignment = prev.canvasAlignment
+        textFieldValue = prev.textFieldValue
+        activeHeadingLevel = null
+        activePendingIndent = 0
+        syncLineState(prev.textFieldValue.selection.start)
+        canUndo = undoStack.isNotEmpty()
+        canRedo = redoStack.isNotEmpty()
+        return true
+    }
+
+    fun redo(): Boolean {
+        if (redoStack.isEmpty()) return false
+        val current = EditorSnapshot(
+            textFieldValue = textFieldValue.copy(composition = null),
+            spans = spans,
+            canvasAlignment = canvasAlignment
+        )
+        if (undoStack.size >= MAX_UNDO_HISTORY) {
+            undoStack.removeFirst()
+        }
+        undoStack.addLast(current)
+        val next = redoStack.removeLast()
+        spans = normalizeSpans(next.spans, next.textFieldValue.text.length)
+        canvasAlignment = next.canvasAlignment
+        textFieldValue = next.textFieldValue
+        activeHeadingLevel = null
+        activePendingIndent = 0
+        syncLineState(next.textFieldValue.selection.start)
+        canUndo = undoStack.isNotEmpty()
+        canRedo = redoStack.isNotEmpty()
+        return true
+    }
+
     // =========================================================================
     //  Tool Toggles & Actions
     // =========================================================================
@@ -120,6 +194,7 @@ class RichTextEditorState(
     fun toggleBold() {
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val hasBold = spans.any { it.style == SpanStyle.Bold && it.start <= sel.min && it.end >= sel.max }
             if (hasBold) {
                 removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Bold }
@@ -136,6 +211,7 @@ class RichTextEditorState(
     fun toggleItalic() {
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val hasItalic = spans.any { it.style == SpanStyle.Italic && it.start <= sel.min && it.end >= sel.max }
             if (hasItalic) {
                 removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Italic }
@@ -152,6 +228,7 @@ class RichTextEditorState(
     fun toggleUnderline() {
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val hasUnderline = spans.any { it.style == SpanStyle.Underline && it.start <= sel.min && it.end >= sel.max }
             if (hasUnderline) {
                 removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Underline }
@@ -168,6 +245,7 @@ class RichTextEditorState(
     fun toggleStrike() {
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val hasStrike = spans.any { it.style == SpanStyle.Strike && it.start <= sel.min && it.end >= sel.max }
             if (hasStrike) {
                 removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Strike }
@@ -184,6 +262,7 @@ class RichTextEditorState(
     fun toggleSuperscript() {
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val hasSuper = spans.any { it.style == SpanStyle.Superscript && it.start <= sel.min && it.end >= sel.max }
             if (hasSuper) {
                 removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Superscript }
@@ -207,6 +286,7 @@ class RichTextEditorState(
     fun toggleSubscript() {
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val hasSub = spans.any { it.style == SpanStyle.Subscript && it.start <= sel.min && it.end >= sel.max }
             if (hasSub) {
                 removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Subscript }
@@ -233,6 +313,7 @@ class RichTextEditorState(
 
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.Color }
             if (cleanHex != null) {
                 applyStyleToRange(sel.min, sel.max, SpanStyle.Color(cleanHex))
@@ -246,6 +327,7 @@ class RichTextEditorState(
 
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.Highlight }
             if (cleanHex != null) {
                 applyStyleToRange(sel.min, sel.max, SpanStyle.Highlight(cleanHex))
@@ -259,6 +341,7 @@ class RichTextEditorState(
 
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.FontId }
             if (cleanId != null) {
                 applyStyleToRange(sel.min, sel.max, SpanStyle.FontId(cleanId))
@@ -272,6 +355,7 @@ class RichTextEditorState(
 
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             removeStyleFromRange(sel.min, sel.max) { it is SpanStyle.SizePx }
             if (cleanPx != null) {
                 applyStyleToRange(sel.min, sel.max, SpanStyle.SizePx(cleanPx.toFloat()))
@@ -311,6 +395,7 @@ class RichTextEditorState(
         } else {
             "https://$trimmed"
         }
+        pushUndoSnapshot()
         removeStyleFromRange(s, e) { it is SpanStyle.Link }
         applyStyleToRange(s, e, SpanStyle.Link(normalized))
         return true
@@ -322,6 +407,7 @@ class RichTextEditorState(
         if (s >= e) return false
         val hasOverlap = spans.any { it.style is SpanStyle.Link && it.start < e && it.end > s }
         if (!hasOverlap) return false
+        pushUndoSnapshot()
         spans = normalizeSpans(
             spans.filterNot { it.style is SpanStyle.Link && it.start < e && it.end > s },
             text.length
@@ -370,6 +456,7 @@ class RichTextEditorState(
             onLockedSpoilerBlocked?.invoke(lockedOverlap)
             return false
         }
+        pushUndoSnapshot()
         val hash = hashSpoilerPasscode(cleanPass)
         val spoilerStyle = SpanStyle.Spoiler(passcodeHash = hash)
         removeStyleFromRange(s, e) { it is SpanStyle.Spoiler }
@@ -407,6 +494,7 @@ class RichTextEditorState(
             onLockedSpoilerBlocked?.invoke(locked)
             return false
         }
+        pushUndoSnapshot()
         spans = normalizeSpans(
             spans.filterNot { it.style is SpanStyle.Spoiler && it.start < e && it.end > s },
             text.length
@@ -472,6 +560,7 @@ class RichTextEditorState(
         require(level in 1..3) { "Heading level must be 1, 2, or 3" }
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val targetStyle = SpanStyle.Heading(level)
             val hasHeading = spans.any { it.style == targetStyle && it.start <= sel.min && it.end >= sel.max }
             if (hasHeading) {
@@ -491,6 +580,7 @@ class RichTextEditorState(
                 val pos = sel.start.coerceIn(0, text.length)
                 val (lineStart, lineEnd) = currentLineBounds(text, pos)
                 if (lineStart < lineEnd) {
+                    pushUndoSnapshot()
                     removeStyleFromRange(lineStart, lineEnd) { it is SpanStyle.Heading }
                     applyStyleToRange(lineStart, lineEnd, SpanStyle.Heading(level))
                 }
@@ -501,6 +591,7 @@ class RichTextEditorState(
     fun toggleQuote() {
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val hasQuote = spans.any { it.style == SpanStyle.Quote && it.start <= sel.min && it.end >= sel.max }
             if (hasQuote) {
                 removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Quote }
@@ -525,6 +616,7 @@ class RichTextEditorState(
     fun toggleCode() {
         val sel = selection
         if (sel.min < sel.max) {
+            pushUndoSnapshot()
             val hasCode = spans.any { it.style == SpanStyle.Code && it.start <= sel.min && it.end >= sel.max }
             if (hasCode) {
                 removeStyleFromRange(sel.min, sel.max) { it == SpanStyle.Code }
@@ -570,15 +662,21 @@ class RichTextEditorState(
                 }
             }
             if (applied) {
+                pushUndoSnapshot()
                 spans = normalizeSpans(snapLineParagraphSpans(currentText, workingSpans), currentText.length)
-            } else {
+            } else if (canvasAlignment != alignment) {
+                pushUndoSnapshot()
                 canvasAlignment = alignment
             }
         } else {
-            canvasAlignment = alignment
             val (ls, le) = currentLineBounds(currentText, sel.start)
             val paraEnd = lineParaEnd(currentText, le)
-            if (ls < paraEnd && spans.any { it.style is SpanStyle.Align && it.start < paraEnd && it.end > ls }) {
+            val hasLineOverride = ls < paraEnd && spans.any { it.style is SpanStyle.Align && it.start < paraEnd && it.end > ls }
+            if (canvasAlignment != alignment || hasLineOverride) {
+                pushUndoSnapshot()
+            }
+            canvasAlignment = alignment
+            if (hasLineOverride) {
                 removeStyleFromRange(ls, paraEnd) { it is SpanStyle.Align }
             }
         }
@@ -592,6 +690,7 @@ class RichTextEditorState(
             .filter { (ls, le) -> !isDividerLine(spans, ls, le) }
         if (selectedLines.isEmpty()) return
 
+        var changedSpans = false
         var workingSpans = spans
         for ((ls, le) in selectedLines) {
             val paraEnd = lineParaEnd(currentText, le)
@@ -603,10 +702,16 @@ class RichTextEditorState(
                 .filter { it.style is SpanStyle.Indent && it.start < paraEnd && it.end > ls }
                 .maxOfOrNull { (it.style as SpanStyle.Indent).level } ?: 0
             val newLvl = (currentLvl + 1).coerceIn(1, MAX_INDENT)
-            workingSpans = removeStyleFromList(workingSpans, ls, paraEnd) { it is SpanStyle.Indent } +
-                Span(ls, paraEnd, SpanStyle.Indent(newLvl))
+            if (newLvl != currentLvl) {
+                changedSpans = true
+                workingSpans = removeStyleFromList(workingSpans, ls, paraEnd) { it is SpanStyle.Indent } +
+                    Span(ls, paraEnd, SpanStyle.Indent(newLvl))
+            }
         }
-        spans = normalizeSpans(snapLineParagraphSpans(currentText, workingSpans), currentText.length)
+        if (changedSpans) {
+            pushUndoSnapshot()
+            spans = normalizeSpans(snapLineParagraphSpans(currentText, workingSpans), currentText.length)
+        }
         syncLineState(sel.start)
     }
 
@@ -617,6 +722,7 @@ class RichTextEditorState(
             .filter { (ls, le) -> !isDividerLine(spans, ls, le) }
         if (selectedLines.isEmpty()) return
 
+        var changedSpans = false
         var workingSpans = spans
         for ((ls, le) in selectedLines) {
             val paraEnd = lineParaEnd(currentText, le)
@@ -628,12 +734,18 @@ class RichTextEditorState(
                 .filter { it.style is SpanStyle.Indent && it.start < paraEnd && it.end > ls }
                 .maxOfOrNull { (it.style as SpanStyle.Indent).level } ?: 0
             val newLvl = (currentLvl - 1).coerceIn(0, MAX_INDENT)
-            workingSpans = removeStyleFromList(workingSpans, ls, paraEnd) { it is SpanStyle.Indent }
-            if (newLvl > 0) {
-                workingSpans = workingSpans + Span(ls, paraEnd, SpanStyle.Indent(newLvl))
+            if (newLvl != currentLvl) {
+                changedSpans = true
+                workingSpans = removeStyleFromList(workingSpans, ls, paraEnd) { it is SpanStyle.Indent }
+                if (newLvl > 0) {
+                    workingSpans = workingSpans + Span(ls, paraEnd, SpanStyle.Indent(newLvl))
+                }
             }
         }
-        spans = normalizeSpans(snapLineParagraphSpans(currentText, workingSpans), currentText.length)
+        if (changedSpans) {
+            pushUndoSnapshot()
+            spans = normalizeSpans(snapLineParagraphSpans(currentText, workingSpans), currentText.length)
+        }
         syncLineState(sel.start)
     }
 
@@ -653,6 +765,7 @@ class RichTextEditorState(
         val currentText = text
         val idx = spans.indexOfFirst { it.start == prefixStart && it.style is SpanStyle.Todo }
         if (idx == -1) return false
+        pushUndoSnapshot()
         val targetSpan = spans[idx]
         val oldTodo = targetSpan.style as SpanStyle.Todo
         val newChecked = !oldTodo.checked
@@ -679,6 +792,7 @@ class RichTextEditorState(
         if (sel.collapsed && selectedLines.size == 1) {
             val (ls, le) = selectedLines[0]
             if (isDividerLine(spans, ls, le)) {
+                pushUndoSnapshot()
                 val prefix = when (target) {
                     ListKind.BULLET -> BULLET_PREFIX
                     ListKind.NUMBERED -> "1. "
@@ -742,6 +856,7 @@ class RichTextEditorState(
 
         if (edits.isEmpty()) return
 
+        pushUndoSnapshot()
         val baseSpans = spans.filter { it !in droppedPrefixes }
         val (editedText, shiftedSpans, mappedSel) = applyTextEdits(currentText, baseSpans, edits, sel.min, sel.max)
         val finalSelStart = if (sel.start <= sel.end) mappedSel.first else mappedSel.second
@@ -771,6 +886,7 @@ class RichTextEditorState(
                 return
             }
         }
+        pushUndoSnapshot()
 
         val needLeadingNewline = pos > 0 && oldText[pos - 1] != '\n'
         val needTrailingNewline = selEnd >= oldText.length || oldText[selEnd] != '\n'
@@ -1143,6 +1259,8 @@ class RichTextEditorState(
             }
         }
 
+        pushUndoSnapshot()
+
         // Special Case 2a: Backspace inside a list prefix ("• ", "1. ", "☐ ") cleanly removes the entire list item prefix
         if (deletedCount in 1..2 && insertedCount == 0) {
             val touchedPrefix = spans.firstOrNull { sp ->
@@ -1463,6 +1581,7 @@ class RichTextEditorState(
         const val TODO_UNCHECKED_PREFIX = "\u2610 "
         const val TODO_CHECKED_PREFIX = "\u2611 "
         const val MAX_INDENT = 6
+        const val MAX_UNDO_HISTORY = 64
         const val SPOILER_GARBAGE_CHARS = "▓▒░#@$%&*?~"
 
         fun hashSpoilerPasscode(passcode: String): String {

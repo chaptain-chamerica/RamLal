@@ -1106,6 +1106,68 @@ class RichTextEditorStateTest {
         assertEquals(TextRange(2), listEditor.selection)
         assertNull(listEditor.textFieldValue.composition)
     }
+
+    @Test
+    fun undo_and_redo_restoresTextSpansAlignmentAndFlags() {
+        val editor = RichTextEditorState()
+        assertFalse(editor.canUndo)
+        assertFalse(editor.canRedo)
+        assertFalse(editor.undo())
+        assertFalse(editor.redo())
+
+        // 1. Text edit pushes undo snapshot
+        editor.onTextFieldValueChange(TextFieldValue("Hello", TextRange(5)))
+        assertTrue(editor.canUndo)
+        assertFalse(editor.canRedo)
+
+        // 2. Selection formatting (Bold + Heading + Alignment) pushes snapshots
+        editor.onTextFieldValueChange(editor.textFieldValue.copy(selection = TextRange(0, 5)))
+        editor.toggleBold()
+        editor.toggleHeading(1)
+        editor.setAlignment(TextAlignment.CENTER)
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Bold)))
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Heading(1))))
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Align(TextAlignment.CENTER))))
+
+        // Undo Alignment
+        assertTrue(editor.undo())
+        assertFalse(editor.spans.any { it.style is SpanStyle.Align })
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Heading(1))))
+        assertTrue(editor.canRedo)
+
+        // Undo Heading
+        assertTrue(editor.undo())
+        assertFalse(editor.spans.any { it.style is SpanStyle.Heading })
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Bold)))
+
+        // Undo Bold
+        assertTrue(editor.undo())
+        assertTrue(editor.spans.isEmpty())
+
+        // Undo Text typing -> empty document
+        assertTrue(editor.undo())
+        assertEquals("", editor.text)
+        assertFalse(editor.canUndo)
+        assertTrue(editor.canRedo)
+
+        // Redo back step by step
+        assertTrue(editor.redo())
+        assertEquals("Hello", editor.text)
+        assertTrue(editor.redo())
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Bold)))
+        assertTrue(editor.redo())
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Heading(1))))
+        assertTrue(editor.redo())
+        assertTrue(editor.spans.contains(Span(0, 5, SpanStyle.Align(TextAlignment.CENTER))))
+        assertFalse(editor.canRedo)
+
+        // New edit clears redo stack
+        assertTrue(editor.undo())
+        assertTrue(editor.canRedo)
+        editor.onTextFieldValueChange(TextFieldValue("Hello!", TextRange(6)))
+        assertFalse(editor.canRedo)
+        assertEquals("Hello!", editor.text)
+    }
 }
 
 

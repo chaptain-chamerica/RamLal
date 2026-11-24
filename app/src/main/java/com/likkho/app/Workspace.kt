@@ -1,10 +1,13 @@
 package com.likkho.app
 
+import android.graphics.Paint
+import android.graphics.Typeface
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -25,30 +28,28 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontSynthesis
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.res.ResourcesCompat
 import com.likkho.app.editor.BlockDecorationLayoutCalculator
+import com.likkho.app.editor.FontRegistry
 import com.likkho.app.editor.HeadingTypographySpec
 import com.likkho.app.editor.HighlightLayoutCalculator
 import com.likkho.app.editor.RichTextEditorState
@@ -59,18 +60,18 @@ import com.likkho.app.editor.model.SpanStyle
 import com.likkho.app.editor.toComposeTextAlign
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 /**
  * WORKSPACE (WritingWorkspace.tsx). Opens in READING mode for existing diary (Edit button), EDIT mode for new.
  * Header: back | PFP | heading | [delete] | Reminder | Edit/Save. Then reminder sub-bar,
- * text-only canvas, and the formatting toolbar docked at bottom (edit mode only).
+ * rich-text document canvas, and the formatting toolbar docked at bottom (edit mode only).
  */
 @Composable
 fun WorkspaceScreen(vm: AppViewModel) {
     val w = wiki(); val hooks = vm.hooks; val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val textToolbar = LocalTextToolbar.current
+    val uriHandler = LocalUriHandler.current
     val initial = vm.editingLog
     var reading by remember { mutableStateOf(initial != null) }
     var heading by remember { mutableStateOf(initial?.heading.orEmpty()) }
@@ -234,7 +235,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
             }
         }
 
-        // ---------- canvas (text-only) ----------
+        // ---------- rich-text document canvas ----------
         BoxWithConstraints(
             Modifier
                 .weight(1f)
@@ -251,12 +252,20 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 WorkspaceWritingLayer(
                     editorState = editorState,
                     reading = reading,
-                    customFontsCount = vm.customFonts.size,
-                    hooks = hooks,
                     minCanvasHeight = canvasViewportHeight,
-                    onSpoilerPrompt = { spoilerUnlockPrompt = it },
-                    onStatus = { msg, kind -> vm.showStatus(msg, kind) },
-                    onSaveSilent = { save(showFeedback = false) },
+                    onOpenLink = { url ->
+                        runCatching { uriHandler.openUri(url) }.onFailure {
+                            vm.showStatus("Could not open link.", BannerKind.ERROR)
+                        }
+                    },
+                    onSpoilerTap = { sp -> spoilerUnlockPrompt = sp },
+                    onCopySpoilerBlocked = { blocked ->
+                        vm.showStatus("Enter spoiler passcode to copy hidden text.", BannerKind.ERROR)
+                        spoilerUnlockPrompt = blocked
+                    },
+                    onCopyMaskedSpoiler = {
+                        vm.showStatus("Copied with hidden spoiler masked.", BannerKind.INFO)
+                    }
                 )
             }
         }
@@ -279,12 +288,13 @@ fun WorkspaceScreen(vm: AppViewModel) {
             onEditBg = {},
             onInsertText = { inserted ->
                 val current = editorState.textFieldValue
-                val pos = current.selection.start
-                val newText = current.text.substring(0, pos) + inserted + current.text.substring(pos)
+                val start = current.selection.min.coerceIn(0, current.text.length)
+                val end = current.selection.max.coerceIn(start, current.text.length)
+                val newText = current.text.substring(0, start) + inserted + current.text.substring(end)
                 editorState.onTextFieldValueChange(
                     current.copy(
                         text = newText,
-                        selection = androidx.compose.ui.text.TextRange(pos + inserted.length)
+                        selection = TextRange(start + inserted.length)
                     )
                 )
             },
@@ -360,361 +370,291 @@ fun WorkspaceScreen(vm: AppViewModel) {
 private fun WorkspaceWritingLayer(
     editorState: RichTextEditorState,
     reading: Boolean,
-    customFontsCount: Int,
-    hooks: FeatureHooks,
     minCanvasHeight: Dp,
-    onSpoilerPrompt: (SpanStyle.Spoiler) -> Unit,
-    onStatus: (String, BannerKind) -> Unit,
-    onSaveSilent: () -> Unit,
+    onOpenLink: (String) -> Unit,
+    onSpoilerTap: (SpanStyle.Spoiler) -> Unit,
+    onCopySpoilerBlocked: (SpanStyle.Spoiler) -> Unit,
+    onCopyMaskedSpoiler: () -> Unit,
 ) {
     val w = wiki()
+    val context = LocalContext.current
     val density = LocalDensity.current
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val fontFamilyResolver = LocalFontFamilyResolver.current
-    val systemClipboard = LocalClipboardManager.current
-
-    val isTextEmpty by remember(editorState) { derivedStateOf { editorState.text.isEmpty() } }
-    val hasTodoSpans by remember(editorState) { derivedStateOf { editorState.spans.any { it.style is SpanStyle.Todo } } }
-    val hasInteractiveSpans by remember(editorState) {
-        derivedStateOf {
-            editorState.spans.any {
-                val st = it.style
-                st is SpanStyle.Link || (st is SpanStyle.Spoiler && !editorState.isSpoilerUnlocked(st))
-            }
-        }
-    }
-    val emptyPendingIndent = if (isTextEmpty && editorState.activePendingIndent > 0) {
-        val indSp = (editorState.activePendingIndent * 24).sp
-        TextIndent(firstLine = indSp, restLine = indSp)
-    } else {
-        TextIndent.None
-    }
-    val editorTextStyle = androidx.compose.ui.text.TextStyle(
-        fontFamily = WikiFonts.prose,
-        fontSize = 16.sp,
-        color = w.text,
-        textAlign = editorState.canvasAlignment.toComposeTextAlign(),
-        textIndent = emptyPendingIndent
-    )
-    val resolvedTypefaceState = remember(fontFamilyResolver) {
-        fontFamilyResolver.resolve(
-            fontFamily = WikiFonts.prose,
-            fontWeight = FontWeight.Normal,
-            fontStyle = FontStyle.Normal,
-            fontSynthesis = FontSynthesis.All,
-        )
-    }
-    val fontMetrics = remember(resolvedTypefaceState.value, editorTextStyle.fontSize, density) {
-        android.graphics.Paint().apply {
-            typeface = resolvedTypefaceState.value as? android.graphics.Typeface
-            textSize = with(density) { editorTextStyle.fontSize.toPx() }
-        }.fontMetrics
-    }
-    val resolvedHeadingTypeface = remember(fontFamilyResolver) {
-        fontFamilyResolver.resolve(
-            fontFamily = HeadingTypographySpec.fontFamily,
-            fontWeight = FontWeight.Bold,
-            fontStyle = FontStyle.Normal,
-            fontSynthesis = FontSynthesis.All,
-        )
-    }
-    val headingFontMetrics = remember(resolvedHeadingTypeface.value, density) {
-        mapOf(
-            1 to android.graphics.Paint().apply {
-                typeface = resolvedHeadingTypeface.value as? android.graphics.Typeface
-                textSize = with(density) { HeadingTypographySpec.fontSize(1).toPx() }
-            }.fontMetrics,
-            2 to android.graphics.Paint().apply {
-                typeface = resolvedHeadingTypeface.value as? android.graphics.Typeface
-                textSize = with(density) { HeadingTypographySpec.fontSize(2).toPx() }
-            }.fontMetrics,
-            3 to android.graphics.Paint().apply {
-                typeface = resolvedHeadingTypeface.value as? android.graphics.Typeface
-                textSize = with(density) { HeadingTypographySpec.fontSize(3).toPx() }
-            }.fontMetrics,
-        )
-    }
-    val spoilerClipboardManager = remember(systemClipboard, editorState) {
-        object : ClipboardManager by systemClipboard {
-            override fun setText(annotatedString: AnnotatedString) {
-                when (val copyResult = editorState.prepareClipboardCopy()) {
-                    is RichTextEditorState.SpoilerCopyResult.AllowPlain -> {
-                        systemClipboard.setText(annotatedString)
-                    }
-                    is RichTextEditorState.SpoilerCopyResult.Masked -> {
-                        systemClipboard.setText(AnnotatedString(copyResult.text))
-                        onStatus("Copied with hidden spoiler text masked.", BannerKind.INFO)
-                    }
-                    is RichTextEditorState.SpoilerCopyResult.Blocked -> {
-                        onStatus("Enter spoiler passcode to copy hidden text.", BannerKind.ERROR)
-                        onSpoilerPrompt(copyResult.blockingSpoiler)
-                    }
-                }
-            }
-        }
-    }
-    val scratchPaint = remember { android.graphics.Paint() }
-    val segmentLineMetrics: (Int, Int) -> Pair<Float, Float> = remember(
-        editorState,
-        fontMetrics,
-        headingFontMetrics,
-        resolvedTypefaceState.value,
-        density,
-        context
-    ) {
-        { segStart, segEnd ->
-            var bestLevel: Int? = null
-            var activeFont: String? = null
-            var customSizePx: Float? = null
-            var hasQuote = false
-            var hasCode = false
-            var isScript = false
-            for (sp in editorState.spans) {
-                if (sp.start < segEnd && sp.end > segStart) {
-                    when (val st = sp.style) {
-                        is SpanStyle.Heading -> {
-                            if (bestLevel == null || st.level < bestLevel) bestLevel = st.level
-                        }
-                        is SpanStyle.FontId -> activeFont = st.fontId
-                        is SpanStyle.SizePx -> customSizePx = st.sizePx
-                        is SpanStyle.Quote -> hasQuote = true
-                        is SpanStyle.Code -> hasCode = true
-                        is SpanStyle.Superscript, is SpanStyle.Subscript -> isScript = true
-                        else -> {}
-                    }
-                }
-            }
-            val effectiveFontId = activeFont ?: when {
-                hasCode -> com.likkho.app.editor.FontRegistry.BUILTIN_MONO
-                hasQuote -> com.likkho.app.editor.FontRegistry.BUILTIN_SERIF
-                else -> null
-            }
-            val baseSp = customSizePx?.coerceIn(10f, 48f)?.sp
-                ?: bestLevel?.let { HeadingTypographySpec.fontSize(it) }
-                ?: if (hasCode && activeFont == null) 14.5.sp else editorTextStyle.fontSize
-            val effectiveSp = if (isScript) (baseSp.value * 0.72f).coerceAtLeast(8f).sp else baseSp
-            val pxSize = with(density) { effectiveSp.toPx() }
-            val resolvedTf = effectiveFontId?.let {
-                com.likkho.app.editor.FontRegistry.resolveTypeface(context, it)
-            }
-            val (baseAscent, baseDescent) = when {
-                resolvedTf != null -> {
-                    scratchPaint.typeface = resolvedTf
-                    scratchPaint.textSize = pxSize
-                    val fm = scratchPaint.fontMetrics
-                    fm.ascent to fm.descent
-                }
-                bestLevel != null && !isScript -> {
-                    val fm = headingFontMetrics[bestLevel] ?: fontMetrics
-                    fm.ascent to fm.descent
-                }
-                isScript -> {
-                    scratchPaint.typeface = resolvedTypefaceState.value as? android.graphics.Typeface
-                    scratchPaint.textSize = pxSize
-                    val fm = scratchPaint.fontMetrics
-                    fm.ascent to fm.descent
-                }
-                else -> fontMetrics.ascent to fontMetrics.descent
-            }
-            val curText = editorState.text
-            val hasDevanagari = (segStart until segEnd.coerceAtMost(curText.length)).any { idx ->
-                curText[idx] in '\u0900'..'\u097F'
-            }
-            if (hasDevanagari) {
-                scratchPaint.typeface = android.graphics.Typeface.DEFAULT
-                scratchPaint.textSize = pxSize
-                val devFm = scratchPaint.fontMetrics
-                minOf(baseAscent, devFm.ascent) to maxOf(baseDescent, devFm.descent)
-            } else {
-                baseAscent to baseDescent
-            }
-        }
-    }
+    val viewConfig = LocalViewConfiguration.current
+    val baseClipboard = LocalClipboardManager.current
 
     var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
     val reusableCheckPath = remember { Path() }
 
-    val currentLayout = textLayoutResult
-    val validLayout = if (currentLayout != null &&
-        currentLayout.lineCount > 0 &&
-        currentLayout.layoutInput.text.text == editorState.text
+    val devanagariTypeface = remember(context) {
+        runCatching { ResourcesCompat.getFont(context, R.font.noto_serif_devanagari) }.getOrNull()
+    }
+    val baseProseTypeface = remember(context) {
+        runCatching { ResourcesCompat.getFont(context, R.font.lora) }.getOrNull() ?: Typeface.SERIF
+    }
+    val serifTypeface = remember(context) {
+        runCatching { ResourcesCompat.getFont(context, R.font.cormorant_garamond) }.getOrNull() ?: Typeface.SERIF
+    }
+    val monoTypeface = remember(context) {
+        runCatching { ResourcesCompat.getFont(context, R.font.ibm_plex_mono) }.getOrNull() ?: Typeface.MONOSPACE
+    }
+
+    val measurePaint = remember { Paint() }
+    val baseFontSizePx = with(density) { 16.sp.toPx() }
+    val (baseAscentPx, baseDescentPx) = remember(baseProseTypeface, baseFontSizePx) {
+        measurePaint.typeface = baseProseTypeface
+        measurePaint.textSize = baseFontSizePx
+        val fm = measurePaint.fontMetrics
+        fm.ascent to fm.descent
+    }
+
+    val segmentLineMetrics: (Int, Int) -> Pair<Float, Float> = remember(
+        editorState.text,
+        editorState.spans,
+        density.density,
+        density.fontScale,
+        context
     ) {
-        currentLayout
-    } else {
-        null
-    }
-    val spansSnapshot = editorState.spans
-    val cachedBlockDecorations = remember(validLayout, spansSnapshot, density.density) {
-        if (validLayout == null) {
-            null
-        } else {
-            BlockDecorationLayoutCalculator.computeStaticDecorations(
-                layoutResult = validLayout,
-                spans = spansSnapshot,
-                densityScale = density.density
-            )
+        { segStart, segEnd ->
+            val raw = editorState.text
+            var fontId: String? = null
+            var sizeSp: Float? = null
+            var headingLvl: Int? = null
+            var hasCode = false
+            var hasQuote = false
+            for (sp in editorState.spans) {
+                if (sp.start < segEnd && sp.end > segStart) {
+                    when (val st = sp.style) {
+                        is SpanStyle.FontId -> fontId = st.fontId
+                        is SpanStyle.SizePx -> sizeSp = st.sizePx.coerceIn(10f, 48f)
+                        is SpanStyle.Heading -> if (headingLvl == null || st.level < headingLvl) headingLvl = st.level
+                        is SpanStyle.Code -> hasCode = true
+                        is SpanStyle.Quote -> hasQuote = true
+                        else -> {}
+                    }
+                }
+            }
+            val hasDevanagari = (segStart until segEnd.coerceAtMost(raw.length)).any { idx ->
+                raw[idx] in '\u0900'..'\u097F'
+            }
+            val effSp = sizeSp
+                ?: headingLvl?.let { HeadingTypographySpec.fontSize(it).value }
+                ?: if (hasCode) 14.5f else 16f
+            val tf = when {
+                fontId != null -> FontRegistry.resolveTypeface(context, fontId)
+                hasCode -> monoTypeface
+                headingLvl != null || hasQuote -> serifTypeface
+                else -> baseProseTypeface
+            } ?: baseProseTypeface
+            measurePaint.typeface = if (hasDevanagari && fontId == null && !hasCode) {
+                devanagariTypeface ?: tf
+            } else {
+                tf
+            }
+            measurePaint.textSize = with(density) { effSp.sp.toPx() }
+            val fm = measurePaint.fontMetrics
+            fm.ascent to fm.descent
         }
     }
-    val activeHeadingLine = if (editorState.activeHeadingLevel != null && validLayout != null) {
-        val safeCursor = editorState.selection.start.coerceIn(0, validLayout.layoutInput.text.text.length)
-        validLayout.getLineForOffset(safeCursor).coerceIn(0, validLayout.lineCount - 1)
-    } else {
-        -1
+
+    val cachedBlockDecorations = remember(textLayoutResult, editorState.spans, density.density) {
+        val lr = textLayoutResult ?: return@remember null
+        BlockDecorationLayoutCalculator.computeStaticDecorations(
+            layoutResult = lr,
+            spans = editorState.spans,
+            densityScale = density.density
+        )
     }
-    val activeHeadingDivider = remember(validLayout, cachedBlockDecorations, activeHeadingLine) {
-        if (validLayout == null || cachedBlockDecorations == null || activeHeadingLine < 0) {
-            null
-        } else {
-            BlockDecorationLayoutCalculator.computeActiveHeadingDivider(
-                layoutResult = validLayout,
-                cursorLine = activeHeadingLine,
-                staticDividers = cachedBlockDecorations.staticDividers
-            )
+
+    val activeHeadingDivider = remember(
+        textLayoutResult,
+        cachedBlockDecorations,
+        editorState.activeHeadingLevel,
+        editorState.selection.start
+    ) {
+        val lr = textLayoutResult ?: return@remember null
+        val cached = cachedBlockDecorations ?: return@remember null
+        if (editorState.activeHeadingLevel == null || lr.lineCount <= 0) return@remember null
+        val safeCursor = editorState.selection.start.coerceIn(0, lr.layoutInput.text.text.length)
+        val cursorLine = lr.getLineForOffset(safeCursor).coerceIn(0, lr.lineCount - 1)
+        BlockDecorationLayoutCalculator.computeActiveHeadingDivider(lr, cursorLine, cached.staticDividers)
+    }
+
+    val cachedHighlights = remember(textLayoutResult, editorState.spans, density.density, density.fontScale) {
+        val lr = textLayoutResult ?: return@remember emptyList()
+        HighlightLayoutCalculator.computeCachedHighlights(
+            layoutResult = lr,
+            spans = editorState.spans,
+            ascentPx = baseAscentPx,
+            descentPx = baseDescentPx,
+            lineMetrics = segmentLineMetrics
+        )
+    }
+
+    val cachedSpoilers = remember(
+        textLayoutResult,
+        editorState.spans,
+        editorState.unlockedSpoilerIds,
+        density.density,
+        density.fontScale
+    ) {
+        val lr = textLayoutResult ?: return@remember emptyList()
+        HighlightLayoutCalculator.computeCachedSpoilers(
+            layoutResult = lr,
+            spans = editorState.spans,
+            unlockedSpoilerIds = editorState.unlockedSpoilerIds,
+            ascentPx = baseAscentPx,
+            descentPx = baseDescentPx,
+            lineMetrics = segmentLineMetrics
+        )
+    }
+
+    val visualTransformation = remember(
+        editorState.spans,
+        editorState.unlockedSpoilerIds,
+        editorState.canvasAlignment,
+        w
+    ) {
+        RichTextVisualTransformation(
+            spans = editorState.spans,
+            defaultTextColor = w.text,
+            quoteTextColor = w.text.copy(alpha = 0.88f),
+            codeTextColor = w.text,
+            numberedColor = w.accent,
+            todoCheckedTextColor = w.muted,
+            linkColor = w.link,
+            unlockedSpoilerIds = editorState.unlockedSpoilerIds,
+            defaultAlignment = editorState.canvasAlignment
+        )
+    }
+
+    val baseTextStyle = remember(w, editorState.canvasAlignment) {
+        TextStyle(
+            fontFamily = WikiFonts.prose,
+            fontSize = 16.sp,
+            lineHeight = 26.sp,
+            color = w.text,
+            textAlign = editorState.canvasAlignment.toComposeTextAlign()
+        )
+    }
+
+    val spoilerClipboardManager = remember(baseClipboard, editorState) {
+        object : ClipboardManager {
+            override fun setText(annotatedString: AnnotatedString) {
+                if (!editorState.hasSelection) {
+                    baseClipboard.setText(annotatedString)
+                    return
+                }
+                when (val res = editorState.prepareClipboardCopy()) {
+                    is RichTextEditorState.SpoilerCopyResult.AllowPlain -> {
+                        baseClipboard.setText(AnnotatedString(res.text))
+                    }
+                    is RichTextEditorState.SpoilerCopyResult.Masked -> {
+                        baseClipboard.setText(AnnotatedString(res.text))
+                        onCopyMaskedSpoiler()
+                    }
+                    is RichTextEditorState.SpoilerCopyResult.Blocked -> {
+                        onCopySpoilerBlocked(res.blockingSpoiler)
+                    }
+                }
+            }
+
+            override fun getText(): AnnotatedString? = baseClipboard.getText()
+
+            override fun hasText(): Boolean = baseClipboard.hasText()
         }
     }
-    val cachedHighlights = remember(validLayout, spansSnapshot, fontMetrics, segmentLineMetrics) {
-        if (validLayout == null || spansSnapshot.isEmpty()) {
-            emptyList()
-        } else {
-            HighlightLayoutCalculator.computeCachedHighlights(
-                layoutResult = validLayout,
-                spans = spansSnapshot,
-                ascentPx = fontMetrics.ascent,
-                descentPx = fontMetrics.descent,
-                lineMetrics = segmentLineMetrics
-            )
-        }
+
+    val hasInteractiveSpans = remember(editorState.spans) {
+        editorState.spans.any { it.style is SpanStyle.Link || it.style is SpanStyle.Spoiler }
     }
-    val unlockedSpoilers = editorState.unlockedSpoilerIds
-    val cachedSpoilers = remember(validLayout, spansSnapshot, unlockedSpoilers, fontMetrics, segmentLineMetrics) {
-        if (validLayout == null || spansSnapshot.isEmpty()) {
-            emptyList()
-        } else {
-            HighlightLayoutCalculator.computeCachedSpoilers(
-                layoutResult = validLayout,
-                spans = spansSnapshot,
-                unlockedSpoilerIds = unlockedSpoilers,
-                ascentPx = fontMetrics.ascent,
-                descentPx = fontMetrics.descent,
-                lineMetrics = segmentLineMetrics
-            )
-        }
-    }
+    val currentReading by rememberUpdatedState(reading)
+    val currentTextLayout by rememberUpdatedState(textLayoutResult)
+
+    val quoteBgColor = if (w.isDark) w.surface else w.surface.copy(alpha = 0.9f)
+    val quoteBarColor = w.accent
+    val codeBgColor = w.surface
+    val codeBorderColor = w.border.copy(alpha = 0.7f)
+    val dividerColor = w.border
 
     CompositionLocalProvider(LocalClipboardManager provides spoilerClipboardManager) {
         BasicTextField(
             value = editorState.textFieldValue,
-            onValueChange = { editorState.onTextFieldValueChange(it) },
-            readOnly = reading,
-            textStyle = editorTextStyle,
-            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-            cursorBrush = SolidColor(if (reading) Color.Transparent else w.accent),
-            visualTransformation = remember(
-                editorState.spans,
-                editorState.canvasAlignment,
-                editorState.unlockedSpoilerIds,
-                customFontsCount,
-                w.isDark
-            ) {
-                RichTextVisualTransformation(
-                    spans = editorState.spans,
-                    defaultTextColor = w.text,
-                    quoteTextColor = w.text.copy(alpha = 0.85f),
-                    codeTextColor = w.text,
-                    numberedColor = w.accent,
-                    todoCheckedTextColor = w.muted,
-                    linkColor = w.link,
-                    defaultAlignment = editorState.canvasAlignment,
-                    unlockedSpoilerIds = editorState.unlockedSpoilerIds
-                )
-            },
-            onTextLayout = { textLayoutResult = it },
+            onValueChange = { newVal -> editorState.onTextFieldValueChange(newVal) },
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = minCanvasHeight)
                 .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 32.dp)
-                .then(
-                    if (hasInteractiveSpans) {
-                        Modifier.pointerInput(editorState, hooks) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                                val downPos = down.position
-                                val downTime = down.uptimeMillis
-                                val touchSlop = viewConfiguration.touchSlop
-                                val touchSlopSq = touchSlop * touchSlop
-                                val longPressTimeout = viewConfiguration.longPressTimeoutMillis
-                                while (true) {
-                                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (change.uptimeMillis - downTime > longPressTimeout) break
-                                    val dx = change.position.x - downPos.x
-                                    val dy = change.position.y - downPos.y
-                                    if (dx * dx + dy * dy > touchSlopSq) break
-                                    if (change.changedToUpIgnoreConsumed()) {
-                                        val layout = textLayoutResult
-                                        if (layout != null &&
-                                            layout.layoutInput.text.text == editorState.text &&
-                                            editorState.text.isNotEmpty()
-                                        ) {
-                                            val rawOffset = layout.getOffsetForPosition(change.position)
-                                            val textLen = layout.layoutInput.text.text.length
-                                            val candidateOffsets = buildList {
-                                                if (rawOffset in 0 until textLen) add(rawOffset)
-                                                if (rawOffset - 1 in 0 until textLen) add(rawOffset - 1)
-                                            }
-                                            val tappedSpoiler = candidateOffsets.firstNotNullOfOrNull { idx ->
-                                                val box = layout.getBoundingBox(idx)
-                                                if (change.position.x in (box.left - 8f)..(box.right + 8f) &&
-                                                    change.position.y in (box.top - 8f)..(box.bottom + 8f)
-                                                ) {
-                                                    editorState.lockedSpoilerAtOffset(idx)
-                                                } else null
-                                            }
-                                            if (tappedSpoiler != null) {
-                                                change.consume()
-                                                onSpoilerPrompt(tappedSpoiler)
-                                                break
-                                            }
-                                            val hitOffset = candidateOffsets.firstOrNull { idx ->
-                                                val box = layout.getBoundingBox(idx)
-                                                change.position.x in (box.left - 8f)..(box.right + 8f) &&
-                                                    change.position.y in (box.top - 8f)..(box.bottom + 8f) &&
-                                                    editorState.linkAtOffset(idx) != null
-                                            }
-                                            val tappedUrl = hitOffset?.let { editorState.linkAtOffset(it) }
-                                            if (!tappedUrl.isNullOrBlank()) {
-                                                change.consume()
-                                                hooks.openUrl(tappedUrl)
-                                            }
-                                        }
-                                        break
-                                    }
+                .testTag("workspace_rich_editor"),
+            readOnly = reading,
+            textStyle = baseTextStyle,
+            cursorBrush = SolidColor(if (reading) Color.Transparent else w.accent),
+            visualTransformation = visualTransformation,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Sentences,
+                autoCorrectEnabled = true
+            ),
+            onTextLayout = { textLayoutResult = it },
+            decorationBox = { innerTextField ->
+                val tapModifier = if (hasInteractiveSpans) {
+                    Modifier.pointerInput(editorState, viewConfig) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val up = waitForUpOrCancellation() ?: return@awaitEachGesture
+                            val dx = up.position.x - down.position.x
+                            val dy = up.position.y - down.position.y
+                            val slop = viewConfig.touchSlop
+                            if (dx * dx + dy * dy > slop * slop) return@awaitEachGesture
+                            val lr = currentTextLayout ?: return@awaitEachGesture
+                            val docLen = lr.layoutInput.text.text.length
+                            if (docLen <= 0) return@awaitEachGesture
+                            val offset = lr.getOffsetForPosition(up.position)
+                            if (offset !in 0 until docLen) return@awaitEachGesture
+                            val box = lr.getBoundingBox(offset)
+                            if (up.position.x < box.left - 4f || up.position.x > box.right + 4f ||
+                                up.position.y < box.top - 2f || up.position.y > box.bottom + 2f
+                            ) {
+                                return@awaitEachGesture
+                            }
+                            val lockedSpoiler = editorState.lockedSpoilerAtOffset(offset)
+                            if (lockedSpoiler != null) {
+                                onSpoilerTap(lockedSpoiler)
+                                return@awaitEachGesture
+                            }
+                            if (currentReading) {
+                                val linkUrl = editorState.linkAtOffset(offset)
+                                if (linkUrl != null) {
+                                    onOpenLink(linkUrl)
                                 }
                             }
                         }
-                    } else Modifier
-                ),
-            decorationBox = { inner ->
+                    }
+                } else {
+                    Modifier
+                }
+
                 Box(
                     modifier = Modifier
+                        .fillMaxWidth()
+                        .then(tapModifier)
                         .drawBehind {
-                            val cached = cachedBlockDecorations ?: return@drawBehind
-                            drawCachedBlockDecorations(
-                                cached = cached,
-                                activeHeadingDivider = activeHeadingDivider,
-                                reusableCheckPath = reusableCheckPath,
-                                quoteBgColor = w.accent.copy(alpha = if (w.isDark) 0.11f else 0.055f),
-                                quoteBarColor = w.accent,
-                                codeBgColor = w.surface,
-                                codeBorderColor = w.border.copy(alpha = 0.55f),
-                                dividerColor = w.border,
-                                bulletColor = w.text.copy(alpha = 0.85f),
-                                todoUncheckedBorderColor = w.text.copy(alpha = 0.58f),
-                                todoUncheckedBgColor = w.surface,
-                                todoCheckedFillColor = w.accent
-                            )
                             if (cachedHighlights.isNotEmpty()) {
                                 drawCachedHighlightRects(cachedHighlights)
+                            }
+                            if (cachedBlockDecorations != null) {
+                                drawCachedBlockDecorations(
+                                    cached = cachedBlockDecorations,
+                                    activeHeadingDivider = activeHeadingDivider,
+                                    reusableCheckPath = reusableCheckPath,
+                                    quoteBgColor = quoteBgColor,
+                                    quoteBarColor = quoteBarColor,
+                                    codeBgColor = codeBgColor,
+                                    codeBorderColor = codeBorderColor,
+                                    dividerColor = dividerColor,
+                                    bulletColor = w.accent,
+                                    todoUncheckedBorderColor = w.border,
+                                    todoUncheckedBgColor = w.bg,
+                                    todoCheckedFillColor = w.accent
+                                )
                             }
                         }
                         .drawWithContent {
@@ -724,41 +664,35 @@ private fun WorkspaceWritingLayer(
                             }
                         }
                 ) {
-                    if (isTextEmpty) {
+                    if (editorState.text.isEmpty()) {
                         Text(
-                            text = "Start writing...",
-                            modifier = Modifier.fillMaxWidth(),
-                            style = proseStyle(16.sp, w.muted.copy(alpha = 0.65f), italic = true).copy(
-                                textAlign = editorState.canvasAlignment.toComposeTextAlign(),
-                                textIndent = emptyPendingIndent
-                            )
+                            text = if (reading) "Empty entry." else "Start writing...",
+                            style = proseStyle(16.sp, w.muted.copy(alpha = 0.55f))
+                                .copy(textAlign = editorState.effectiveAlignment.toComposeTextAlign()),
+                            modifier = Modifier.fillMaxWidth()
                         )
                     }
-                    inner()
-                    if (hasTodoSpans) {
-                        val todoGeoms = cachedBlockDecorations?.todos.orEmpty()
-                        todoGeoms.forEachIndexed { idx, geom ->
-                            key(geom.spanStart) {
-                                val hitW = with(density) { (geom.hitRight - geom.hitLeft).coerceAtLeast(24f).toDp() }
-                                val hitH = with(density) { (geom.hitBottom - geom.hitTop).coerceAtLeast(24f).toDp() }
-                                Box(
-                                    modifier = Modifier
-                                        .offset { IntOffset(geom.hitLeft.roundToInt(), geom.hitTop.roundToInt()) }
-                                        .size(hitW, hitH)
-                                        .semantics {
-                                            contentDescription = if (geom.checked) "Checked item" else "Unchecked item"
-                                        }
-                                        .testTag("canvas_checkbox_$idx")
-                                        .clickable(
-                                            interactionSource = remember { MutableInteractionSource() },
-                                            indication = null
-                                        ) {
-                                            if (editorState.toggleTodoAt(geom.spanStart) && reading) {
-                                                onSaveSilent()
-                                            }
-                                        }
-                                )
-                            }
+                    innerTextField()
+                    val todos = cachedBlockDecorations?.todos
+                    if (!todos.isNullOrEmpty()) {
+                        todos.forEachIndexed { idx, td ->
+                            val leftDp = with(density) { td.hitLeft.toDp() }
+                            val topDp = with(density) { td.hitTop.toDp() }
+                            val widthDp = with(density) { (td.hitRight - td.hitLeft).coerceAtLeast(24f).toDp() }
+                            val heightDp = with(density) { (td.hitBottom - td.hitTop).coerceAtLeast(24f).toDp() }
+                            Box(
+                                Modifier
+                                    .offset(x = leftDp, y = topDp)
+                                    .size(width = widthDp, height = heightDp)
+                                    .testTag("canvas_checkbox_$idx")
+                                    .clickable(
+                                        enabled = !reading,
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        editorState.toggleTodoAt(td.spanStart)
+                                    }
+                            )
                         }
                     }
                 }
@@ -766,6 +700,7 @@ private fun WorkspaceWritingLayer(
         )
     }
 }
+
 
 internal fun collectCanvasMediaIds(
     pfp: Pfp?,

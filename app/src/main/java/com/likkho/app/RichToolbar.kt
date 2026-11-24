@@ -445,8 +445,14 @@ fun RichToolbar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Group 1: History
-            ToolGlyph(Icons.Outlined.Undo, "Undo") { fmt(FormatAction.UNDO, false) }
-            ToolGlyph(Icons.Outlined.Redo, "Redo") { fmt(FormatAction.REDO, false) }
+            val undoEnabled = editorState?.canUndo ?: true
+            val redoEnabled = editorState?.canRedo ?: true
+            ToolGlyph(Icons.Outlined.Undo, "Undo", enabled = undoEnabled) {
+                if (editorState != null) editorState.undo() else fmt(FormatAction.UNDO, false)
+            }
+            ToolGlyph(Icons.Outlined.Redo, "Redo", enabled = redoEnabled) {
+                if (editorState != null) editorState.redo() else fmt(FormatAction.REDO, false)
+            }
 
             CategorySep()
 
@@ -686,10 +692,12 @@ private fun ToolGlyph(
     desc: String,
     on: Boolean = false,
     danger: Boolean = false,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val w = wiki()
     val tint = when {
+        !enabled -> w.muted.copy(alpha = 0.35f)
         danger -> w.danger
         on -> w.accent
         else -> w.text.copy(alpha = 0.78f)
@@ -698,6 +706,7 @@ private fun ToolGlyph(
         modifier = Modifier
             .size(36.dp)
             .clickable(
+                enabled = enabled,
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick,
