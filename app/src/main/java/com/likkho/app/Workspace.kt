@@ -52,7 +52,6 @@ import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
@@ -96,57 +95,8 @@ import kotlin.math.roundToInt
  * canvas (bg image + draggable images/audio + text), and the formatting toolbar docked at bottom (edit mode only).
  * TODO(StudioAI): the text area is a plain BasicTextField; replace it with a real rich-text editor and wire hooks.applyXxx.
  */
-internal class WorkspacePerfProbe {
-    var workspaceRecompositions = 0
-    var headerRecompositions = 0
-    var toolbarRecompositions = 0
-    var canvasBoxRecompositions = 0
-    var canvasBoxLayouts = 0
-    var mediaItemRecompositions = 0
-    var mediaItemLayouts = 0
-    var textFieldRecompositions = 0
-    var textFieldLayouts = 0
-    var bitmapLoadCalls = 0
-    var thumbnailLoadCalls = 0
-
-    fun reset() {
-        workspaceRecompositions = 0
-        headerRecompositions = 0
-        toolbarRecompositions = 0
-        canvasBoxRecompositions = 0
-        canvasBoxLayouts = 0
-        mediaItemRecompositions = 0
-        mediaItemLayouts = 0
-        textFieldRecompositions = 0
-        textFieldLayouts = 0
-        bitmapLoadCalls = 0
-        thumbnailLoadCalls = 0
-    }
-}
-
-internal val LocalWorkspacePerfProbe = staticCompositionLocalOf<WorkspacePerfProbe?> { null }
-
-private inline fun Modifier.trackMeasureCount(
-    probe: WorkspacePerfProbe?,
-    crossinline onMeasure: (WorkspacePerfProbe) -> Unit
-): Modifier = if (probe == null) {
-    this
-} else {
-    this.layout { measurable, constraints ->
-        onMeasure(probe)
-        val placeable = measurable.measure(constraints)
-        layout(placeable.width, placeable.height) {
-            placeable.placeRelative(0, 0)
-        }
-    }
-}
-
 @Composable
 fun WorkspaceScreen(vm: AppViewModel) {
-    val perfProbe = LocalWorkspacePerfProbe.current
-    if (perfProbe != null) {
-        SideEffect { perfProbe.workspaceRecompositions++ }
-    }
     val w = wiki(); val hooks = vm.hooks; val scope = rememberCoroutineScope()
     val initial = vm.editingLog
     var reading by remember { mutableStateOf(initial != null) }
@@ -520,9 +470,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
     ) {
         // ---------- header ----------
         Column(Modifier.fillMaxWidth().background(w.surface)) {
-            if (perfProbe != null) {
-                SideEffect { perfProbe.headerRecompositions++ }
-            }
             Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconBtn(
                     Icons.AutoMirrored.Outlined.ArrowBack,
@@ -771,14 +718,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     .horizontalScroll(hScroll)
                     .verticalScroll(vScroll)
             ) {
-                Box(
-                    Modifier
-                        .size(canvasWidth, canvasHeight)
-                        .trackMeasureCount(perfProbe) { it.canvasBoxLayouts++ }
-                ) {
-                    if (perfProbe != null) {
-                        SideEffect { perfProbe.canvasBoxRecompositions++ }
-                    }
+                Box(Modifier.size(canvasWidth, canvasHeight)) {
                     // Layer 1: Behind-text media
                     images.filter { it.behindText }.forEach { im ->
                         key(im.id) {
@@ -1021,9 +961,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
                 }
 
                 CompositionLocalProvider(LocalClipboardManager provides spoilerClipboardManager) {
-                if (perfProbe != null) {
-                    SideEffect { perfProbe.textFieldRecompositions++ }
-                }
                 BasicTextField(
                     value = editorState.textFieldValue,
                     onValueChange = { editorState.onTextFieldValueChange(it) },
@@ -1054,7 +991,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = (viewportH - 32.dp).coerceAtLeast(360.dp))
-                        .trackMeasureCount(perfProbe) { it.textFieldLayouts++ }
                         .onFocusChanged { isEditorFocused = it.isFocused }
                         .pointerInput(editorState, hooks) {
                             awaitEachGesture {
@@ -1332,11 +1268,7 @@ fun WorkspaceScreen(vm: AppViewModel) {
         }
 
         // ---------- toolbar ----------
-        if (!reading) {
-            if (perfProbe != null) {
-                SideEffect { perfProbe.toolbarRecompositions++ }
-            }
-            RichToolbar(
+        if (!reading) RichToolbar(
             vm = vm, lockPin = lockPin, bgSrc = bgSrc, bgOpacity = bgOpacity, recording = recording,
             onRecordToggle = {
                 if (!recording) { hooks.startVoiceRecording(); recording = true }
@@ -1370,7 +1302,6 @@ fun WorkspaceScreen(vm: AppViewModel) {
             editorState = editorState,
             mediaImportBusy = importingItem != null,
         )
-        }
         if (!reading) {
             val density = LocalDensity.current
             val isImeOpen = WindowInsets.ime.getBottom(density) > WindowInsets.navigationBars.getBottom(density)
@@ -1714,10 +1645,6 @@ private fun DraggableImage(
         }
     }
 
-    val perfProbe = LocalWorkspacePerfProbe.current
-    if (perfProbe != null) {
-        SideEffect { perfProbe.mediaItemRecompositions++ }
-    }
     val imgKeyLifecycle = LocalBitmapKeyLifecycle.current
     DisposableEffect(im.source) {
         val k = im.source.takeIf { it.isNotBlank() }
@@ -1725,17 +1652,13 @@ private fun DraggableImage(
         onDispose { if (k != null) imgKeyLifecycle?.release(k) }
     }
     val bitmap by produceState<ImageBitmap?>(null, im.source) {
-        value = im.source.takeIf { it.isNotBlank() }?.let {
-            perfProbe?.let { p -> p.bitmapLoadCalls++ }
-            loadImageBitmap(it)
-        }
+        value = im.source.takeIf { it.isNotBlank() }?.let { loadImageBitmap(it) }
     }
 
     Box(
         Modifier
             .offset { IntOffset(with(this) { liveX.dp.roundToPx() }, with(this) { liveY.dp.roundToPx() }) }
             .size(im.width.dp, im.height.dp)
-            .trackMeasureCount(perfProbe) { it.mediaItemLayouts++ }
             .rotate(im.rotation)
             .onGloballyPositioned { itemCoords = it }
             .background(if (bitmap != null) Color.Transparent else w.surface)
@@ -1982,15 +1905,10 @@ private fun AudioCard(
         }
     }
 
-    val perfProbe = LocalWorkspacePerfProbe.current
-    if (perfProbe != null) {
-        SideEffect { perfProbe.mediaItemRecompositions++ }
-    }
     Row(
         Modifier
             .offset { IntOffset(with(this) { liveX.dp.roundToPx() }, with(this) { liveY.dp.roundToPx() }) }
             .size(a.width.dp, a.height.dp)
-            .trackMeasureCount(perfProbe) { it.mediaItemLayouts++ }
             .rotate(a.rotation)
             .onGloballyPositioned { itemCoords = it }
             .background(Color(0xFFB32424))
@@ -2155,10 +2073,6 @@ private fun VideoCard(
         }
     }
 
-    val perfProbe = LocalWorkspacePerfProbe.current
-    if (perfProbe != null) {
-        SideEffect { perfProbe.mediaItemRecompositions++ }
-    }
     val vidKeyLifecycle = LocalBitmapKeyLifecycle.current
     DisposableEffect(v.source) {
         val k = v.source.takeIf { it.isNotBlank() }?.let { "vthumb_$it" }
@@ -2166,10 +2080,7 @@ private fun VideoCard(
         onDispose { if (k != null) vidKeyLifecycle?.release(k) }
     }
     val thumbnail by produceState<ImageBitmap?>(null, v.source) {
-        value = v.source.takeIf { it.isNotBlank() }?.let {
-            perfProbe?.let { p -> p.thumbnailLoadCalls++ }
-            loadThumbnail(it)
-        }
+        value = v.source.takeIf { it.isNotBlank() }?.let { loadThumbnail(it) }
     }
 
     var playing by remember(v.id) { mutableStateOf(false) }
@@ -2274,7 +2185,6 @@ private fun VideoCard(
         Modifier
             .offset { IntOffset(with(this) { liveX.dp.roundToPx() }, with(this) { liveY.dp.roundToPx() }) }
             .size(v.width.dp, v.height.dp)
-            .trackMeasureCount(perfProbe) { it.mediaItemLayouts++ }
             .rotate(v.rotation)
             .clipToBounds()
             .onGloballyPositioned { itemCoords = it }

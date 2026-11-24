@@ -33,11 +33,9 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -66,7 +64,6 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 // ============================================================================
 
 val LocalImageBitmapLoader = staticCompositionLocalOf<(suspend (String) -> ImageBitmap?)?> { null }
-val LocalImageBitmapCacheLookup = staticCompositionLocalOf<((String) -> ImageBitmap?)?> { null }
 val LocalBitmapKeyLifecycle = staticCompositionLocalOf<BitmapKeyLifecycle?> { null }
 
 fun Modifier.wikiBorder(color: Color, width: Dp = 0.5.dp): Modifier = this.border(width, color, RectangleShape)
@@ -241,8 +238,6 @@ fun WikiDialog(
         onDismissRequest = { if (dismissOnOutside) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = dismissOnOutside),
     ) {
-        val dialogTextToolbar = rememberSafeTextToolbar()
-        CompositionLocalProvider(LocalTextToolbar provides dialogTextToolbar) {
         Box(
             Modifier.fillMaxSize().padding(16.dp),
             contentAlignment = Alignment.Center,
@@ -277,7 +272,6 @@ fun WikiDialog(
                 Box(Modifier.fillMaxWidth().height(0.5.dp).background(w.hairline))
                 Column(Modifier.verticalScroll(rememberScrollState())) { content() }
             }
-        }
         }
     }
 }

@@ -1,6 +1,5 @@
 package com.likkho.app
 
-import android.graphics.Bitmap
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -8,10 +7,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
@@ -22,18 +19,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlin.math.min
-import kotlin.math.roundToInt
 
 @Composable
 fun WikiSlider(value: Float, onChange: (Float) -> Unit, range: ClosedFloatingPointRange<Float>, modifier: Modifier = Modifier) {
@@ -44,7 +34,7 @@ fun WikiSlider(value: Float, onChange: (Float) -> Unit, range: ClosedFloatingPoi
 @Composable
 private fun Chip(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val w = wiki()
-    Box(modifier.height(34.dp).background(if (selected) w.accent else w.surface).wikiBorder(if (selected) w.accent else w.border).clickable(onClick = onClick).padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+    Box(modifier.height(34.dp).background(if (selected) w.accent else w.surface).wikiBorder(if (selected) w.accent else w.border).clickable(onClick = onClick).padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
         Text(text, style = sansStyle(11.sp, if (selected) Color.White else w.text, FontWeight.SemiBold), maxLines = 1)
     }
 }
@@ -58,397 +48,90 @@ private fun LabeledSlider(label: String, value: Float, range: ClosedFloatingPoin
     }
 }
 
-/** Image Studio (MediaImageStudioModal): tabs Compress | Filters (22+) | Adjust & Opacity | Crop & Transform. */
+/** Image Studio (MediaImageStudioModal): tabs Compress | Filters (22) | Adjust & Opacity | Crop. Footer Cancel / Apply. */
 @Composable
 fun ImageStudioDialog(
     title: String,
     sizeBytes: Long,
     onClose: () -> Unit,
     previewBitmap: ImageBitmap? = null,
-    loadSourceBitmap: (suspend () -> Bitmap?)? = null,
     initialOpacity: Float = 1f,
     onApplyOpacity: ((Float) -> Unit)? = null,
-    onApplyEdited: (suspend (EncodedImageResult, ImageBitmap?) -> Unit)? = null,
-    onApply: () -> Unit = {},
+    onApply: () -> Unit,
 ) {
     val w = wiki()
-    val scope = rememberCoroutineScope()
     var tab by remember { mutableStateOf(0) }
-    var params by remember(initialOpacity) {
-        mutableStateOf(ImageEditParams(opacity = initialOpacity.coerceIn(0.05f, 1f)))
-    }
-    var sourceBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var previewBaseBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var renderedPreview by remember { mutableStateOf<ImageBitmap?>(null) }
-    var estimatedBytes by remember { mutableStateOf<Long?>(null) }
-    var outputDims by remember { mutableStateOf<Pair<Int, Int>?>(null) }
-    var isApplying by remember { mutableStateOf(false) }
-
-    LaunchedEffect(loadSourceBitmap) {
-        val loaded = loadSourceBitmap?.invoke()
-        if (loaded != null && !loaded.isRecycled) {
-            val previewCopy = withContext(Dispatchers.Default) {
-                val maxDim = 540
-                if (loaded.width <= maxDim && loaded.height <= maxDim) {
-                    loaded.copy(Bitmap.Config.ARGB_8888, false)
-                } else {
-                    val scale = min(maxDim.toFloat() / loaded.width, maxDim.toFloat() / loaded.height)
-                    val nw = (loaded.width * scale).roundToInt().coerceAtLeast(1)
-                    val nh = (loaded.height * scale).roundToInt().coerceAtLeast(1)
-                    Bitmap.createScaledBitmap(loaded, nw, nh, true)
-                }
-            }
-            sourceBitmap = loaded
-            previewBaseBitmap = previewCopy
-            outputDims = loaded.width to loaded.height
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            sourceBitmap?.let { if (!it.isRecycled) it.recycle() }
-            previewBaseBitmap?.let { if (!it.isRecycled) it.recycle() }
-        }
-    }
-
-    LaunchedEffect(params, previewBaseBitmap) {
-        val base = previewBaseBitmap ?: return@LaunchedEffect
-        if (base.isRecycled) return@LaunchedEffect
-        delay(55L)
-        val processed = withContext(Dispatchers.Default) {
-            if (base.isRecycled) null
-            else runCatching { ImageEditorEngine.processBitmapForPreview(base, params) }.getOrNull()
-        }
-        if (processed != null) {
-            renderedPreview = processed.asImageBitmap()
-        }
-    }
-
-    LaunchedEffect(params, sourceBitmap) {
-        val src = sourceBitmap ?: return@LaunchedEffect
-        if (src.isRecycled) return@LaunchedEffect
-        if (!params.hasPixelOrEncodingChanges()) {
-            estimatedBytes = null
-            outputDims = src.width to src.height
-            return@LaunchedEffect
-        }
-        delay(160L)
-        val snapshot = withContext(Dispatchers.Default) {
-            if (src.isRecycled) null
-            else runCatching {
-                val processed = ImageEditorEngine.processBitmapForExport(src, params)
-                try {
-                    val encoded = ImageEditorEngine.encodeBitmap(processed, params)
-                    Triple(encoded.bytes.size.toLong(), encoded.width, encoded.height)
-                } finally {
-                    if (!processed.isRecycled) processed.recycle()
-                }
-            }.getOrNull()
-        }
-        if (snapshot != null) {
-            estimatedBytes = snapshot.first
-            outputDims = snapshot.second to snapshot.third
-        }
-    }
-
-    val isLosslessPng = params.format.startsWith("PNG")
-    val hasChanges = params.hasPixelOrEncodingChanges() || kotlin.math.abs(params.opacity - initialOpacity) > 0.005f
-
-    WikiDialog(
-        onDismiss = { if (!isApplying) onClose() },
-        dismissOnOutside = !isApplying,
-        showClose = !isApplying,
-        title = title,
-        titleIcon = Icons.Outlined.Image,
-        maxWidth = 440.dp,
-        subtitle = "Original: ${formatBytes(sizeBytes)}"
-    ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(166.dp)
-                    .background(w.surface)
-                    .wikiBorder(w.border)
-                    .pointerInput(params.zoom, params.cropAspect) {
-                        if (params.zoom > 1.01f || params.cropAspect != "Free") {
-                            detectDragGestures { change, dragAmount ->
-                                change.consume()
-                                val sensitivity = 2f / (min(size.width, size.height).coerceAtLeast(100)).toFloat()
-                                params = params.copy(
-                                    panX = (params.panX - dragAmount.x * sensitivity).coerceIn(-1f, 1f),
-                                    panY = (params.panY - dragAmount.y * sensitivity).coerceIn(-1f, 1f)
-                                )
-                            }
-                        }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                val activePreview = renderedPreview ?: previewBitmap
-                if (activePreview != null) {
+    var compress by remember { mutableStateOf(false) }
+    var fmt by remember { mutableStateOf("WebP") }
+    var quality by remember { mutableStateOf(80f) }
+    var depth by remember { mutableStateOf("24-bit RGB") }
+    var space by remember { mutableStateOf("sRGB") }
+    var exif by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf(0) }
+    var bright by remember { mutableStateOf(100f) }; var contrast by remember { mutableStateOf(100f) }; var sat by remember { mutableStateOf(100f) }
+    var warm by remember { mutableStateOf(0f) }; var hue by remember { mutableStateOf(0f) }; var opacity by remember(initialOpacity) { mutableStateOf((initialOpacity * 100f).coerceIn(5f, 100f)) }
+    var aspect by remember { mutableStateOf("Free") }; var zoom by remember { mutableStateOf(100f) }
+    WikiDialog(onDismiss = onClose, title = title, titleIcon = Icons.Outlined.Image, maxWidth = 440.dp, subtitle = "Size: ${formatBytes(sizeBytes)}") {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.fillMaxWidth().height(150.dp).background(w.surface).wikiBorder(w.border), contentAlignment = Alignment.Center) {
+                if (previewBitmap != null) {
                     Image(
-                        bitmap = activePreview,
+                        bitmap = previewBitmap,
                         contentDescription = title,
                         contentScale = ContentScale.Fit,
-                        alpha = params.opacity.coerceIn(0.05f, 1f),
+                        alpha = (opacity / 100f).coerceIn(0.05f, 1f),
                         modifier = Modifier.fillMaxSize().padding(6.dp)
                     )
                 } else {
                     Text("No image preview available", style = sansStyle(11.sp, w.muted, FontWeight.Normal))
                 }
-                if (params.zoom > 1.01f) {
-                    Box(
-                        Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(6.dp)
-                            .background(Color.Black.copy(alpha = 0.6f))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text("Drag to pan · ${params.zoom.let { (it * 100).roundToInt() }}%", style = monoStyle(9.sp, Color.White))
-                    }
-                }
             }
-
-            // Live dimensions & compressed byte estimate strip
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(w.surface)
-                    .wikiBorder(w.hairline)
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val dimText = outputDims?.let { "${it.first}×${it.second}px" } ?: "—"
-                Text(dimText, style = monoStyle(10.sp, w.muted), modifier = Modifier.weight(1f))
-                val est = estimatedBytes
-                if (est != null) {
-                    Text("Est: ${formatBytes(est)}", style = monoStyle(10.sp, w.text))
-                    val savedPct = ImageEditorEngine.computeSavingsPercent(sizeBytes, est)
-                    if (savedPct != null) {
-                        Spacer(Modifier.width(6.dp))
-                        val badgeColor = if (savedPct > 0) w.success else w.muted
-                        val sign = if (savedPct > 0) "-$savedPct%" else "+${-savedPct}%"
-                        Text(sign, style = monoStyle(10.sp, badgeColor))
-                    }
-                } else {
-                    Text("Orig: ${formatBytes(sizeBytes)}", style = monoStyle(10.sp, w.muted))
-                }
-            }
-
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf("Compress", "Filters (22+)", "Adjust", "Crop").forEachIndexed { i, t ->
-                    Chip(t, tab == i, Modifier.weight(1f)) { tab = i }
-                }
+                listOf("Compress", "Filters (22+)", "Adjust", "Crop").forEachIndexed { i, t -> Chip(t, tab == i, Modifier.weight(1f)) { tab = i } }
             }
-
             when (tab) {
                 0 -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(w.surface)
-                            .wikiBorder(w.border)
-                            .clickable { params = params.copy(compress = !params.compress) }
-                            .padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Compress & Optimize", style = sansStyle(12.sp, w.text, FontWeight.SemiBold), modifier = Modifier.weight(1f))
-                        WikiSwitch(params.compress)
+                    Row(Modifier.fillMaxWidth().background(w.surface).wikiBorder(w.border).clickable { compress = !compress }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Compress Image (Optional)", style = sansStyle(12.sp, w.text, FontWeight.SemiBold), modifier = Modifier.weight(1f)); WikiSwitch(compress)
                     }
-                    FieldLabel("Quick Presets")
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        CompressionPreset.values().forEach { preset ->
-                            val isSelected = params.compress && when (preset) {
-                                CompressionPreset.BALANCED -> params.format == "WebP" && params.quality == 82 && params.maxDimension == 1600
-                                CompressionPreset.COMPACT -> params.format == "WebP" && params.quality == 65 && params.maxDimension == 1280
-                                CompressionPreset.TINY -> params.format == "JPEG" && params.quality == 50 && params.maxDimension == 800
-                                CompressionPreset.LOSSLESS -> params.format.startsWith("PNG") && params.maxDimension == null
-                            }
-                            Chip(preset.label, isSelected, Modifier.weight(1f)) {
-                                params = params.withCompressionPreset(preset)
-                            }
+                    if (compress) {
+                        FieldLabel("Compression Format")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("WebP", "JPEG", "PNG (Lossless)").forEach { Chip(it, fmt == it, Modifier.weight(1f)) { fmt = it } } }
+                        LabeledSlider("Quality", quality, 1f..100f, "%") { quality = it }
+                        FieldLabel("Bit Depth")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("24-bit RGB", "16-bit Hi", "8-bit 256c", "1-bit Mono").forEach { Chip(it, depth == it, Modifier.weight(1f)) { depth = it } } }
+                        FieldLabel("Color Space")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("sRGB", "Display P3", "Grayscale").forEach { Chip(it, space == it, Modifier.weight(1f)) { space = it } } }
+                        Row(Modifier.fillMaxWidth().clickable { exif = !exif }, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Keep EXIF Metadata", style = sansStyle(12.sp, w.text, FontWeight.Medium), modifier = Modifier.weight(1f)); WikiSwitch(exif)
                         }
-                    }
-                    FieldLabel("Format")
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("WebP", "JPEG", "PNG (Lossless)").forEach { fmt ->
-                            Chip(fmt, params.format == fmt, Modifier.weight(1f)) {
-                                params = params.copy(compress = true, format = fmt)
-                            }
-                        }
-                    }
-                    if (!isLosslessPng) {
-                        LabeledSlider("Quality", params.quality.toFloat(), 1f..100f, "%") {
-                            params = params.copy(compress = true, quality = it.roundToInt().coerceIn(1, 100))
-                        }
-                    }
-                    FieldLabel("Max Resolution")
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        ImageEditorEngine.MAX_DIMENSIONS.forEach { (label, dim) ->
-                            Chip(label, params.maxDimension == dim, Modifier.weight(1f)) {
-                                params = params.copy(compress = true, maxDimension = dim)
-                            }
-                        }
-                    }
-                    FieldLabel("Bit Depth")
-                    listOf("24-bit RGB", "16-bit Hi", "8-bit 256c", "1-bit Mono").chunked(2).forEach { pair ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            pair.forEach { d ->
-                                Chip(d, params.bitDepth == d, Modifier.weight(1f)) {
-                                    params = params.copy(compress = true, bitDepth = d)
-                                }
-                            }
-                        }
-                    }
-                    FieldLabel("Color Space")
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("sRGB", "Display P3", "Grayscale").forEach { sp ->
-                            Chip(sp, params.colorSpace == sp, Modifier.weight(1f)) {
-                                params = params.copy(compress = true, colorSpace = sp)
-                            }
-                        }
-                    }
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { params = params.copy(stripExif = !params.stripExif) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Strip EXIF Metadata", style = sansStyle(12.sp, w.text, FontWeight.Medium), modifier = Modifier.weight(1f))
-                        WikiSwitch(params.stripExif)
                     }
                 }
                 1 -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     IMAGE_FILTERS.chunked(2).forEachIndexed { r, pair ->
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            pair.forEachIndexed { c, f ->
-                                val idx = r * 2 + c
-                                Chip(f, params.filterIndex == idx, Modifier.weight(1f)) {
-                                    params = params.copy(filterIndex = idx)
-                                }
-                            }
+                            pair.forEachIndexed { c, f -> Chip(f, filter == r * 2 + c, Modifier.weight(1f)) { filter = r * 2 + c } }
                             if (pair.size == 1) Spacer(Modifier.weight(1f))
                         }
                     }
                 }
-                2 -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    LabeledSlider("Brightness", params.brightness, 0f..200f, "%") { params = params.copy(brightness = it) }
-                    LabeledSlider("Contrast", params.contrast, 0f..200f, "%") { params = params.copy(contrast = it) }
-                    LabeledSlider("Saturation (Vibrance)", params.saturation, 0f..200f, "%") { params = params.copy(saturation = it) }
-                    LabeledSlider("Warmth / Coolness", params.warmth, -100f..100f) { params = params.copy(warmth = it) }
-                    LabeledSlider("Hue Rotate", params.hue, 0f..360f, "°") { params = params.copy(hue = it) }
-                    LabeledSlider("Opacity", params.opacity * 100f, 5f..100f, "%") {
-                        params = params.copy(opacity = (it / 100f).coerceIn(0.05f, 1f))
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        WikiButton(
-                            "Reset Tone",
-                            {
-                                params = params.copy(
-                                    brightness = 100f,
-                                    contrast = 100f,
-                                    saturation = 100f,
-                                    warmth = 0f,
-                                    hue = 0f,
-                                    opacity = initialOpacity.coerceIn(0.05f, 1f)
-                                )
-                            },
-                            height = 32.dp
-                        )
-                    }
+                2 -> Column {
+                    LabeledSlider("Brightness", bright, 0f..200f, "%") { bright = it }
+                    LabeledSlider("Contrast", contrast, 0f..200f, "%") { contrast = it }
+                    LabeledSlider("Saturation (Vibrance)", sat, 0f..200f, "%") { sat = it }
+                    LabeledSlider("Warmth / Coolness (Temperature)", warm, -100f..100f) { warm = it }
+                    LabeledSlider("Hue Rotate", hue, 0f..360f, "°") { hue = it }
+                    LabeledSlider("Opacity", opacity, 5f..100f, "%") { opacity = it }
                 }
                 else -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FieldLabel("Rotate & Flip")
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        WikiButton("Rotate -90°", { params = params.copy(rotationDegrees = (params.rotationDegrees + 270) % 360) }, Modifier.weight(1f), icon = Icons.AutoMirrored.Outlined.RotateLeft, height = 34.dp)
-                        WikiButton("Rotate +90°", { params = params.copy(rotationDegrees = (params.rotationDegrees + 90) % 360) }, Modifier.weight(1f), icon = Icons.AutoMirrored.Outlined.RotateRight, height = 34.dp)
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Chip("Flip H", params.flipH, Modifier.weight(1f)) { params = params.copy(flipH = !params.flipH) }
-                        Chip("Flip V", params.flipV, Modifier.weight(1f)) { params = params.copy(flipV = !params.flipV) }
-                    }
                     FieldLabel("Crop Aspect Ratio")
-                    ImageEditorEngine.CROP_ASPECTS.chunked(3).forEach { rowAspects ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            rowAspects.forEach { aspect ->
-                                Chip(aspect, params.cropAspect == aspect, Modifier.weight(1f)) {
-                                    params = params.copy(cropAspect = aspect, panX = 0f, panY = 0f)
-                                }
-                            }
-                        }
-                    }
-                    LabeledSlider("Zoom", params.zoom * 100f, 100f..400f, "%") {
-                        val nextZoom = (it / 100f).coerceIn(1f, 4f)
-                        params = params.copy(zoom = nextZoom)
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        WikiButton(
-                            "Reset Crop",
-                            {
-                                params = params.copy(
-                                    rotationDegrees = 0,
-                                    flipH = false,
-                                    flipV = false,
-                                    cropAspect = "Free",
-                                    zoom = 1f,
-                                    panX = 0f,
-                                    panY = 0f
-                                )
-                            },
-                            height = 32.dp
-                        )
-                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("Free", "1:1", "4:3", "16:9").forEach { Chip(it, aspect == it, Modifier.weight(1f)) { aspect = it } } }
+                    LabeledSlider("Zoom", zoom, 100f..400f, "%") { zoom = it }
                 }
             }
-
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (hasChanges && !isApplying) {
-                    WikiButton(
-                        "Reset",
-                        { params = ImageEditParams(opacity = initialOpacity.coerceIn(0.05f, 1f)) },
-                        height = 36.dp
-                    )
-                }
-                Spacer(Modifier.weight(1f))
-                WikiButton("Cancel", onClose, enabled = !isApplying, height = 36.dp)
-                WikiButton(
-                    text = if (isApplying) "Applying..." else "Apply",
-                    onClick = {
-                        if (isApplying) return@WikiButton
-                        val src = sourceBitmap
-                        val needsReencode = params.hasPixelOrEncodingChanges() && src != null && !src.isRecycled && onApplyEdited != null
-                        if (!needsReencode) {
-                            onApplyOpacity?.invoke(params.opacity.coerceIn(0.05f, 1f))
-                            onApply()
-                            onClose()
-                        } else {
-                            isApplying = true
-                            scope.launch {
-                                try {
-                                    val resultPair = withContext(Dispatchers.Default) {
-                                        val processed = ImageEditorEngine.processBitmapForExport(src!!, params)
-                                        try {
-                                            val encoded = ImageEditorEngine.encodeBitmap(processed, params)
-                                            val previewImg = processed.asImageBitmap()
-                                            encoded to previewImg
-                                        } finally {
-                                            // Keep processed alive as ImageBitmap wrapper until cache uses or replaces it
-                                        }
-                                    }
-                                    onApplyEdited?.invoke(resultPair.first, resultPair.second)
-                                    onApply()
-                                    onClose()
-                                } finally {
-                                    isApplying = false
-                                }
-                            }
-                        }
-                    },
-                    enabled = !isApplying,
-                    kind = BtnKind.PRIMARY,
-                    icon = Icons.Outlined.Check,
-                    height = 36.dp
-                )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                WikiButton("Cancel", onClose, height = 36.dp)
+                WikiButton("Apply", { onApplyOpacity?.invoke((opacity / 100f).coerceIn(0.05f, 1f)); onApply(); onClose() }, kind = BtnKind.PRIMARY, icon = Icons.Outlined.Check, height = 36.dp)
             }
         }
     }
